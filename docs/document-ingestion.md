@@ -18,7 +18,9 @@ Vision 是 best-effort transcription，不是逐字無損 OCR。包含 Vision Ev
 `needs_review`，並帶有 `VISION_DERIVED_EVIDENCE`。每份 Evidence 保留原頁與區域，可開啟原 PDF 回查。
 圖解的箭頭／空間關係不因文字轉錄成功就視為已被理解；無法辨識的文字不得合理化補寫。
 
-服務不可用、輸出截斷或回應格式錯誤會明確失敗；沒有其他 OCR/model fallback。
+Vision 服務不可用、輸出截斷或回應格式錯誤會明確失敗；沒有其他 OCR/model fallback。
+Semantic 輸出截斷時，只拆分該批 Evidence 後依序重試，不重新辨識圖片；單筆 Evidence
+仍截斷則整份處理失敗，不發布未完成地圖。詳見[語意批次處理](architecture.md)。
 `ocr_calls` 是沿用的公開統計欄位，代表本次圖片區域轉錄請求次數，一頁可以有多次請求。
 
 現有 JSON 儲存欄位保存來源與 runtime binding，無須新增資料表或 migration。

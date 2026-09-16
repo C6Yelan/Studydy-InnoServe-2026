@@ -4,6 +4,7 @@ from contextlib import contextmanager, ExitStack
 from copy import deepcopy
 from datetime import UTC, datetime
 import fcntl
+import logging
 import os
 from pathlib import Path
 import re
@@ -300,12 +301,8 @@ def analyze_material(
                 context, state=state,
                 fits=lambda request: material_request_fits(http, lock, request),
             ))
-            while True:
-                check_cancel()
-                try:
-                    bundle = next(bundles)
-                except StopIteration:
-                    break
+            def infer_bundle(bundle: dict[str, Any], depth: int = 0) -> None:
+                nonlocal semantic_calls
                 request_document = semantic_request(context, bundle, state)
                 last_error: Exception | None = None
                 for _attempt in range(lock["material_semantics"]["retry_attempts"]):
@@ -333,14 +330,56 @@ def analyze_material(
                         state.rejected_claims = candidate_state.rejected_claims
                         state.rejected_relations = candidate_state.rejected_relations
                         state.literal_repairs = candidate_state.literal_repairs
+                        logging.getLogger(__name__).info(
+                            "Semantic bundle complete: evidence_count=%d page_start=%d page_end=%d "
+                            "split_depth=%d attempt=%d semantic_calls=%d",
+                            len(bundle["evidence"]), bundle["evidence"][0]["page"],
+                            bundle["evidence"][-1]["page"], depth, _attempt + 1, semantic_calls,
+                        )
                         last_error = None
                         break
                     except SemanticServiceError as error:
+                        if error.reason_code == "SEMANTIC_OUTPUT_TRUNCATED":
+                            evidence = bundle["evidence"]
+                            logging.getLogger(__name__).warning(
+                                "Semantic truncation: evidence_count=%d page_start=%d page_end=%d "
+                                "split_depth=%d attempt=%d semantic_calls=%d max_tokens=%d",
+                                len(evidence), evidence[0]["page"], evidence[-1]["page"],
+                                depth, _attempt + 1, semantic_calls, lock["material_semantics"]["max_tokens"],
+                            )
+                            if len(evidence) == 1:
+                                raise MaterialAnalysisError("SEMANTIC_OUTPUT_TRUNCATED") from None
+                            middle = len(evidence) // 2
+                            logging.getLogger(__name__).warning(
+                                "Semantic split: split_depth=%d child_evidence_counts=%d,%d",
+                                depth, middle, len(evidence) - middle,
+                            )
+                            # Strictly smaller contiguous children bound depth by ceil(log2(n)).
+                            # Rebuild each request after the preceding child updates the catalog.
+                            for items in (evidence[:middle], evidence[middle:]):
+                                ids = {item["evidence_id"] for item in items}
+                                child = {
+                                    "evidence": items,
+                                    "sections": [
+                                        {**section, "evidence_ids": [ref for ref in section["evidence_ids"] if ref in ids]}
+                                        for section in bundle["sections"]
+                                        if any(ref in ids for ref in section["evidence_ids"])
+                                    ],
+                                }
+                                infer_bundle(child, depth + 1)
+                            return
                         last_error = error
                     except ValueError as error:
                         last_error = error
                 if last_error is not None:
                     raise MaterialAnalysisError(_reason(last_error)) from None
+            while True:
+                check_cancel()
+                try:
+                    bundle = next(bundles)
+                except StopIteration:
+                    break
+                infer_bundle(bundle)
                 report("semantics", bundle["evidence"][-1]["page"], len(page_numbers))
         finally:
             if owned_client:

@@ -873,3 +873,40 @@ def test_direct_middle_start_with_advisory_can_assess_and_resume_without_applyin
     restored_progress = derive_learner_progress(learner, study.study_session_id, dsn=dsn)
     assert restored_progress.concept_states == saved.concept_states
     assert read_answer_events(learner, study.study_session_id, dsn=dsn) == events
+
+
+def test_successful_split_child_then_truncated_leaf_never_publishes(clean_database_dsn, migrations_dir, tmp_path, monkeypatch):
+    """Exercise the real worker transaction boundary with a partially accumulated SemanticState."""
+    from sqlalchemy import select, func
+    from runtime.storage.tables import KnowledgeStructure, database_session
+    from runtime.semantic_service import SemanticServiceError
+    import pdf_evidence.material_pipeline as pipeline
+    from test_material_pipeline_v1 import Client as TokenizerClient, _all_claims, _rows, _pdf as make_pdf
+    run_migrations(clean_database_dsn, migrations_dir=migrations_dir)
+    root = tmp_path / 'artifacts'; root.mkdir(mode=0o700)
+    monkeypatch.setenv('STUDYDY_ARTIFACT_ROOT', str(root))
+    learner = register_account('split@example.com', 'Synthetic test password 42', dsn=clean_database_dsn)
+    path = tmp_path / 'source.pdf'; make_pdf(path, 4)
+    source = publish_idempotent_source_pdf(learner.learner_id, io.BytesIO(path.read_bytes()), 'split-upload', dsn=clean_database_dsn)
+    settings = _settings(tmp_path)
+    run = create_material_processing_run(learner.learner_id, source.material_id, source.artifact_id, 'split-run', settings, dsn=clean_database_dsn)
+    claim = claim_next_material_processing_run(dsn=clean_database_dsn)
+    succeeded = []
+    def semantic(_client, **kwargs):
+        rows = _rows(kwargs['request'])
+        if any(row[1] == 4 for row in rows):
+            raise SemanticServiceError('SEMANTIC_OUTPUT_TRUNCATED')
+        succeeded.extend(rows)
+        return _all_claims(kwargs['request'])
+    def analyze(request, config, **kwargs):
+        return pipeline.analyze_material(request, config, client=TokenizerClient(), semantic_call=semantic, **kwargs)
+    monkeypatch.setattr(processing, 'runtime_preflight', runtime_binding)
+    monkeypatch.setattr(processing, 'analyze_material', analyze)
+    result = processing.execute_claimed_material_processing_run(claim, settings, dsn=clean_database_dsn)
+    assert succeeded
+    assert result.status == 'failed'
+    assert result.error_code == 'SEMANTIC_OUTPUT_TRUNCATED'
+    assert result.output_binding is None
+    with database_session(clean_database_dsn) as db:
+        assert db.scalar(select(func.count()).select_from(KnowledgeStructure)) == 0
+    assert read_material_processing_run(learner.learner_id, run.run_id, dsn=clean_database_dsn).status == 'failed'

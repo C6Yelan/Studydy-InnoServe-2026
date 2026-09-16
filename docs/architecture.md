@@ -42,8 +42,13 @@ Bundles are packed using the resident tokenizer with the actual prompt and curre
 reserving 8192 output tokens within the unchanged 32768-token context. New Evidence per bundle
 is bounded to 1536 input tokens without the existing Concept catalog, so longer documents make
 incremental progress without forcing their full semantic output into one response. An indivisible
-Evidence block may exceed this soft limit if the full request still fits the model context. A truncated response fails;
-it does not count as a successful material or trigger additional split calls.
+Evidence block may exceed this soft limit if the full request still fits the model context.
+Only `SEMANTIC_OUTPUT_TRUNCATED` splits its failed bundle into two contiguous halves by Evidence
+count, processing the left child before the right with the updated Concept catalog. Children
+can split again, but a single Evidence that still truncates fails explicitly. Evidence text and
+order stay unchanged; extraction is not repeated. Other errors retain their existing retries.
+Each successful response updates candidate state; publication remains atomic for the whole material.
+Normal bundle sizing, prompts, sampling and output budgets remain fixed.
 Material generation explicitly pins the existing thinking-enabled template and sampling settings in
 the runtime lock; packing and inference use the same template options. Relation instructions retain
 supported edges while distinguishing necessary dependencies, concrete uses, and the entities being

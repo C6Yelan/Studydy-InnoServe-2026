@@ -240,7 +240,8 @@ def request_semantics(
             raise SemanticServiceError("SEMANTIC_SERVICE_CONFIG_INVALID")
         messages = _messages(prompt, request)
         generation = deepcopy(task_lock[prefix + "generation"])
-        if _token_count(client, service, messages, generation.get("chat_template_kwargs")) + max_tokens > service["max_model_len"]:
+        input_tokens = _token_count(client, service, messages, generation.get("chat_template_kwargs"))
+        if input_tokens + max_tokens > service["max_model_len"]:
             raise SemanticServiceError("SEMANTIC_INPUT_TOO_LARGE")
         response = client.post(
             f"{service['base_url']}{CHAT_PATH}",
@@ -281,6 +282,18 @@ def request_semantics(
         )
         choice = api_body["choices"][0]
         if choice.get("finish_reason") != "stop":
+            # Log only bounded enum/numeric diagnostics, never response text or prompts.
+            finish = choice.get("finish_reason")
+            usage = api_body.get("usage")
+            usage = usage if isinstance(usage, dict) else {}
+            logging.getLogger(__name__).warning(
+                "Semantic incomplete: task=%s input_tokens=%d max_tokens=%d finish_reason=%s "
+                "prompt_tokens=%s completion_tokens=%s",
+                task, input_tokens, max_tokens,
+                finish if finish in ("length", "content_filter", None) else "other",
+                usage.get("prompt_tokens") if type(usage.get("prompt_tokens")) is int else None,
+                usage.get("completion_tokens") if type(usage.get("completion_tokens")) is int else None,
+            )
             raise SemanticServiceError("SEMANTIC_OUTPUT_TRUNCATED")
         content = choice["message"]["content"]
         result = json.loads(

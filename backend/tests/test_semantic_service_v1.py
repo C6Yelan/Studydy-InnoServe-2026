@@ -212,3 +212,21 @@ def test_qualified_assessment_wire_keeps_schema_and_reasoning_separate(task, bud
         }}]})
     with httpx.Client(transport=httpx.MockTransport(respond)) as client:
         assert request_semantics(client, runtime_lock=_lock(), task=task, request={}, response_schema=schema) == {"ok": True}
+
+
+def test_truncation_diagnostics_record_tokens_without_source_or_response_text(caplog):
+    def respond(request):
+        if request.url.path == '/tokenize':
+            return httpx.Response(200, json={'count': 1400, 'max_model_len': 32768})
+        return httpx.Response(200, json={
+            'choices': [{'finish_reason': 'length', 'message': {'content': 'PRIVATE_RESPONSE_TEXT'}}],
+            'usage': {'prompt_tokens': 1400, 'completion_tokens': 8192},
+        })
+    with httpx.Client(transport=httpx.MockTransport(respond)) as client:
+        with pytest.raises(SemanticServiceError, match='SEMANTIC_OUTPUT_TRUNCATED'):
+            request_semantics(client, runtime_lock=_lock(), task='material_semantics',
+                              request={'private': 'PRIVATE_SOURCE_TEXT'}, response_schema={})
+    assert 'input_tokens=1400 max_tokens=8192 finish_reason=length' in caplog.text
+    assert 'prompt_tokens=1400 completion_tokens=8192' in caplog.text
+    assert 'PRIVATE_RESPONSE_TEXT' not in caplog.text
+    assert 'PRIVATE_SOURCE_TEXT' not in caplog.text
