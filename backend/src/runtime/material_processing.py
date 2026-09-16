@@ -1,0 +1,479 @@
+from __future__ import annotations
+
+from copy import deepcopy
+from dataclasses import dataclass, field
+from datetime import UTC, datetime
+from hashlib import sha256
+import json
+import os
+from pathlib import Path
+import re
+import tempfile
+from typing import Any
+from uuid import UUID, uuid4
+
+from sqlalchemy import case, func, select, update
+
+from pdf_evidence.material_pipeline import MaterialAnalysisError, analyze_material, validate_runtime_lock
+from pdf_evidence.ocr_page_evidence import canonical_sha256
+from runtime.semantic_service import SemanticServiceError, preflight_semantic_service
+
+from .storage.artifacts import open_verified_source_pdf
+from .storage.knowledge_structures import KnowledgeStructureStoreError, publish_knowledge_structure, runtime_binding_is_valid
+from .storage.tables import Learner, Material, MaterialProcessingRun as RunRow, database_session
+
+
+_CONFIG_KEYS = {"private_runtime_root", "runtime_lock"}
+_RUNTIME_COMPONENTS = {"layout", "runtime_lock", "semantic_service"}
+_RUNTIME_REASONS = {
+    "LOCAL_RUNTIME_MISSING", "LOCAL_RUNTIME_UNSAFE_TARGET",
+    "LOCAL_RUNTIME_SETTINGS_MISMATCH", "LOCAL_RUNTIME_LOCK_MISMATCH", "LOCAL_RUNTIME_WRITE_FAILED",
+}
+
+
+class MaterialProcessingError(RuntimeError):
+    def __init__(self, message: str, *, component: str | None = None, reason: str | None = None) -> None:
+        super().__init__(message)
+        self.component = component if component in _RUNTIME_COMPONENTS else None
+        self.reason = reason if reason in _RUNTIME_REASONS else None
+
+
+class MaterialProcessingCancelled(RuntimeError):
+    """此 run 已在安全 checkpoint 完成取消，正常離開 worker。"""
+
+
+def _runtime_error(component: str, reason: str) -> MaterialProcessingError:
+    return MaterialProcessingError("MATERIAL_CONFIGURATION_INVALID", component=component, reason=reason)
+
+
+@dataclass(frozen=True)
+class MaterialProcessingRun:
+    run_id: UUID
+    learner_id: UUID
+    material_id: UUID
+    source_artifact_id: UUID
+    runtime_binding: dict[str, Any] = field(repr=False)
+    status: str
+    progress_stage: str
+    completed_pages: int
+    total_pages: int | None
+    error_code: str | None
+    output_binding: dict[str, Any] | None = field(repr=False)
+    created_at: datetime
+    updated_at: datetime
+    completed_at: datetime | None
+    cancel_requested_at: datetime | None
+
+
+@dataclass(frozen=True)
+class ClaimedMaterialProcessingRun:
+    run: MaterialProcessingRun = field(repr=False)
+
+
+def _row(row: RunRow) -> MaterialProcessingRun:
+    runtime = row.runtime_binding
+    if not runtime_binding_is_valid(runtime):
+        raise MaterialProcessingError("MATERIAL_RUN_INVALID")
+    output = row.output_binding
+    if row.status in {"pending", "running"}:
+        valid_lifecycle = (
+            output is None and row.error_code is None and row.completed_at is None
+            and row.progress_stage != "completed"
+            and (row.status != "pending" or (row.progress_stage == "queued" and row.cancel_requested_at is None))
+            and (row.cancel_requested_at is None or row.progress_stage in {"queued", "evidence", "semantics"})
+        )
+    elif row.status == "cancelled":
+        valid_lifecycle = (
+            output is None and row.error_code is None and row.completed_at is not None
+            and row.cancel_requested_at is not None and row.progress_stage != "completed"
+        )
+    elif row.status == "failed":
+        valid_lifecycle = (
+            output is None
+            and isinstance(row.error_code, str)
+            and re.fullmatch(r"[A-Z][A-Z0-9_]{0,99}", row.error_code) is not None
+            and row.completed_at is not None
+            and row.progress_stage != "completed"
+            and row.cancel_requested_at is None
+        )
+    else:
+        fields = {
+            "schema", "knowledge_structure_revision", "runtime_lock_sha256",
+            "page_count", "processing", "quality", "decision", "reason_codes",
+            "ocr_calls", "semantic_calls",
+        }
+        valid_lifecycle = (
+            row.status in {"succeeded", "partial"}
+            and isinstance(output, dict)
+            and set(output) == fields
+            and output["schema"] == "material-run-output-binding/v4"
+            and re.fullmatch(
+                r"knowledge-structure:sha256:[0-9a-f]{64}",
+                output["knowledge_structure_revision"],
+            )
+            is not None
+            and output["runtime_lock_sha256"] == runtime["runtime_lock_sha256"]
+            and type(output["page_count"]) is int
+            and output["page_count"] >= 1
+            and output["processing"] == row.status
+            and output["quality"] in {"accepted", "needs_review"}
+            and output["decision"] in {"retain", "review"}
+            and isinstance(output["reason_codes"], list)
+            and output["reason_codes"] == list(dict.fromkeys(output["reason_codes"]))
+            and all(
+                isinstance(reason, str)
+                and re.fullmatch(r"[A-Z][A-Z0-9_]{0,99}", reason) is not None
+                for reason in output["reason_codes"]
+            )
+            and type(output["ocr_calls"]) is int
+            and output["ocr_calls"] >= 0
+            and type(output["semantic_calls"]) is int
+            and output["semantic_calls"] >= 1
+            and row.progress_stage == "completed"
+            and row.completed_pages == row.total_pages == output["page_count"]
+            and row.error_code is None
+            and row.completed_at is not None
+            and row.cancel_requested_at is None
+        )
+    if (
+        not valid_lifecycle
+        or row.progress_stage not in {"queued", "evidence", "semantics", "publishing", "completed"}
+        or type(row.completed_pages) is not int
+        or row.completed_pages < 0
+        or (row.total_pages is not None and (type(row.total_pages) is not int or row.total_pages < 1))
+    ):
+        raise MaterialProcessingError("MATERIAL_RUN_INVALID")
+    return MaterialProcessingRun(
+        row.run_id, row.learner_id, row.material_id, row.source_artifact_id,
+        deepcopy(row.runtime_binding), row.status, row.progress_stage,
+        row.completed_pages, row.total_pages, row.error_code,
+        deepcopy(row.output_binding), row.created_at, row.updated_at, row.completed_at, row.cancel_requested_at,
+    )
+
+
+def _digest(value: Any) -> bytes:
+    try:
+        return sha256(json.dumps(value, sort_keys=True, separators=(",", ":"), allow_nan=False).encode()).digest()
+    except (TypeError, ValueError):
+        raise MaterialProcessingError("MATERIAL_RUN_INVALID") from None
+
+
+def _key(value: str) -> bytes:
+    if not isinstance(value, str) or not 1 <= len(value.encode()) <= 256:
+        raise MaterialProcessingError("MATERIAL_RUN_INVALID")
+    return sha256(value.encode()).digest()
+
+
+def runtime_binding(local_config: Any) -> dict[str, Any]:
+    if not isinstance(local_config, dict) or set(local_config) != _CONFIG_KEYS:
+        raise _runtime_error("layout", "LOCAL_RUNTIME_SETTINGS_MISMATCH")
+    try:
+        root = Path(local_config["private_runtime_root"])
+        if not root.is_absolute() or root.is_symlink():
+            raise ValueError
+        lock = validate_runtime_lock(local_config["runtime_lock"])
+    except (IndexError, KeyError, MaterialAnalysisError, TypeError, ValueError):
+        raise _runtime_error("runtime_lock", "LOCAL_RUNTIME_LOCK_MISMATCH") from None
+    binding = {
+        "schema": "material-runtime-binding/v2",
+        "python": lock["python"],
+        "runtime_lock_sha256": canonical_sha256(lock),
+        "model_id": lock["semantic_service"]["model_id"],
+        "model_revision": lock["semantic_service"]["revision"],
+        "semantic_service": {
+            "base_url": lock["semantic_service"]["base_url"],
+            "max_model_len": lock["semantic_service"]["max_model_len"],
+            "server": deepcopy(lock["semantic_service"]["server"]),
+        },
+        "ingestion": {"policy": lock["ingestion"]["processing_policy"], "vision_model_id": lock["semantic_service"]["model_id"]},
+        "policy": "text-first-gemma-product/v1",
+    }
+    binding["runtime_binding_sha256"] = canonical_sha256(binding)
+    if not runtime_binding_is_valid(binding):
+        raise _runtime_error("runtime_lock", "LOCAL_RUNTIME_LOCK_MISMATCH")
+    return binding
+
+
+def _prepare_runtime_root(value: str) -> None:
+    path = Path(value)
+    if not path.is_absolute() or path.is_symlink():
+        raise _runtime_error("layout", "LOCAL_RUNTIME_UNSAFE_TARGET")
+    try:
+        path.mkdir(parents=True, exist_ok=True, mode=0o700)
+        if not os.access(path, os.R_OK | os.W_OK | os.X_OK):
+            raise OSError
+    except OSError:
+        raise _runtime_error("layout", "LOCAL_RUNTIME_WRITE_FAILED") from None
+
+
+def runtime_preflight(local_config: Any) -> dict[str, Any]:
+    binding = runtime_binding(local_config)
+    assert isinstance(local_config, dict)
+    try:
+        preflight_semantic_service(local_config["runtime_lock"])
+    except SemanticServiceError as error:
+        reason = "LOCAL_RUNTIME_SETTINGS_MISMATCH" if error.reason_code.endswith(("CONFIG_INVALID", "IDENTITY_MISMATCH")) else "LOCAL_RUNTIME_MISSING"
+        raise _runtime_error("semantic_service", reason) from None
+    _prepare_runtime_root(local_config["private_runtime_root"])
+    return binding
+
+
+def _source_hash(learner_id: UUID, material_id: UUID, artifact_id: UUID, *, dsn: str | None) -> str:
+    try:
+        with open_verified_source_pdf(learner_id, artifact_id, dsn=dsn) as source:
+            if source.material_id != material_id:
+                raise MaterialProcessingError("MATERIAL_RUN_INVALID")
+            return source.sha256
+    except MaterialProcessingError:
+        raise
+    except Exception:
+        raise MaterialProcessingError("MATERIAL_RUN_INVALID") from None
+
+
+def create_material_processing_run(
+    learner_id: UUID,
+    material_id: UUID,
+    source_artifact_id: UUID,
+    idempotency_key: str,
+    local_config: dict[str, Any],
+    *,
+    dsn: str | None = None,
+) -> MaterialProcessingRun:
+    if not all(isinstance(value, UUID) for value in (learner_id, material_id, source_artifact_id)):
+        raise MaterialProcessingError("MATERIAL_RUN_INVALID")
+    binding = runtime_binding(local_config)
+    source_sha256 = _source_hash(learner_id, material_id, source_artifact_id, dsn=dsn)
+    key = _key(idempotency_key)
+    fingerprint = _digest({
+        "material_id": str(material_id), "source_artifact_id": str(source_artifact_id),
+        "source_sha256": source_sha256, "runtime_binding": binding,
+    })
+    try:
+        with database_session(dsn) as session:
+            if session.scalar(select(Learner.learner_id).where(Learner.learner_id == learner_id).with_for_update()) is None:
+                raise MaterialProcessingError("MATERIAL_RUN_INVALID")
+            material = session.scalar(select(Material).where(
+                Material.material_id == material_id, Material.learner_id == learner_id,
+                Material.source_artifact_id == source_artifact_id,
+            ).with_for_update())
+            if material is None:
+                raise MaterialProcessingError("MATERIAL_RUN_NOT_FOUND")
+            if material.discard_requested_at is not None:
+                raise MaterialProcessingError("MATERIAL_NOT_DISCARDABLE")
+            existing = session.scalar(select(RunRow).where(RunRow.learner_id == learner_id, RunRow.idempotency_key_sha256 == key).with_for_update())
+            if existing is not None:
+                if bytes(existing.request_fingerprint) != fingerprint:
+                    raise MaterialProcessingError("MATERIAL_RUN_IDEMPOTENCY_CONFLICT")
+                return _row(existing)
+            now = datetime.now(UTC)
+            created = RunRow(
+                run_id=uuid4(), learner_id=learner_id, material_id=material_id,
+                source_artifact_id=source_artifact_id, idempotency_key_sha256=key,
+                request_fingerprint=fingerprint, runtime_binding=binding, status="pending",
+                progress_stage="queued", completed_pages=0, total_pages=None,
+                created_at=now, updated_at=now,
+            )
+            session.add(created)
+            session.flush()
+            return _row(created)
+    except MaterialProcessingError:
+        raise
+    except Exception:
+        raise MaterialProcessingError("MATERIAL_RUN_STORAGE_FAILED") from None
+
+
+def read_material_processing_run(learner_id: UUID, run_id: UUID, *, dsn: str | None = None) -> MaterialProcessingRun:
+    try:
+        with database_session(dsn) as session:
+            found = session.scalar(select(RunRow).where(RunRow.learner_id == learner_id, RunRow.run_id == run_id))
+        if found is None:
+            raise MaterialProcessingError("MATERIAL_RUN_NOT_FOUND")
+        return _row(found)
+    except MaterialProcessingError:
+        raise
+    except Exception:
+        raise MaterialProcessingError("MATERIAL_RUN_STORAGE_FAILED") from None
+
+
+def _request_cancellation_locked(material: Material, row: RunRow, session: Any) -> None:
+    """Caller 持有 Material → run locks；只限制新增意圖，不阻擋既有取消。"""
+    if (row.learner_id, row.material_id, row.source_artifact_id) != (material.learner_id, material.material_id, material.source_artifact_id):
+        raise MaterialProcessingError("MATERIAL_RUN_INVALID")
+    if row.cancel_requested_at is not None or row.status not in {"pending", "running"} or row.progress_stage == "publishing":
+        return
+    if material.discard_requested_at is None:
+        raise MaterialProcessingError("MATERIAL_RUN_INVALID")
+    now = session.scalar(select(func.clock_timestamp()))
+    row.cancel_requested_at = row.updated_at = now
+    if row.status == "pending":
+        row.status = "cancelled"
+        row.completed_at = now
+
+
+def request_material_processing_cancellation(learner_id: UUID, run_id: UUID, *, dsn: str | None = None) -> MaterialProcessingRun:
+    """Internal discard primitive；首次取消必須已具備 Material discard intent。"""
+    try:
+        with database_session(dsn) as session:
+            material = session.scalar(select(Material).where(
+                Material.learner_id == learner_id,
+                Material.material_id == select(RunRow.material_id).where(RunRow.learner_id == learner_id, RunRow.run_id == run_id).scalar_subquery(),
+            ).with_for_update())
+            if material is None:
+                raise MaterialProcessingError("MATERIAL_RUN_NOT_FOUND")
+            row = session.scalar(select(RunRow).where(RunRow.learner_id == learner_id, RunRow.run_id == run_id).with_for_update())
+            if row is None:
+                raise MaterialProcessingError("MATERIAL_RUN_NOT_FOUND")
+            _request_cancellation_locked(material, row, session)
+            session.flush()
+            return _row(row)
+    except MaterialProcessingError:
+        raise
+    except Exception:
+        raise MaterialProcessingError("MATERIAL_RUN_STORAGE_FAILED") from None
+
+
+def _honor_cancellation(row: RunRow, session: Any) -> bool:
+    """只在持有 row lock 的 transaction 內使用，保留最後已保存進度。"""
+    if row.status == "cancelled":
+        return True
+    if row.status == "running" and row.cancel_requested_at is not None:
+        now = session.scalar(select(func.clock_timestamp()))
+        row.status = "cancelled"
+        row.completed_at = row.updated_at = now
+        row.error_code = None
+        row.output_binding = None
+        return True
+    return False
+
+
+def _check_cancellation(run_id: UUID, *, dsn: str | None) -> None:
+    try:
+        with database_session(dsn) as session:
+            row = session.scalar(select(RunRow).where(RunRow.run_id == run_id).with_for_update())
+            if row is None:
+                raise MaterialProcessingError("MATERIAL_RUN_NOT_FOUND")
+            cancelled = _honor_cancellation(row, session)
+        # 必須先 commit terminal cancellation，再 unwind；不能讓例外 rollback 它。
+        if cancelled:
+            raise MaterialProcessingCancelled()
+    except (MaterialProcessingCancelled, MaterialProcessingError):
+        raise
+    except Exception:
+        raise MaterialProcessingError("MATERIAL_RUN_STORAGE_FAILED") from None
+
+
+def recover_interrupted_material_runs(*, dsn: str | None = None) -> int:
+    try:
+        with database_session(dsn) as session:
+            rows = session.execute(
+                update(RunRow).where(RunRow.status == "running").values(
+                    status=case((RunRow.cancel_requested_at.is_not(None), "cancelled"), else_="failed"),
+                    error_code=case((RunRow.cancel_requested_at.is_not(None), None), else_="RESTART_INTERRUPTED"),
+                    completed_at=func.statement_timestamp(), updated_at=func.statement_timestamp(),
+                ).returning(RunRow.run_id)
+            ).all()
+        return len(rows)
+    except Exception:
+        raise MaterialProcessingError("MATERIAL_RUN_STORAGE_FAILED") from None
+
+
+def claim_next_material_processing_run(*, dsn: str | None = None) -> ClaimedMaterialProcessingRun | None:
+    try:
+        with database_session(dsn) as session:
+            row = session.scalar(select(RunRow).where(RunRow.status == "pending").order_by(RunRow.created_at, RunRow.run_id).with_for_update(skip_locked=True).limit(1))
+            if row is None:
+                return None
+            row.status = "running"
+            row.updated_at = session.scalar(select(func.clock_timestamp()))
+            session.flush()
+            return ClaimedMaterialProcessingRun(_row(row))
+    except Exception:
+        raise MaterialProcessingError("MATERIAL_RUN_STORAGE_FAILED") from None
+
+
+_NEXT_STAGE = {"queued": "evidence", "evidence": "semantics", "semantics": "publishing"}
+
+
+def _record_progress(run_id: UUID, stage: str, completed: int, total: int, *, dsn: str | None) -> None:
+    if stage not in _NEXT_STAGE.values() or type(completed) is not int or type(total) is not int or not 0 <= completed <= total or total < 1:
+        raise MaterialProcessingError("MATERIAL_RUN_INVALID")
+    try:
+        with database_session(dsn) as session:
+            row = session.scalar(select(RunRow).where(RunRow.run_id == run_id).with_for_update())
+            if row is None:
+                raise MaterialProcessingError("MATERIAL_RUN_INVALID")
+            cancelled = _honor_cancellation(row, session)
+            if not cancelled:
+                if row.status != "running" or (row.total_pages is not None and row.total_pages != total):
+                    raise MaterialProcessingError("MATERIAL_RUN_INVALID")
+                if row.progress_stage == stage:
+                    if completed < row.completed_pages:
+                        raise MaterialProcessingError("MATERIAL_RUN_INVALID")
+                elif _NEXT_STAGE.get(row.progress_stage) != stage:
+                    raise MaterialProcessingError("MATERIAL_RUN_INVALID")
+                elif row.progress_stage != "queued" and row.completed_pages != total:
+                    raise MaterialProcessingError("MATERIAL_RUN_INVALID")
+                row.progress_stage, row.completed_pages, row.total_pages = stage, completed, total
+                row.updated_at = session.scalar(select(func.clock_timestamp()))
+        if cancelled:
+            raise MaterialProcessingCancelled()
+    except (MaterialProcessingCancelled, MaterialProcessingError):
+        raise
+    except Exception:
+        raise MaterialProcessingError("MATERIAL_RUN_STORAGE_FAILED") from None
+
+
+def _record_failure(run_id: UUID, reason: str, *, dsn: str | None) -> None:
+    safe = reason if isinstance(reason, str) and 1 <= len(reason) <= 100 and all(character.isupper() or character.isdigit() or character == "_" for character in reason) else "MATERIAL_ANALYSIS_FAILED"
+    try:
+        with database_session(dsn) as session:
+            row = session.scalar(select(RunRow).where(RunRow.run_id == run_id).with_for_update())
+            if row is not None and row.status == "running" and not _honor_cancellation(row, session):
+                now = session.scalar(select(func.clock_timestamp()))
+                row.status, row.error_code = "failed", safe
+                row.completed_at = row.updated_at = now
+    except Exception:
+        raise MaterialProcessingError("MATERIAL_RUN_STORAGE_FAILED") from None
+
+
+def execute_claimed_material_processing_run(
+    claim: ClaimedMaterialProcessingRun,
+    local_config: dict[str, Any],
+    *,
+    dsn: str | None = None,
+) -> MaterialProcessingRun:
+    if not isinstance(claim, ClaimedMaterialProcessingRun):
+        raise MaterialProcessingError("MATERIAL_RUN_CLAIM_INVALID")
+    run = claim.run
+    try:
+        _check_cancellation(run.run_id, dsn=dsn)
+        if runtime_preflight(local_config) != run.runtime_binding:
+            raise MaterialProcessingError("MATERIAL_CONFIGURATION_INVALID")
+        _check_cancellation(run.run_id, dsn=dsn)
+        with tempfile.TemporaryDirectory(prefix="studydy-material-") as directory:
+            source_path = Path(directory) / "source.pdf"
+            with open_verified_source_pdf(run.learner_id, run.source_artifact_id, dsn=dsn) as source:
+                if source.material_id != run.material_id:
+                    raise MaterialProcessingError("MATERIAL_RUN_INVALID")
+                with source_path.open("xb") as destination:
+                    while chunk := source.file.read(1024 * 1024):
+                        destination.write(chunk)
+                source_sha256 = source.sha256
+            structure = analyze_material(
+                {"media_type": "application/pdf", "source_path": str(source_path), "expected_source_sha256": source_sha256},
+                deepcopy(local_config),
+                run_id=str(run.run_id),
+                progress_callback=lambda stage, completed, total: _record_progress(run.run_id, stage, completed, total, dsn=dsn),
+                cancellation_check=lambda: _check_cancellation(run.run_id, dsn=dsn),
+            )
+        if structure["status"]["processing"] == "failed":
+            raise MaterialProcessingError("NO_CANONICAL_CONCEPT")
+        _record_progress(run.run_id, "publishing", structure["page_count"], structure["page_count"], dsn=dsn)
+        publish_knowledge_structure(run.learner_id, run.material_id, run.run_id, structure, dsn=dsn)
+    except MaterialProcessingCancelled:
+        pass
+    except (KnowledgeStructureStoreError, MaterialAnalysisError, MaterialProcessingError) as error:
+        _record_failure(run.run_id, getattr(error, "reason_code", None) or str(error), dsn=dsn)
+    except Exception:
+        _record_failure(run.run_id, "MATERIAL_ANALYSIS_FAILED", dsn=dsn)
+    return read_material_processing_run(run.learner_id, run.run_id, dsn=dsn)

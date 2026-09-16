@@ -1,0 +1,48 @@
+# Local configuration and secrets
+.env
+.env.*
+!.env.example
+*.key
+*.pem
+*.p12
+*.token
+
+# Python
+.venv/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.ruff_cache/
+
+# Node
+node_modules/
+dist/
+/frontend/.playwright-browsers/
+/frontend/playwright-report/
+/frontend/test-results/
+
+# Local Codex workflow
+AGENTS.md
+.codex/
+docs_local
+/fix.md
+.role.md
+/.studydy-runtime/
+
+# Local generated knowledge map data
+/public/fixtures/*.json
+/frontend/public/fixtures/*.json
+/frontend/public/local-fixtures/*.json
+
+# Local generated knowledge map data
+/backend/artifacts/
+
+# Local OS/editor files
+.DS_Store
+.vscode/
+.idea/
+
+# 本機環境與持久化競賽資料
+/backend/.venv
+/frontend/node_modules
+/.studydy-product/

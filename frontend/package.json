@@ -1,0 +1,27 @@
+{
+  "name": "studydy-knowledge-map",
+  "private": true,
+  "version": "0.1.0",
+  "type": "module",
+  "scripts": {
+    "dev": "vite",
+    "build": "tsc -b && vite build",
+    "e2e:install": "playwright install chromium",
+    "test": "node --test src/api/client.test.mjs src/app/routes.test.mjs src/features/material-flow/material-flow.test.mjs src/features/knowledge-map/knowledge-map.test.mjs src/ui/claim-text.test.mjs",
+    "typecheck": "tsc -b --pretty false",
+    "preview": "vite preview"
+  },
+  "dependencies": {
+    "@xyflow/react": "12.11.5",
+    "react": "19.2.8",
+    "react-dom": "19.2.8"
+  },
+  "devDependencies": {
+    "@playwright/test": "1.62.1",
+    "@types/react": "19.2.18",
+    "@types/react-dom": "19.2.4",
+    "@vitejs/plugin-react": "6.0.5",
+    "typescript": "7.0.2",
+    "vite": "8.2.1"
+  }
+}
