@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { materialProgressStageLabel, materialCurrentStagePercent, materialOverallProgressPercent, materialRunHasUsableMap, maximumPdfBytes, validatePdfFile, validatePdfSelection } from "./material-flow.ts";
+import { materialProgressStageLabel, materialCurrentStagePercent, materialOverallProgressPercent, materialRunHasUsableMap, maximumPdfBytes, validateSourceFile } from "./material-flow.ts";
 
 test("final material stages and usable binding are direct", () => {
   assert.equal(materialProgressStageLabel("evidence"), "整理頁面與教材來源");
@@ -10,22 +10,16 @@ test("final material stages and usable binding are direct", () => {
   assert.equal(materialRunHasUsableMap({ output_binding: null }), false);
 });
 
-test("upload remains PDF-only and bounded", () => {
-  assert.equal(validatePdfFile({ type: "application/pdf", size: 12 }), null);
-  assert.match(validatePdfFile({ type: "text/plain", size: 12 }), /PDF/);
-});
-
-
-test("PDF selection preserves the one-file, non-empty, 100 MiB boundary", () => {
-  assert.equal(validatePdfFile(null), "請先選擇 PDF 教材。");
-  assert.equal(validatePdfSelection(null).message, "請先選擇 PDF 教材。");
-  assert.equal(validatePdfSelection([]).message, "請先選擇 PDF 教材。");
-  const valid = { type: "application/pdf", size: maximumPdfBytes };
-  assert.deepEqual(validatePdfSelection([valid]), { file: valid, message: null });
-  assert.equal(validatePdfFile({ ...valid, size: 0 }), "PDF 不可為空白檔案。");
-  assert.equal(validatePdfFile({ ...valid, size: maximumPdfBytes + 1 }), "PDF 不可超過 100 MiB。");
-  assert.match(validatePdfSelection([{ type: "text/plain", size: 20 }]).message, /不是可用的 PDF/);
-  assert.deepEqual(validatePdfSelection([valid, valid]), { file: null, message: "一次只能處理一份 PDF 教材。" });
+test("each source follows its advertised format and individual size limit", () => {
+  const formats = [{ extension: ".pdf", media_type: "application/pdf", max_bytes: maximumPdfBytes },
+    { extension: ".txt", media_type: "text/plain", max_bytes: maximumPdfBytes }];
+  const valid = { name: "教材.PDF", type: "application/pdf", size: maximumPdfBytes };
+  assert.equal(validateSourceFile(valid, formats), null);
+  assert.equal(validateSourceFile({ name: "notes.txt", type: "", size: 12 }, formats), null);
+  assert.match(validateSourceFile({ ...valid, type: "text/plain" }, formats), /類型不一致/);
+  assert.match(validateSourceFile({ ...valid, name: "file.exe" }, formats), /不支援/);
+  assert.match(validateSourceFile({ ...valid, size: 0 }, formats), /空白/);
+  assert.match(validateSourceFile({ ...valid, size: maximumPdfBytes + 1 }, formats), /100 MiB/);
 });
 
 
@@ -87,4 +81,28 @@ test("cancelled is never projected as successful 100 percent completion", () => 
     assert.equal(materialCurrentStagePercent(processing(stage, 45, 45, "cancelled")), null);
     assert.equal(materialOverallProgressPercent(processing(stage, 45, 45, "cancelled")), null);
   }
+});
+
+test("delete warning describes existing learner content, independently of active processing", async () => {
+  const { materialDeleteCopy } = await import("./material-delete-copy.ts");
+  const initial = { available_structures: [], study_sessions: [], latest_attempt: null };
+  const sources = [
+    { status: "ready", media_type: "application/pdf", normalized_artifact_id: "pdf" },
+    { status: "failed", media_type: "text/plain", normalized_artifact_id: null },
+  ];
+  const plain = materialDeleteCopy(initial, sources);
+  assert.equal(plain.scope, "將刪除目前已上傳的 2 份教材。此操作無法復原。");
+  assert.doesNotMatch(plain.scope, /知識地圖|學習紀錄|題目|作答|轉換/);
+  sources.push({ status: "ready", media_type: "text/plain", normalized_artifact_id: "converted" });
+  assert.match(materialDeleteCopy(initial, sources).scope, /3 份教材，以及已產生的轉換內容/);
+  const map = { ...initial, available_structures: [{}] };
+  assert.equal(materialDeleteCopy(map).scope, "將刪除這份教材及已建立的知識地圖。此操作無法復原。");
+  const history = { ...map, study_sessions: [{ status: "completed" }] };
+  assert.match(materialDeleteCopy(history).scope, /知識地圖，以及相關的學習紀錄、題目與作答/);
+  for (const status of ["pending", "running"]) {
+    assert.equal(materialDeleteCopy({ ...initial, latest_attempt: { status } }).notice, "目前的教材處理會先停止，再刪除這份教材。");
+    assert.equal(materialDeleteCopy({ ...history, latest_attempt: { status } }).notice, "目前的教材更新會先停止，再刪除這份教材。");
+  }
+  assert.match(materialDeleteCopy(initial, [{ status: "running" }]).notice, /先停止/);
+  assert.doesNotMatch(materialDeleteCopy().scope, /知識地圖|學習紀錄|題目|作答/);
 });

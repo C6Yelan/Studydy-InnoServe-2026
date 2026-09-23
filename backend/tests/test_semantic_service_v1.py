@@ -12,10 +12,16 @@ def _lock() -> dict:
     return json.loads((Path(__file__).parents[2] / "local_ai/runtime-lock.json").read_text())
 
 
-def test_preflight_and_both_tasks_use_the_same_resident_service():
+def test_preflight_material_review_and_assessment_share_competition_service():
     paths: list[str] = []
+    responses = {
+        "material_semantics": {"concepts": [], "relations": []},
+        "material_review": {"groups": [], "relations": []},
+        "assessment": {"schema": "assessment-semantics-response/v2", "candidates": []},
+    }
 
     def respond(request: httpx.Request) -> httpx.Response:
+        assert request.url.host == "127.0.0.1" and request.url.port == 18001
         paths.append(request.url.path)
         if request.url.path == "/health": return httpx.Response(200)
         if request.url.path == "/version": return httpx.Response(200, json={"version": "0.28.0"})
@@ -30,16 +36,17 @@ def test_preflight_and_both_tasks_use_the_same_resident_service():
         assert body["model"] == "google/gemma-4-31B-it-qat-w4a16-ct"
         assert "reasoning_effort" not in body
         assert body["chat_template_kwargs"] == {"enable_thinking": True}
-        content = {"material_semantics": {"concepts": [], "relations": []}, "assessment": {"schema": "assessment-semantics-response/v2", "candidates": []}}[task]
+        assert body["max_tokens"] == _lock()[task]["max_tokens"]
+        content = responses[task]
         return httpx.Response(200, json={"choices": [{"finish_reason": "stop", "message": {"content": json.dumps(content)}}]})
 
     with httpx.Client(transport=httpx.MockTransport(respond)) as client:
         preflight_semantic_service(_lock(), client=client)
         schema = {"type": "object"}
-        for task in ("material_semantics", "assessment"):
+        for task in responses:
             result = request_semantics(client, runtime_lock=_lock(), task=task, request={"schema": "x"}, response_schema=schema)
-            assert ("concepts" if task == "material_semantics" else "candidates") in result
-    assert paths.count("/v1/chat/completions") == 2
+            assert result == responses[task]
+    assert paths.count("/v1/chat/completions") == 3
     assert set(paths) == {"/health", "/version", "/v1/models", "/tokenize", "/v1/chat/completions"}
 
 

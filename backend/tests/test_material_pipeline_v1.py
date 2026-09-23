@@ -62,7 +62,6 @@ def _semantic(calls: list[dict]):
 def test_eight_native_pages_use_one_unified_semantic_call_without_ocr(tmp_path, monkeypatch):
     source = tmp_path / "eight.pdf"
     _pdf(source, 8)
-    monkeypatch.setattr(pipeline, "request_vision", lambda *_args, **_kwargs: (_ for _ in ()).throw(AssertionError("native PDF must not load OCR")))
     calls: list[dict] = []
     structure = pipeline.analyze_material(
         _request(source), _settings(tmp_path), client=Client(), semantic_call=_semantic(calls)
@@ -94,16 +93,12 @@ def test_multiple_bundles_report_incremental_semantic_progress(tmp_path):
     assert completed[0] < 3 and completed[-1] == 3
 
 
-def test_vision_failure_fails_closed_before_semantics(tmp_path, monkeypatch):
+def test_no_native_text_fails_before_semantics(tmp_path):
     import pytest
-    from runtime.semantic_service import SemanticServiceError
-    source = tmp_path / "mixed.pdf"
-    _pdf(source, 2, blank_first=True)
-    def fail(*args, **kwargs):
-        raise SemanticServiceError("SEMANTIC_SERVICE_UNAVAILABLE")
-    monkeypatch.setattr(pipeline, "request_vision", fail)
+    source = tmp_path / "scan.pdf"
+    _pdf(source, 1, blank_first=True)
     calls = []
-    with pytest.raises(pipeline.MaterialAnalysisError, match="SEMANTIC_SERVICE_UNAVAILABLE"):
+    with pytest.raises(pipeline.MaterialAnalysisError, match="NO_USABLE_EVIDENCE"):
         pipeline.analyze_material(_request(source), _settings(tmp_path), client=Client(), semantic_call=_semantic(calls))
     assert calls == []
 

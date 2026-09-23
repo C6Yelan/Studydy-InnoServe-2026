@@ -7,7 +7,7 @@ import json
 import re
 from uuid import UUID, uuid4
 
-from sqlalchemy import case, select
+from sqlalchemy import select
 from sqlalchemy.dialects.postgresql import insert
 
 from runtime.learner_session import TrustedLearner
@@ -88,6 +88,11 @@ def _row(session, learner_id: UUID, study_session_id: UUID, *, lock: bool = Fals
 
 def _validate(session, row: StudySession) -> MapContext:
     context = _context(session, row.learner_id, row.material_id, row.knowledge_structure_revision)
+    _validate_context(row, context)
+    return context
+
+
+def _validate_context(row, context):
     concept_ids = {concept.concept_id for concept in context.concepts}
     claim_ids = {claim.claim_id for concept in context.concepts for claim in concept.claims}
     if (
@@ -98,7 +103,6 @@ def _validate(session, row: StudySession) -> MapContext:
         or len(row.deferred_concept_ids) != len(set(row.deferred_concept_ids))
     ):
         raise StudySessionError("STUDY_SESSION_UNAVAILABLE")
-    return context
 
 
 def _stored(row: StudySession) -> StoredStudySession:
@@ -136,19 +140,17 @@ def create_study_session(
             ))
             if initial_intent is not None and bytes(initial_intent.request_fingerprint) != fingerprint:
                 raise StudySessionError("STUDY_SESSION_IDEMPOTENCY_CONFLICT")
-            canonical = session.scalar(select(StudySession).where(
+            canonical = session.scalars(select(StudySession).where(
                 StudySession.learner_id == learner_id, StudySession.material_id == material_id,
                 StudySession.knowledge_structure_revision == knowledge_structure_revision,
-            ).order_by(
-                case((StudySession.status.in_(("active", "no_safe")), 0), else_=1),
-                StudySession.started_at.desc(), StudySession.study_session_id.desc(),
-            ).limit(1))
+            )).one_or_none()
             if canonical is not None:
                 # Later ensure intents are read-only; only the initial creation fingerprint is retained.
                 _validate(session, canonical)
                 return _stored(canonical)
             known = {concept.concept_id for concept in context.concepts}
-            selected = current_concept_id or (context.initial_learning_path[0] if context.initial_learning_path else None)
+            from .inherited_progress import preferred_focus
+            selected = current_concept_id or preferred_focus(session, learner_id, material_id, knowledge_structure_revision) or (context.initial_learning_path[0] if context.initial_learning_path else None)
             if selected not in known:
                 raise StudySessionError("STUDY_SESSION_TARGET_INVALID")
             session.execute(insert(StudySession).values(
@@ -189,6 +191,7 @@ def set_current_study_concept(learner: TrustedLearner, study_session_id: UUID, c
         with database_session(dsn) as session:
             stored = _row(session, learner_id, study_session_id, lock=True)
             context = _validate(session, stored)
+            # 焦點只決定導覽位置；已建立題組由自己的 Concept／KS／成員綁定保護。
             if stored.status not in {"active", "no_safe"} or concept_id not in {concept.concept_id for concept in context.concepts}:
                 raise StudySessionError("STUDY_SESSION_TARGET_INVALID")
             stored.current_concept_id = concept_id
@@ -208,6 +211,9 @@ def complete_study_session(learner: TrustedLearner, study_session_id: UUID, *, d
         with database_session(dsn) as session:
             stored = _row(session, learner_id, study_session_id, lock=True)
             _validate(session, stored)
+            from .assessment_sets import has_active_set
+            if has_active_set(session, study_session_id):
+                raise StudySessionError('ASSESSMENT_SET_ACTIVE')
             if stored.status != "completed":
                 stored.status = "completed"
                 stored.completed_at = datetime.now(UTC)

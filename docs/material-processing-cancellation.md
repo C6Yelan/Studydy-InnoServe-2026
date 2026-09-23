@@ -1,6 +1,6 @@
 # 取消並刪除教材
 
-Upload → Processing 是新教材的第一次分析。「取消並刪除教材」會停止不需要的分析，並刪除該份 Material、處理紀錄及原始 PDF。處理失敗本身不代表刪除授權：failed、legacy cancelled 或尚未分析的教材仍保留，由 learner 確認「刪除教材」。
+Upload → 來源確認 → Processing 是新教材的第一次分析。「取消並刪除教材」會停止不需要的分析，並刪除該份 Material、處理紀錄及原始 PDF。處理失敗本身不代表刪除授權：failed、legacy cancelled 或尚未分析的教材仍保留，由 learner 確認「刪除教材」。
 
 ## Canonical contracts
 
@@ -9,8 +9,8 @@ Upload → Processing 是新教材的第一次分析。「取消並刪除教材�
 - CookieSession、Origin required；拒絕 query、非空 body 與 client learner override，不需要 Idempotency-Key。
 - 跨 owner／已不存在為 `RESOURCE_NOT_FOUND` / 404。不保存刪除 tombstone；重複 DELETE 在 removing 期間穩定，完成後為 404。
 - 已要求刪除的教材不可 rename 或 create run（`MATERIAL_NOT_DISCARDABLE` / 409）；DB／filesystem 暫時錯誤為 `STORAGE_UNAVAILABLE` / 503。
-- Run 維持 `material-processing-run/v5`，library/item 維持 v2，output binding 維持 v4。
-- 舊 public cancel-only endpoint 與 frontend client 已刪除；run cancellation 是 internal primitive，不再有 learner cancel-but-keep 行為。
+- Run 使用 `material-processing-run/v6`，library 使用 v2、item 使用 v3，output binding 維持 v4。
+- 初次分析仍可取消並刪除整份教材。追加來源的 `POST /v2/material-processing-runs/{run_id}/cancel` 只取消該次更新，保留已發布版本；與整份教材 DELETE 分開。
 
 ## Eligibility 與持久化意圖
 
@@ -34,7 +34,7 @@ Discard 先鎖 Material，再依 run ID 鎖住全部 runs，等待全部 active 
 - discard 先：Material intent 和所有 cancellation requests 同一 transaction commit；publishing checkpoint honor cancellation，不發布新 structure。
 - publishing 先：保存 discard intent 並回 removing，允許發布安全完成，再清除該份教材。
 - 已接受取消先於 failure：terminal 是 cancelled、error_code null。Failure 已先完成則不改寫其結果；明確 discard 仍可清除該份教材。
-- Runtime work 前、preflight 後、evidence page、semantic bundle、下一個 bundle/retry、publishing 前維持 cooperative checkpoints。單一已在執行的 Gemma Vision／Semantic request 允許先完成。
+- Runtime work 前、preflight 後、evidence page、semantic bundle、下一個 bundle/retry、publishing 前維持 cooperative checkpoints。單一已在執行的 Gemma Semantic request 允許先完成。
 - Cancellation terminal transaction 先 commit、pipeline 正常 unwind；worker 再呼叫統一 purge authority。多個 run 必須全部停止才可 purge。
 - Startup 先恢復 interrupted runs，再 reconciliation/purge。Worker 完成工作與正常輪詢時重試尚未完成的 discard；沒有另一張 queue 或 scheduler。
 
@@ -44,7 +44,7 @@ Discard 先鎖 Material，再依 run ID 鎖住全部 runs，等待全部 active 
 
 1. 鎖 Material、全部 runs、KnowledgeStructures、StudySessions 與 source Artifact，重新確認沒有 active run。
 2. 原子 rename `objects/<artifact_id.hex>` 到同一 artifact root 的私有 `.trash/`，同步目錄。
-3. 同一 DB transaction 明確依序刪除 AnswerEvents → Assessments → StudySessions → KnowledgeStructures → runs → Artifact → Material；不增加 cascade。
+3. 同一 DB transaction 依關聯順序清除題組、作答、學習、結構、run、來源集合及 artifacts；不增加 cascade。
 4. Commit 後由新 transaction 查 DB：沒有 Artifact reference 則 unlink quarantine PDF。
 5. Rollback／commit acknowledgement 遺失時，也重新查 DB 決定 restore 或 unlink，不猜測 commit 是否成功。
 6. Process crash 留下的 quarantine 在 startup/worker retry reconciliation：DB 仍引用 → restore；不再引用 → unlink。

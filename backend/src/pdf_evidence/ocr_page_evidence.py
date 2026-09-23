@@ -12,7 +12,7 @@ import pymupdf
 
 PAGE_SCHEMA = "page-evidence/v4"
 NATIVE_SCHEMA = "page-native/v3"
-PROCESSING_POLICY = "text-first-image-assisted/v1"
+PROCESSING_POLICY = "native-text-only/v1"
 NORMALIZER_POLICY = "ocr-text-nfc-line-preserving/v1"
 RENDER_DPI = 200
 PDF_POINTS_PER_INCH = 72
@@ -171,39 +171,6 @@ def _kind(ocr_type: str) -> str:
     if normalized in {"text", "paragraph", "body"}:
         return "paragraph"
     return "other"
-
-
-def _locator(normalized_bbox: Any, page: dict[str, Any]) -> tuple[list[float], list[float]]:
-    if (
-        not isinstance(normalized_bbox, list)
-        or len(normalized_bbox) != 4
-        or any(type(number) not in {int, float} or not math.isfinite(number) for number in normalized_bbox)
-        or not (
-            0 <= normalized_bbox[0] < normalized_bbox[2] <= 1000
-            and 0 <= normalized_bbox[1] < normalized_bbox[3] <= 1000
-        )
-    ):
-        raise ValueError("OCR_LOCATOR_INVALID")
-    width, height = page["render"]["width"], page["render"]["height"]
-    render_region = [
-        normalized_bbox[0] * width / 1000,
-        normalized_bbox[1] * height / 1000,
-        normalized_bbox[2] * width / 1000,
-        normalized_bbox[3] * height / 1000,
-    ]
-    visible = pymupdf.Rect(page["geometry"]["visible_points"])
-    rotated = pymupdf.Rect(
-        render_region[0] * visible.width / width,
-        render_region[1] * visible.height / height,
-        render_region[2] * visible.width / width,
-        render_region[3] * visible.height / height,
-    )
-    unrotated = rotated * pymupdf.Matrix(*page["geometry"]["derotation_matrix"])
-    boundary = pymupdf.Rect(page["geometry"]["unrotated_points"])
-    clipped = unrotated & boundary
-    if clipped.width <= 0 or clipped.height <= 0:
-        raise ValueError("OCR_LOCATOR_INVALID")
-    return render_region, _box(clipped)
 
 
 def _distance(first: list[float], second: list[float]) -> float:
@@ -388,29 +355,9 @@ def _native_text_readable(page: dict[str, Any]) -> bool:
         return False
     return True
 
-def _uncovered_image_regions(page: dict[str, Any]) -> list[list[float]]:
-    """找出占實質版面、卻幾乎沒有原生文字覆蓋的圖片；小裝飾不觸發 OCR。"""
-    boundary = pymupdf.Rect(page["geometry"]["unrotated_points"])
-    blocks = _native_text_blocks(page)
-    regions = []
-    for image in page["images"]:
-        bbox = image.get("bbox") if isinstance(image, dict) else None
-        if not isinstance(bbox, list) or len(bbox) != 4 or any(type(v) not in {int, float} or not math.isfinite(v) for v in bbox):
-            continue
-        region = pymupdf.Rect(bbox) & boundary
-        area = region.get_area()
-        if area < boundary.get_area() * 0.01:
-            continue
-        covered = sum((region & pymupdf.Rect(block["bbox"])).get_area() for block in blocks)
-        if covered < area * 0.1:
-            regions.append(_box(region))
-    return regions
-
-
 def route_page(page: dict[str, Any]) -> str:
-    """可讀文字與缺漏圖片分開判斷，標題不能替程式碼截圖通過分流。"""
-    return "native_sufficient" if _native_text_readable(page) and not _uncovered_image_regions(page) else "OCR_needed"
-
+    """競賽版只接受可讀原生文字；圖片留在原 PDF 供回查。"""
+    return "native_sufficient" if _native_text_readable(page) else "native_unavailable"
 
 
 def _native_region(
@@ -443,51 +390,13 @@ def _native_region(
     return render_region, region
 
 
-def build_page_evidence(
-    page: dict[str, Any],
-    ocr_blocks: Any,
-    *,
-    input_binding: dict[str, Any],
-    produced_at: str,
-) -> dict[str, Any]:
-    """從 Vision 區域轉錄建立同頁 Evidence，保留可靠 native blocks。"""
-    if not isinstance(ocr_blocks, list):
-        raise ValueError("OCR_OUTPUT_INVALID")
-    native_blocks = None
-    regions = _uncovered_image_regions(page) if _native_text_readable(page) else []
-    if regions:
-        native_blocks = _native_text_blocks(page)
-        selected = []
-        native_texts = {" ".join(block["text"].split()) for block in native_blocks}
-        for block in ocr_blocks:
-            if not isinstance(block, dict) or set(block) != {"type", "text", "bbox"} or not isinstance(block["text"], str):
-                raise ValueError("OCR_OUTPUT_INVALID")
-            if not isinstance(block["type"], str) or _OCR_TYPE.fullmatch(block["type"]) is None:
-                raise ValueError("OCR_OUTPUT_INVALID")
-            _, bbox = _locator(block["bbox"], page)
-            box = pymupdf.Rect(bbox)
-            if any((box & pymupdf.Rect(region)).get_area() >= box.get_area() * 0.5 for region in regions):
-                if " ".join(block["text"].split()) not in native_texts:
-                    selected.append(block)
-        ocr_blocks = selected
-    return _build_page_evidence(
-        page,
-        ocr_blocks,
-        input_binding=input_binding,
-        produced_at=produced_at,
-        route="OCR_needed",
-        source="vision",
-        native_blocks=native_blocks,
-    )
-
-
 def build_native_page_evidence(
     page: dict[str, Any],
     *,
     input_binding: dict[str, Any],
     produced_at: str,
 ) -> dict[str, Any]:
-    """原生文字足夠時直接建立 Evidence，不啟動 OCR。"""
+    """原生文字足夠時直接建立 Evidence，保留頁碼與區域。"""
 
     if route_page(page) != "native_sufficient":
         raise ValueError("NO_USABLE_EVIDENCE")
@@ -496,8 +405,6 @@ def build_native_page_evidence(
         _native_text_blocks(page),
         input_binding=input_binding,
         produced_at=produced_at,
-        route="native_sufficient",
-        source="native_text",
     )
 
 
@@ -507,19 +414,10 @@ def _build_page_evidence(
     *,
     input_binding: dict[str, Any],
     produced_at: str,
-    route: str,
-    source: str,
-    native_blocks: list[dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
-    if route not in {"native_sufficient", "OCR_needed"}:
-        raise ValueError("PAGE_ROUTE_INVALID")
-    if (route, source) not in {
-        ("native_sufficient", "native_text"),
-        ("OCR_needed", "vision"),
-    }:
-        raise ValueError("PAGE_ROUTE_INVALID")
-    if not isinstance(source_blocks, list) or (not source_blocks and not native_blocks):
-        raise ValueError("OCR_OUTPUT_INVALID")
+    route, source = "native_sufficient", "native_text"
+    if not isinstance(source_blocks, list) or not source_blocks:
+        raise ValueError("NO_USABLE_EVIDENCE")
     native_evidence = page.get("native_evidence")
     if (
         not isinstance(native_evidence, dict)
@@ -531,15 +429,7 @@ def _build_page_evidence(
         raise ValueError("OCR_LOCATOR_INVALID")
     evidence_blocks: list[dict[str, Any]] = []
     has_rejected_block = False
-    entries = [(block, source) for block in source_blocks]
-    if native_blocks is not None:
-        entries.extend((block, "native_text") for block in native_blocks)
-        def position(entry):
-            block, origin = entry
-            bbox = block["bbox"] if origin == "native_text" else _locator(block["bbox"], page)[1]
-            return (bbox[1], bbox[0])
-        entries.sort(key=position)
-    for reading_order, (block, source) in enumerate(entries):
+    for reading_order, block in enumerate(source_blocks):
         if not isinstance(block, dict) or set(block) != {"type", "text", "bbox"}:
             raise ValueError("OCR_OUTPUT_INVALID")
         ocr_type = block["type"]
@@ -549,10 +439,7 @@ def _build_page_evidence(
             raise ValueError("OCR_OUTPUT_INVALID")
         try:
             text = _normalized_text(block["text"])
-            if source == "native_text":
-                render_region, region = _native_region(block["bbox"], page)
-            else:
-                render_region, region = _locator(block["bbox"], page)
+            render_region, region = _native_region(block["bbox"], page)
         except ValueError:
             has_rejected_block = True
             continue
@@ -632,8 +519,6 @@ def _build_page_evidence(
             }
         )
     reasons = ["PAGE_CONTENT_REVIEW_REQUIRED"]
-    if native_blocks is not None and not any(block["source"] == "vision" for block in evidence_blocks):
-        reasons.append("IMAGE_TEXT_NOT_RECOVERED")
     if has_rejected_block or has_rejected_image:
         reasons.append("OCR_OUTPUT_INVALID")
     artifact = {
@@ -653,7 +538,7 @@ def _build_page_evidence(
         "processing_policy": PROCESSING_POLICY,
         "normalizer_policy": NORMALIZER_POLICY,
         "produced_at": produced_at,
-        "processing": "partial" if has_rejected_block or has_rejected_image or "IMAGE_TEXT_NOT_RECOVERED" in reasons else "succeeded",
+        "processing": "partial" if has_rejected_block or has_rejected_image else "succeeded",
         "quality": "needs_review",
         "decision": "review",
         "reason_codes": reasons,
@@ -662,32 +547,3 @@ def _build_page_evidence(
     if len(canonical_bytes(artifact)) > MAX_PAGE_ARTIFACT_BYTES:
         raise ValueError("PROTOCOL_LIMIT_EXCEEDED")
     return artifact
-
-
-def vision_regions(page: dict[str, Any]) -> list[list[float]]:
-    """只補足缺漏的圖片；沒有可靠文字層時以整頁作為來源範圍。"""
-    if _native_text_readable(page):
-        return _uncovered_image_regions(page)
-    return [page["geometry"]["unrotated_points"]]
-
-
-def render_vision_region(page: dict[str, Any], region: list[float]) -> tuple[bytes, list[float]]:
-    """裁切既有 200 DPI 渲染；locator 由 PDF 幾何計算，不要求模型猜座標。"""
-    render_region, _ = _native_region(region, page)
-    width, height = page["render"]["width"], page["render"]["height"]
-    clip = pymupdf.Rect(render_region).irect & pymupdf.IRect(0, 0, width, height)
-    if clip.is_empty:
-        raise ValueError("OCR_LOCATOR_INVALID")
-    source = pymupdf.Pixmap(page["png_bytes"])
-    cropped = pymupdf.Pixmap(pymupdf.csRGB, clip, False)
-    cropped.copy(source, clip)
-    # 圖片內若有可靠 native overlay，蓋掉該區，只讓 Vision 補缺漏。
-    if _native_text_readable(page):
-        for block in _native_text_blocks(page):
-            covered, _ = _native_region(block["bbox"], page)
-            intersection = pymupdf.Rect(covered).irect & clip
-            if not intersection.is_empty:
-                cropped.clear_with(255, intersection)
-    bbox = [clip.x0 * 1000 / width, clip.y0 * 1000 / height,
-            clip.x1 * 1000 / width, clip.y1 * 1000 / height]
-    return cropped.tobytes("png"), bbox

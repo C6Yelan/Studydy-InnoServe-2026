@@ -11,7 +11,6 @@ from knowledge_map.structure import (
 from pdf_evidence.ocr_page_evidence import (
     _native_text_blocks,
     build_native_page_evidence,
-    build_page_evidence,
     extract_page,
     route_page,
 )
@@ -67,50 +66,6 @@ def _extract(path: Path):
     source_sha256 = hashlib.sha256(path.read_bytes()).hexdigest()
     with pymupdf.open(path) as document:
         return extract_page(document, source_sha256, 1)
-
-
-def test_200dpi_rgb_page_identity_and_ocr_locator(tmp_path):
-    path = tmp_path / "public.pdf"
-    _pdf(path)
-    page = _extract(path)
-    long_ocr_type = "custom_" + "x" * 64
-    page["images"] = [
-        {"bbox": [0.0, 0.0, 1.0, 1.0], "digest": f"{ordinal:064x}"}
-        for ordinal in range(257)
-    ]
-    assert page["render"]["dpi"] == 200
-    assert page["render"]["colorspace"] == "RGB"
-    assert (page["render"]["width"], page["render"]["height"]) == (400, 600)
-    artifact = build_page_evidence(
-        page,
-        [
-            {
-                "type": long_ocr_type if ordinal == 0 else "text",
-                "text": "  first line\n    second line" if ordinal == 0 else f"Public OCR text {ordinal}",
-                "bbox": [100, 100, 900, 300],
-            }
-            for ordinal in range(65)
-        ],
-        input_binding={"fixed": True},
-        produced_at="2026-08-18T00:00:00Z",
-    )
-    block = artifact["evidence_blocks"][0]
-    assert artifact["schema"] == "page-evidence/v4"
-    assert artifact["route"] == "OCR_needed"
-    assert artifact["processing"] == "succeeded"
-    assert artifact["decision"] == "review"
-    assert block["locator"]["page"] == 1
-    assert block["render_region"] == [40.0, 60.0, 360.0, 180.0]
-    assert block["source"] == "vision"
-    assert block["ocr_type"] == long_ocr_type
-    assert block["text"] == "  first line\n    second line"
-    assert len(artifact["evidence_blocks"]) == 65
-    assert len(artifact["images"]) == 257
-    assert artifact["images"][0]["nearby_evidence_ids"] == [
-        evidence["evidence_id"] for evidence in artifact["evidence_blocks"]
-    ]
-    assert "png_bytes" not in artifact
-    assert artifact["reason_codes"] == ["PAGE_CONTENT_REVIEW_REQUIRED"]
 
 
 def test_native_text_routes_without_ocr_and_keeps_pdf_bbox_order(tmp_path):
@@ -233,19 +188,19 @@ def test_native_body_and_small_emphasis_do_not_become_headings(tmp_path):
     )
 
 
-def test_empty_and_garbled_native_text_route_to_ocr(tmp_path):
+def test_empty_and_garbled_native_text_is_unavailable(tmp_path):
     path = tmp_path / "scan.pdf"
     document = pymupdf.open()
     document.new_page(width=144, height=216)
     document.save(path)
     document.close()
-    assert route_page(_extract(path)) == "OCR_needed"
+    assert route_page(_extract(path)) == "native_unavailable"
 
     page = _extract(path)
     page["native_evidence"]["raw_text"] = {
         "blocks": [{"type": 0, "lines": [{"bbox": [1, 1, 20, 20], "spans": [{"text": "��������"}]}]}]
     }
-    assert route_page(page) == "OCR_needed"
+    assert route_page(page) == "native_unavailable"
 
 
 def test_running_metadata_is_preserved_but_not_a_claim_source(tmp_path):
@@ -317,181 +272,9 @@ def test_render_guard_rejects_geometry_before_page_content_or_pixmap_reads():
         extract_page(Document(), "0" * 64, 1)
 
 
-def test_rotated_page_locator_stays_on_same_one_based_page(tmp_path):
-    path = tmp_path / "rotated.pdf"
-    _pdf(path, rotated=True)
-    page = _extract(path)
-    artifact = build_page_evidence(
-        page,
-        [{"type": "title", "text": "Public title", "bbox": [100, 100, 900, 300]}],
-        input_binding={},
-        produced_at="x",
-    )
-    region = artifact["evidence_blocks"][0]["locator"]["region"]
-    assert artifact["page_number"] == 1
-    assert region == pytest.approx([14.4, 21.6, 43.2, 194.4])
-
-
-def test_blank_and_image_only_blocks_are_rejected_but_text_page_remains(tmp_path):
-    path = tmp_path / "public.pdf"
-    _pdf(path)
-    page = _extract(path)
-    page["images"] = [{"bbox": "invalid"}]
-    artifact = build_page_evidence(
-        page,
-        [
-            {"type": "text", "text": "Usable public text", "bbox": [10, 10, 900, 200]},
-            {"type": "text", "text": " \n ", "bbox": [10, 220, 900, 300]},
-            {"type": "image", "text": "", "bbox": [10, 320, 900, 800]},
-        ],
-        input_binding={},
-        produced_at="x",
-    )
-    assert [block["text"] for block in artifact["evidence_blocks"]] == ["Usable public text"]
-    assert artifact["processing"] == "partial"
-    assert artifact["quality"] == "needs_review"
-    assert artifact["decision"] == "review"
-    assert artifact["images"] == []
-    assert artifact["reason_codes"] == ["PAGE_CONTENT_REVIEW_REQUIRED", "OCR_OUTPUT_INVALID"]
-
-
-def test_unsafe_locator_is_rejected_without_publishing_its_evidence(tmp_path):
-    path = tmp_path / "public.pdf"
-    _pdf(path)
-    page = _extract(path)
-    artifact = build_page_evidence(
-        page,
-        [
-            {"type": "text", "text": "Usable public text", "bbox": [10, 10, 900, 200]},
-            {"type": "text", "text": "Unsafe text", "bbox": [-1, 220, 900, 300]},
-        ],
-        input_binding={},
-        produced_at="x",
-    )
-    assert [block["text"] for block in artifact["evidence_blocks"]] == ["Usable public text"]
-    assert all(block["locator"]["page"] == 1 for block in artifact["evidence_blocks"])
-    assert "OCR_OUTPUT_INVALID" in artifact["reason_codes"]
-
-
-@pytest.mark.parametrize(
-    "blocks",
-    [
-        [{"type": "text", "text": "", "bbox": [0, 0, 10, 10]}],
-        [{"type": "text", "text": "x", "bbox": [10, 0, 10, 10]}],
-        [
-            {"type": "text", "text": "", "bbox": [0, 0, 10, 10]},
-            {"type": "image", "text": "", "bbox": [10, 10, 900, 900]},
-        ],
-    ],
-)
-def test_all_unusable_blocks_fail_without_page_artifact(tmp_path, blocks):
-    path = tmp_path / "public.pdf"
-    _pdf(path)
-    page = _extract(path)
-    with pytest.raises(ValueError, match="NO_USABLE_EVIDENCE"):
-        build_page_evidence(page, blocks, input_binding={}, produced_at="x")
-
-
-def test_wrong_page_identity_and_malformed_child_block_still_fail_hard(tmp_path):
-    path = tmp_path / "public.pdf"
-    _pdf(path)
-    page = _extract(path)
-    page["page_number"] = 2
-    with pytest.raises(ValueError, match="OCR_LOCATOR_INVALID"):
-        build_page_evidence(
-            page,
-            [{"type": "text", "text": "Public", "bbox": [10, 10, 900, 200]}],
-            input_binding={},
-            produced_at="x",
-        )
-
-    page["page_number"] = 1
-    with pytest.raises(ValueError, match="OCR_OUTPUT_INVALID"):
-        build_page_evidence(
-            page,
-            [{"type": "text", "text": "Public", "bbox": [10, 10, 900, 200], "extra": True}],
-            input_binding={},
-            produced_at="x",
-        )
-    with pytest.raises(ValueError, match="OCR_OUTPUT_INVALID"):
-        build_page_evidence(
-            page,
-            [{"type": "text", "text": None, "bbox": [10, 10, 900, 200]}],
-            input_binding={},
-            produced_at="x",
-        )
-
-
-def test_native_title_does_not_hide_uncovered_image_and_ocr_keeps_native(tmp_path):
-    path = tmp_path / "mixed.pdf"
-    _pdf(path)
-    page = _extract(path)
-    page["images"] = [{"bbox": [20, 65, 130, 190]}]
-    assert route_page(page) == "OCR_needed"
-    artifact = build_page_evidence(
-        page,
-        [
-            {"type": "text", "text": "Public native text", "bbox": [100, 50, 950, 180]},
-            {"type": "code", "text": "if (left > right) swap(left, right);", "bbox": [150, 310, 900, 850]},
-        ],
-        input_binding={}, produced_at="x",
-    )
-    blocks = artifact["evidence_blocks"]
-    assert [(b["source"], b["text"]) for b in blocks] == [
-        ("native_text", "Public native text"),
-        ("vision", "if (left > right) swap(left, right);"),
-    ]
-    context = build_document_context([artifact], page_count=1)
-    assert len(context["evidence"]) == 2
-    assert all(b["locator"]["page"] == 1 for b in blocks)
-
-
 def test_small_logo_does_not_trigger_ocr(tmp_path):
     path = tmp_path / "logo.pdf"
     _pdf(path)
     page = _extract(path)
     page["images"] = [{"bbox": [130, 0, 140, 10]}]
     assert route_page(page) == "native_sufficient"
-
-
-def test_wrapped_native_unit_and_image_ocr_both_reach_whole_evidence_claim(tmp_path):
-    path = tmp_path / "wrapped-with-image.pdf"
-    with pymupdf.open() as document:
-        pdf_page = document.new_page(width=300, height=300)
-        pdf_page.insert_text((20, 35), "The buffer holds", fontsize=10)
-        pdf_page.insert_text((20, 48), "four values.", fontsize=10)
-        document.save(path)
-    page = _extract(path)
-    page["images"] = [{"bbox": [20, 90, 250, 250]}]
-    assert route_page(page) == "OCR_needed"
-    artifact = build_page_evidence(
-        page,
-        [{"type": "code", "text": "int values[4];", "bbox": [100, 330, 800, 730]}],
-        input_binding={}, produced_at="x",
-    )
-    texts = ["The buffer holds\nfour values.", "int values[4];"]
-    assert [(block["source"], block["text"]) for block in artifact["evidence_blocks"]] == [
-        ("native_text", texts[0]), ("vision", texts[1]),
-    ]
-    context = build_document_context([artifact], page_count=1)
-    state = SemanticState()
-    apply_semantic_response(
-        {"concepts": [{"k": "buffer", "l": "Buffer", "a": [],
-                       "c": [{"m": None, "s": [0, 1]}]}], "relations": []},
-        context=context,
-        bundle={"sections": context["sections"], "evidence": context["evidence"]},
-        state=state,
-    )
-    claim = state.concepts["buffer"]["claims"][0]
-    assert [span["quote"] for span in claim["source_spans"]] == texts
-
-
-def test_unrecovered_image_retains_native_with_review_status(tmp_path):
-    path = tmp_path / "missing-image-text.pdf"
-    _pdf(path)
-    page = _extract(path)
-    page["images"] = [{"bbox": [20, 65, 130, 190]}]
-    artifact = build_page_evidence(page, [], input_binding={}, produced_at="x")
-    assert artifact["processing"] == "partial"
-    assert "IMAGE_TEXT_NOT_RECOVERED" in artifact["reason_codes"]
-    assert artifact["evidence_blocks"][0]["text"] == "Public native text"

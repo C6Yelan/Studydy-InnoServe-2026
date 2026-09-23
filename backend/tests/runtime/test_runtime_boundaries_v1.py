@@ -29,8 +29,10 @@ def test_local_config_pins_runtime_and_rejects_unknown_assessment_fields(tmp_pat
     assert config["runtime_lock"]["semantic_service"]["model_id"] == "google/gemma-4-31B-it-qat-w4a16-ct"
     tampered = deepcopy(config)
     tampered["runtime_lock"]["assessment"]["unknown_setting"] = True
-    with pytest.raises(MaterialProcessingError):
-        runtime_binding(tampered)
+    from pdf_evidence.material_pipeline import MaterialAnalysisError, validate_runtime_lock
+    with pytest.raises(MaterialAnalysisError):
+        validate_runtime_lock(tampered["runtime_lock"])
+    runtime_binding(tampered)
 
 
 @pytest.mark.parametrize("field,value", [("model_id", "example/other-model"), ("model_revision", "a" * 40)])
@@ -73,6 +75,8 @@ def test_runtime_verify_checks_existing_gemma_without_child_process(tmp_path, mo
 
 def test_worker_recovers_once_and_does_not_own_model_lifecycle(monkeypatch):
     events = []
+    for name in ("run_next_set", "normalize_next", "reconcile_new_artifacts", "reconcile_removed_material_analysis", "reconcile_published_checkpoints"):
+        monkeypatch.setattr(workers_module, name, lambda **_: False)
     monkeypatch.setattr(workers_module, "recover_interrupted_material_runs", lambda **_: events.append("recover") or 0)
     monkeypatch.setattr(workers_module, "finish_material_discards", lambda **_: None)
     monkeypatch.setattr(workers_module, "claim_next_material_processing_run", lambda **_: None)
@@ -87,4 +91,18 @@ def test_worker_recovers_once_and_does_not_own_model_lifecycle(monkeypatch):
 def test_backend_does_not_spawn_model_processes():
     root = Path(__file__).parents[3]
     production = "\n".join(path.read_text(encoding="utf-8") for path in (root / "backend/src").rglob("*.py"))
+    production = production.replace((root / "backend/src/document_normalization/converter.py").read_text(), "")
     assert "subprocess.Popen" not in production
+    assert not (root / "backend/src/runtime/command_semantics.py").exists()
+
+
+def test_native_binding_and_saved_binding_remain_readable(tmp_path):
+    from pdf_evidence.ocr_page_evidence import canonical_sha256
+    from runtime.storage.knowledge_structures import runtime_binding_is_valid
+    current = runtime_binding(local_app.read_local_ai_config_from_environment(_environment(tmp_path)))
+    assert current['ingestion'] == {'policy': 'native-text-only/v1'}
+    assert runtime_binding_is_valid(current)
+    saved = deepcopy(current)
+    saved['ingestion'] = {'policy': 'text-first-image-assisted/v1', 'vision_model_id': current['model_id']}
+    saved['runtime_binding_sha256'] = canonical_sha256({k: v for k, v in saved.items() if k != 'runtime_binding_sha256'})
+    assert runtime_binding_is_valid(saved)

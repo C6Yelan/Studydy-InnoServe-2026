@@ -1,23 +1,16 @@
+import { SourceButton, sourceLinks } from "./SourceButton";
 import type { StudydyApiClient } from "../api/client";
 import type { KnowledgeStructureView } from "../api/contracts";
-import { Icon } from "./Icon";
 import { claimText } from "./claim-text";
 
 type Claim = KnowledgeStructureView["concepts"][number]["claims"][number];
 
-export function ConceptContent({ claims, apiClient, sourceArtifactId }: {
+export function ConceptContent({ claims, apiClient, sourceResolver }: {
   claims: Claim[];
   apiClient: StudydyApiClient;
-  sourceArtifactId: string;
+  sourceResolver: string;
 }) {
-  const pages = [...new Set(claims.flatMap((claim) => claim.evidence.map((item) => item.page)))].sort((a, b) => a - b);
-  const hasVision = claims.some(claim => claim.evidence.some(item => item.source === "vision"));
-  const excerpts = new Map<string, { page: number; quote: string; source: "native_text" | "vision"; points: Set<number> }>();
-  claims.forEach((claim, index) => claim.evidence.forEach((item) => {
-    const key = `${item.page}\0${item.source}\0${item.quote}`;
-    if (!excerpts.has(key)) excerpts.set(key, { page: item.page, quote: item.quote, source: item.source, points: new Set() });
-    excerpts.get(key)!.points.add(index + 1);
-  }));
+  const references = sourceLinks(claims.flatMap(claim => claim.evidence));
   return <>
     {claims.map((claim, index) => {
       const text = claimText(claim);
@@ -29,16 +22,8 @@ export function ConceptContent({ claims, apiClient, sourceArtifactId }: {
       </section>;
     })}
     <section className="concept-sources" aria-label="教材來源">
-      <div className="claim-sources">{pages.map((page) => <button className="text-button" key={page} type="button"
-        onClick={() => window.open(apiClient.sourceArtifactUrl(sourceArtifactId, page), "_blank", "noopener,noreferrer")}>
-        原始教材第 {page} 頁<Icon name="chevron-right" size={16} />
-      </button>)}</div>
-      <details className="source-excerpts"><summary>{hasVision ? "對照教材文字" : "對照教材原文"}</summary>
-        {[...excerpts].map(([key, item]) => <blockquote key={key}>
-          <small>{claims.length > 1 ? `重點 ${[...item.points].join("、")} · ` : ""}第 {item.page} 頁{item.source === "vision" && " · 圖片轉錄，請核對原頁"}</small>
-          <p className="claim-text">{item.quote}</p>
-        </blockquote>)}
-      </details>
+      <h3>教材來源</h3>
+      <div className="claim-sources">{references.map((evidence) => <SourceButton key={evidence.evidence_id} apiClient={apiClient} resolver={sourceResolver} evidence={evidence} />)}</div>
     </section>
   </>;
 }

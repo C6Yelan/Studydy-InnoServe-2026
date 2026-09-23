@@ -25,7 +25,7 @@ export default defineConfig({
     ["html", { outputFolder: "playwright-report", open: "never" }],
   ],
   use: {
-    baseURL: "http://127.0.0.1:4175",
+    baseURL: process.env.STUDYDY_E2E_BASE_URL ?? "http://127.0.0.1:4175",
     headless: true,
     launchOptions: { env: browserEnvironment },
     screenshot: "only-on-failure",

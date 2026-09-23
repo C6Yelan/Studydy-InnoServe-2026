@@ -1,7 +1,26 @@
 # 帳號與固定學習身分
 
-先依 [本地環境說明](local-environment.md) 準備持久化服務與資料庫。
-帳號、教材與學習紀錄保留在同一持久化資料庫；AI 操作另外驗證 Gemma 服務。
+先依 [工作站啟停說明](runbook/A40_FINAL_WORKSTATION.md) 準備既有本地服務。
+正式產品仍沿用現行模型 preflight，不新增無 GPU 模式。
+
+## Migration
+
+先停止產品寫入；若資料需要保留，人工私下備份原 DB 與整套原始 PDF store。
+保持既有 `STUDYDY_DATABASE_DSN` 和 `STUDYDY_ARTIFACT_ROOT`，不要清空或更換位置。
+在已設定私有環境欄位的 shell，從 repository root 執行：
+
+```bash
+PYTHONPATH=backend/src backend/.venv/bin/python -c 'from runtime.storage.migrations import run_migrations; print(run_migrations())'
+```
+
+空 DB 套用 `(1, 2, 3, 4)`；已套用前三版的 DB 只執行 `0004_email_credentials.sql`；重跑回傳 `()`。
+`0001`～`0003` 保持原始內容與 checksum，不刪除 ledger 或修改舊 SQL。
+
+`0004` 將 credential column 從 `username` 改為唯一的 `email`，不保留 username alias。
+依此次 pre-release cutover 決定，舊帳號的 credentials 清除、所有尚有效的舊 sessions 撤銷；
+需要重新以 Email 註冊。`learner_id`、教材、Knowledge Structure、學習與作答資料保留原 owner，
+不刪除、不自動歸戶到新帳號，也不推導假的 Email。這不是長期的雙登入或相容 reader。
+在正式資料上套用前先完成備份，停止舊版本的產品程序；舊程式不能搭配新的 Email schema。
 
 ## 使用
 
@@ -9,7 +28,7 @@
 2. 密碼為 15–128 個字元，可包含空格，註冊時需再次確認；沒有密碼重設服務，請自行妥善保存。
 3. 註冊成功後進入首頁，可從側邊導覽前往教材庫；右上角「登出」只撤銷本次授權，不刪除資料。
 4. 新瀏覽器輸入相同帳密，後端會取得同一 learner。其他瀏覽器的有效 session 可繼續使用。
-5. session 有效時沿用 idle refresh（7 天，最長 30 天）；過期需重新登入。失敗的上傳／作答
+5. 後端保留 7 天 idle／最長 30 天期限；前端登入提示不延長授權，過期需重新登入。失敗的上傳／作答
    不會自動重送，請登入後明確操作。登出失敗時私有畫面仍清空，請按「再試一次」完成登出。
 
 登入後可從[教材庫](material-library.md)找回教材；可[接續原學習並查看題目與作答](learning-resume.md)。原有直接網址仍受後端 owner 檢查保護。
@@ -26,7 +45,7 @@
 | `POST /v1/accounts` | JSON `{email, password}`；201，建立帳號並登入 |
 | `POST /v1/session/login` | 同樣 JSON；200，驗證帳密並登入原 learner |
 | `GET /v1/session` | 200，回傳 `learner-identity/v1` 與 `learner_id`；無有效 session 為 401 |
-| `POST /v1/session/refresh` | 空 body；204，僅延長仍有效的既有 session |
+| `POST /v1/session/refresh` | 空 body；200，延長仍有效的既有 session，並直接回傳 `learner-identity/v1` |
 | `DELETE /v1/session` | 空 body；204，冪等撤銷本次 session 並移除 cookie |
 
 舊匿名 `POST /v1/session` 已移除。帳密錯誤統一回 `INVALID_CREDENTIALS`，Email 重複回
@@ -45,6 +64,8 @@ Password scrypt 成本、隨機 salt、constant-time digest comparison、session
 [OWASP Password Storage guidance](https://cheatsheetseries.owasp.org/cheatsheets/Password_Storage_Cheat_Sheet.html#scrypt)。
 僅新增 Email 格式驗證所需的 email-validator 與其依賴；未加入 OAuth、MFA、進階限流或第二套 identity system。
 
-[本地帳號測試方式](testing.md) 不需要雲端 pod 或模型啟動。
+[本地帳號測試方式](testing.md#account-regression-local-only) 不需要雲端 pod 或模型啟動。
 
 登入／註冊的版型與保留的功能差異見[帳號入口視覺](auth-visual.md)。
+
+前端成功登入後只保存非憑證的 learner identity 提示。重新整理／回到頁面時直接以提示還原 application frame，依實際資料 API 的 401 清除失效狀態；不做 focus 或定時登入檢測。沒有提示時才以一次 refresh 還原仍有效的 cookie。資料內容不以這份提示授權，token 仍是 HttpOnly cookie，owner/session 檢查、期限、撤銷與跨頁登出不變。

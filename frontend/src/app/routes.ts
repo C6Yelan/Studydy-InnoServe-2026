@@ -2,14 +2,14 @@ export type AppRoute =
   | { name: "home" }
   | { name: "materials" }
   | { name: "upload" }
+  | { name: "material-sources"; materialId: string }
   | { name: "material-run"; materialId: string; runId: string }
   | { name: "knowledge-map"; materialId: string; runId: string; structureRevision: string }
-  | { name: "study-session"; materialId: string; runId: string; structureRevision: string; studySessionId: string; assessmentRevision?: string };
+  | { name: "study-session"; materialId: string; runId: string; structureRevision: string; studySessionId: string; assessmentSetId?: string };
 
 export type RouteRead = { route: AppRoute; isCanonical: boolean };
 
 const uuidPattern = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
-const assessmentPattern = /^assessment:sha256:[0-9a-f]{64}$/;
 const structurePattern = /^knowledge-structure:sha256:[0-9a-f]{64}$/;
 
 function validSegment(value: string): boolean {
@@ -27,6 +27,10 @@ export function readRoute(pathname: string): RouteRead {
       return "";
     }
   });
+  if (segments.length === 3 && segments[0] === "materials" && uuidPattern.test(segments[1]) && segments[2] === "sources") {
+    const route: AppRoute = {name:"material-sources",materialId:segments[1]};
+    return {route,isCanonical:routePath(route)===pathname};
+  }
   if (
     segments.length === 4
     && segments[0] === "materials"
@@ -38,7 +42,7 @@ export function readRoute(pathname: string): RouteRead {
     return { route, isCanonical: routePath(route) === pathname };
   }
   if (
-    (segments.length === 8 || (segments.length === 10 && segments[8] === "assessments" && assessmentPattern.test(segments[9])))
+    (segments.length === 8 || (segments.length === 10 && (segments[8] === "assessment-sets" && uuidPattern.test(segments[9]))))
     && segments[0] === "materials"
     && uuidPattern.test(segments[1])
     && segments[2] === "runs"
@@ -54,7 +58,7 @@ export function readRoute(pathname: string): RouteRead {
       runId: segments[3],
       structureRevision: segments[5],
       studySessionId: segments[7],
-      ...(segments.length === 10 ? { assessmentRevision: segments[9] } : {}),
+      ...(segments.length === 10 && segments[8] === "assessment-sets" ? { assessmentSetId: segments[9] } : {}),
     };
     return { route, isCanonical: routePath(route) === pathname };
   }
@@ -82,6 +86,7 @@ export function routePath(route: AppRoute): string {
   if (route.name === "home") return "/";
   if (route.name === "materials") return "/materials";
   if (route.name === "upload") return "/upload";
+  if (route.name === "material-sources") { if (!uuidPattern.test(route.materialId)) throw new Error("ROUTE_INVALID"); return `/materials/${route.materialId}/sources`; }
   if (!validSegment(route.materialId) || !validSegment(route.runId)) throw new Error("ROUTE_INVALID");
   const base = `/materials/${route.materialId}/runs/${route.runId}`;
   if (route.name === "material-run") return base;
@@ -89,8 +94,11 @@ export function routePath(route: AppRoute): string {
   const mapPath = `${base}/knowledge-structures/${encodeURIComponent(route.structureRevision)}`;
   if (route.name === "knowledge-map") return mapPath;
   if (!validSegment(route.studySessionId) || !uuidPattern.test(route.studySessionId)) throw new Error("ROUTE_INVALID");
-  if (route.assessmentRevision !== undefined && !assessmentPattern.test(route.assessmentRevision)) throw new Error("ROUTE_INVALID");
-  return `${mapPath}/study-sessions/${route.studySessionId}${route.assessmentRevision ? `/assessments/${encodeURIComponent(route.assessmentRevision)}` : ""}`;
+  if (route.assessmentSetId !== undefined) {
+    if (!uuidPattern.test(route.assessmentSetId)) throw new Error("ROUTE_INVALID");
+    return `${mapPath}/study-sessions/${route.studySessionId}/assessment-sets/${route.assessmentSetId}`;
+  }
+  return `${mapPath}/study-sessions/${route.studySessionId}`;
 }
 
 export function writeRoute(route: AppRoute, replace = false): void {

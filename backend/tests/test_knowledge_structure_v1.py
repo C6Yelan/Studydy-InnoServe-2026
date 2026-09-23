@@ -304,7 +304,8 @@ def test_relations_keep_endpoint_order_and_only_prerequisite_orders_path(source,
     assert contrast["learner_reason"] == comparison["learner_reason"]
     assert [labels[step["concept_id"]] for step in structure["initial_learning_path"]] == ["Pointer", "Array"]
     view = build_knowledge_structure_view(structure)
-    assert view["schema"] == "knowledge-structure-view/v2"
+    # 公開 view schema／resolver 由 owned runtime projection 加入。
+    assert "schema" not in view
     assert view["concepts"][0]["claims"][0]["evidence"][0]["page"] == 1
 
 
@@ -426,6 +427,42 @@ def test_later_bundle_reuses_semantic_concept_key_without_pairwise_dedup_stage()
     assert set(catalog) == {"k", "l", "a", "c", "e"}
 
 
+def test_alternate_label_across_batches_does_not_invalidate_completed_structure():
+    context=_context();state=SemanticState()
+    evidence=[(index,item) for index,item in enumerate(context['evidence']) if item['kind']!='heading']
+    for index,(handle,item) in enumerate(evidence[:2]):
+        apply_wire_response({'concepts':[{'k':'pointer','l':'Pointer' if index==0 else '指標',
+            'a':['指標'] if index==0 else ['Pointer'],'c':[{'m':None,'s':[handle]}]}],'relations':[]},
+            context=context,bundle={'evidence':[item],'sections':context['sections']},state=state)
+    assert state.concepts['pointer']['aliases']==['指標']
+    document=build_knowledge_structure(context,state,source_sha256='1'*64,run_id=RUN_ID,produced_at=PRODUCED_AT,
+        runtime_lock_sha256='a'*64,model_id='google/gemma-4-31B-it-qat-w4a16-ct',model_revision=MODEL_REVISION,semantic_calls=2,ocr_calls=0)
+    assert validate_knowledge_structure(document)
+    assert len(document['concepts'][0]['claims'])==2
+
+
+def test_identical_content_under_different_model_keys_has_one_canonical_node():
+    context=_context();state=SemanticState()
+    apply_wire_response({'concepts':[{'k':key,'l':'Pointer','a':[],'c':[{'m':None,'s':[1]}]} for key in ('first','duplicate')],
+        'relations':[]},context=context,bundle=_bundles(context)[0],state=state)
+    document=build_knowledge_structure(context,state,source_sha256='1'*64,run_id=RUN_ID,produced_at=PRODUCED_AT,
+        runtime_lock_sha256='a'*64,model_id='google/gemma-4-31B-it-qat-w4a16-ct',model_revision=MODEL_REVISION,semantic_calls=1,ocr_calls=0)
+    assert validate_knowledge_structure(document) and len(document['concepts'])==1
+
+
+def test_source_review_notice_stays_reviewable_without_rejecting_valid_structure():
+    context=build_document_context([_page(1,[_block(1,0,'paragraph','A stack follows LIFO order.')])],page_count=1)
+    state=SemanticState(source_review_required=True)
+    apply_wire_response({'concepts':[{'k':'stack','l':'Stack','a':[],'c':[{'m':None,'s':[0]}]}],'relations':[]},
+        context=context,bundle=_bundles(context)[0],state=state)
+    document=build_knowledge_structure(context,state,source_sha256='1'*64,run_id=RUN_ID,produced_at=PRODUCED_AT,
+        runtime_lock_sha256='a'*64,model_id='google/gemma-4-31B-it-qat-w4a16-ct',model_revision=MODEL_REVISION,semantic_calls=1,ocr_calls=0)
+    assert document['status']=={'processing':'partial','quality':'needs_review','decision':'review','reason_codes':['SOURCE_REVIEW_SUGGESTED']}
+    assert validate_knowledge_structure(document)
+    tampered=deepcopy(document);tampered['status']['quality']='accepted';tampered['revision']=_revision(tampered)
+    assert not validate_knowledge_structure(tampered)
+
+
 def test_runtime_timings_do_not_change_content_revision():
     context = _context()
     state = SemanticState()
@@ -486,8 +523,7 @@ def test_compact_wire_keeps_all_source_text_without_canonical_metadata():
     assert [row[0] for row in rows] == list(range(len(context["evidence"])))
     assert [row[3] for row in rows] == [item["exact_text"] for item in context["evidence"]]
     assert "sha256" not in str(request)
-    assert set(request) == {"sections", "existing_concepts", "evidence_sources"}
-    assert request["evidence_sources"] == {str(i): row["source"] for i, row in enumerate(context["evidence"])}
+    assert set(request) == {"sections", "existing_concepts"}
     assert set(semantic_response_schema([0])["properties"]) == {"concepts", "relations"}
 
 

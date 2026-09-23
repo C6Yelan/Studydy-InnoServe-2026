@@ -229,7 +229,7 @@ def request_semantics(
         prompt = task_lock[prefix + "prompt"]
         max_tokens = task_lock[prefix + "max_tokens"]
         if (
-            task not in {"material_semantics", "assessment", "assessment_check"}
+            task not in {"material_semantics", "material_review", "assessment", "assessment_check"}
             or not isinstance(prompt, str)
             or not prompt
             or type(max_tokens) is not int
@@ -240,7 +240,8 @@ def request_semantics(
             raise SemanticServiceError("SEMANTIC_SERVICE_CONFIG_INVALID")
         messages = _messages(prompt, request)
         generation = deepcopy(task_lock[prefix + "generation"])
-        if _token_count(client, service, messages, generation.get("chat_template_kwargs")) + max_tokens > service["max_model_len"]:
+        input_tokens = _token_count(client, service, messages, generation.get("chat_template_kwargs"))
+        if input_tokens + max_tokens > service["max_model_len"]:
             raise SemanticServiceError("SEMANTIC_INPUT_TOO_LARGE")
         response = client.post(
             f"{service['base_url']}{CHAT_PATH}",
@@ -280,6 +281,15 @@ def request_semantics(
             parse_constant=_reject_constant,
         )
         choice = api_body["choices"][0]
+        usage = api_body.get("usage")
+        usage = usage if isinstance(usage, dict) else {}
+        finish = choice.get("finish_reason")
+        logging.getLogger(__name__).info(
+            "Semantic response: task=%s input_tokens=%d max_tokens=%d finish_reason=%s completion_tokens=%s",
+            task, input_tokens, max_tokens,
+            finish if finish in ("stop", "length", "content_filter", None) else "other",
+            usage.get("completion_tokens") if type(usage.get("completion_tokens")) is int else None,
+        )
         if choice.get("finish_reason") != "stop":
             raise SemanticServiceError("SEMANTIC_OUTPUT_TRUNCATED")
         content = choice["message"]["content"]
@@ -325,48 +335,3 @@ def material_request_fits(
         )
         raise SemanticServiceError("SEMANTIC_SERVICE_UNAVAILABLE") from error
     return new_count <= task["max_new_input_tokens"]
-
-
-def request_vision(client: httpx.Client, *, runtime_lock: dict[str, Any], png_bytes: bytes) -> str:
-    """同一 Gemma 的獨立純轉錄階段；失敗不換模型，來源只認定到裁切區域。"""
-    import base64
-    service = _service(runtime_lock)
-    vision = runtime_lock["ingestion"]["vision"]
-    messages = [{"role": "user", "content": [
-        {"type": "image_url", "image_url": {"url": "data:image/png;base64," + base64.b64encode(png_bytes).decode("ascii")}},
-        {"type": "text", "text": vision["prompt"]},
-    ]}]
-    try:
-        tokenized = client.post(f"{service['base_url']}{TOKENIZE_PATH}", json={
-            "model": service["model_id"], "messages": messages,
-            "chat_template_kwargs": vision["generation"]["chat_template_kwargs"],
-            "mm_processor_kwargs": vision["mm_processor_kwargs"],
-        })
-        tokenized.raise_for_status()
-        tokens = tokenized.json()
-        if (type(tokens.get("count")) is not int or tokens["count"] < 1
-                or tokens.get("max_model_len") != service["max_model_len"]
-                or tokens["count"] + vision["max_tokens"] > service["max_model_len"]):
-            raise SemanticServiceError("VISION_INPUT_TOO_LARGE")
-        response = client.post(f"{service['base_url']}{CHAT_PATH}", json={
-            **vision["generation"], "model": service["model_id"], "messages": messages,
-            "max_tokens": vision["max_tokens"], "mm_processor_kwargs": vision["mm_processor_kwargs"],
-        })
-        response.raise_for_status()
-        if not response.content or len(response.content) > MAX_RESPONSE_BYTES:
-            raise SemanticServiceError("VISION_RESPONSE_INVALID")
-        choice = response.json()["choices"][0]
-        if choice.get("finish_reason") != "stop":
-            raise SemanticServiceError("VISION_OUTPUT_TRUNCATED")
-        text = choice["message"]["content"]
-        if not isinstance(text, str) or not text.strip():
-            raise SemanticServiceError("VISION_RESPONSE_INVALID")
-        return text.strip()
-    except SemanticServiceError:
-        raise
-    except httpx.TimeoutException:
-        raise SemanticServiceError("SEMANTIC_SERVICE_TIMEOUT") from None
-    except httpx.HTTPError:
-        raise SemanticServiceError("SEMANTIC_SERVICE_UNAVAILABLE") from None
-    except (ValueError, KeyError, IndexError, TypeError):
-        raise SemanticServiceError("VISION_RESPONSE_INVALID") from None
