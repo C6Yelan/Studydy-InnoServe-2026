@@ -43,7 +43,7 @@ export TMPDIR="$PWD/.studydy-product/browser-tmp"
 `MockTransport`、合成模型回應與本機測試 API 仍可使用。沒有執行 Pod preflight 或真實推論。
 
 多來源測試需要[本機轉檔環境](document-normalization.md)。此工作區的
-`.studydy-runtime/normalizer-venv` 唯讀共用主專題同名環境，不更動套件或 product DB。
+`backend/.venv` 與正式版共用，轉檔測試不需要第二套 Python 環境，也不使用 product DB。
 
 `test_assessment_sets.py`、`test_assessment_set_submission.py`、`test_assessment_remediation.py`
 驗證題組、原子交卷、重播、部分失敗、錯題補強與獨立掌握邊界。

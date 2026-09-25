@@ -4,19 +4,18 @@ PDF 是主要教材格式。其他已開放格式上傳後自動轉成 PDF，轉
 
 ## 環境與啟用
 
-若 `.studydy-runtime/normalizer-venv` 已連到共用環境，請直接沿用，不重新建立或安裝套件。
+PDF、DOC／DOCX、PPT／PPTX、UTF-8 TXT／Markdown 的單檔上限統一為 100 MiB（104,857,600 bytes），包含原 PDF v1 與新來源端點；轉換後 PDF 也使用相同單檔上限。不另設頁數、段落數、ZIP 項目數、解壓總量或壓縮比使用門檻。需要 LibreOffice **26.2.5.2** Writer/Impress、bubblewrap、fontconfig、Noto CJK；Python 3.12 轉檔套件與後端統一由 `backend/pyproject.toml`、`backend/uv.lock` 管理，使用共用的 `backend/.venv`。
 
-PDF、DOC／DOCX、PPT／PPTX、UTF-8 TXT／Markdown 的單檔上限統一為 100 MiB（104,857,600 bytes），包含原 PDF v1 與新來源端點；轉換後 PDF 也使用相同單檔上限。不另設頁數、段落數、ZIP 項目數、解壓總量或壓縮比使用門檻。需要 LibreOffice **26.2.5.2** Writer/Impress、bubblewrap、fontconfig、Noto CJK 與一個獨立的 Python 3.12 converter 環境。不要修改正式版與競賽版共用的 backend/.venv。
+新環境依後端 lock 安裝；此工作區已存在的共用環境可用以下增量安裝補齊轉檔依賴，不重建或清除其他套件：
 
 ```bash
-uv venv --python backend/.venv/bin/python .studydy-runtime/normalizer-venv
-uv pip install --python .studydy-runtime/normalizer-venv/bin/python -r backend/normalizer-requirements.txt
-export STUDYDY_NORMALIZER_PYTHON="$PWD/.studydy-runtime/normalizer-venv/bin/python"
+uv export --project backend --locked --no-dev --no-emit-project | \
+  uv pip install --python backend/.venv/bin/python -r -
 ```
 
-可將 normalizer Python 絕對路徑存入本 checkout 的 `.studydy-product/private-config.json` 的 `normalizer_python`。既有 launcher 只注入轉檔環境，不切換 AI；私人設定不提交 Git。
+轉檔直接使用目前後端的 Python runtime 與套件，各版仍掛載自己的 renderer。無須 `normalizer_python` 私有設定或 `STUDYDY_NORMALIZER_PYTHON`；舊值不再使用，舊轉檔環境可先保留。安裝完成並於下次正常啟動後生效。API 依主機是否具備系統轉檔工具宣告格式；缺少工具時只列 PDF，實際轉檔仍如實回報工具缺失或版本不符。共用套件不會啟用 OCR，競賽版仍只擷取原生文字。
 
-未設定 converter 時初次上傳只宣告 PDF 來源格式。來源轉檔／追加須有本節的 normalizer 設定。B02 使用 migration 0007／0008，當前 B3-A worker 另需 0009；不要在舊 schema 啟動新 worker。正式 DB 升級須依工作區資料政策，先有明確授權、可驗證備份與回復計畫。這裡的指令不是自動套用正式資料的授權。
+B02 使用 migration 0007／0008，當前 B3-A worker 另需 0009；不要在舊 schema 啟動新 worker。正式 DB 升級須依工作區資料政策，先有明確授權、可驗證備份與回復計畫。這裡的指令不是自動套用正式資料的授權。
 
 Normalization policy 的 `version` 已升為 3（加入 olefile 0.47 的舊 Office 辨識），包含統一檔案大小設定；已完成的舊 normalization／SourceSet 不改寫，新操作採新 policy。執行期記憶體與逾時防護繼續保留，無法完成時回報失敗。
 
@@ -67,7 +66,7 @@ Semantic、教材複核與題組都使用競賽版 runtime lock 的同一 Gemma 
 
 ## 驗證與部署邊界
 
-- 後端標準測試使用 disposable PostgreSQL。converter 測試需上方獨立環境。
+- 後端標準測試使用 disposable PostgreSQL。converter 測試使用後端環境及上方系統轉檔工具。
 - `test_source_normalization.py` 覆蓋實際轉檔、owner／origin、replay、lease recovery、policy version、snapshot、來源回查、legacy／完整刪除保存。
 - 瀏覽器 fixture 可用 `STUDYDY_E2E_FRONTEND_PORT=4175`、`STUDYDY_E2E_API_PORT=8003`，不必停止使用者 4176／8002 服務。production preview 驗證真實建置；fixture transport 不啟動模型。
 - migration rollback 不刪新資料；寫入 sources-v2 後要保留新 reader，採 forward repair 或經授權的 DB backup restore。不要直接切回舊 binary 期待它能讀所有新格式。

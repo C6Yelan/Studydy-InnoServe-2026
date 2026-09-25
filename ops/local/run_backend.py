@@ -19,12 +19,6 @@ environment.update({
     "STUDYDY_ARTIFACT_ROOT": config["artifact_root"],
     "STUDYDY_LOCAL_RUNTIME_ROOT": str(state),
 })
-# 多來源轉檔使用獨立本機環境；不載入正式版的 command AI 設定。
-if "normalizer_python" in config:
-    executable = config["normalizer_python"]
-    if not isinstance(executable, str) or not Path(executable).is_absolute():
-        raise ValueError("LOCAL_NORMALIZER_CONFIG_INVALID")
-    environment["STUDYDY_NORMALIZER_PYTHON"] = executable
 # 模型通道在 Pod 端讀取 server key，本機不保存模型憑證。
 environment.pop("STUDYDY_SEMANTIC_API_KEY", None)
 python = str(repo / "backend/.venv/bin/python")

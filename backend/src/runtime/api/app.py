@@ -78,7 +78,7 @@ from ..source_resolver import resolve_evidence_source
 from ..storage.source_artifacts import open_verified_artifact
 from ..storage.tables import Artifact,Material,MaterialSource,database_session
 from sqlalchemy import select
-from document_normalization.converter import MAX_FILE_BYTES,MIME,configured_python,NormalizationError
+from document_normalization.converter import MAX_FILE_BYTES,MIME,normalizer_available,NormalizationError
 
 
 _COOKIE_NAME = "studydy_session"
@@ -602,7 +602,7 @@ def create_app(settings: ApiSettings) -> FastAPI:
     @app.get("/v2/source-capabilities",response_model=SourceCapabilities)
     def source_capabilities(request:Request):
         _require_query(request,set());_trusted_learner(request,settings)
-        enabled=configured_python() is not None
+        enabled=normalizer_available()
         return SourceCapabilities(formats=[{"extension":ext,"media_type":media,"max_bytes":MAX_FILE_BYTES} for ext,media in MIME.items() if ext==".pdf" or enabled],
             quality_notice="建議優先上傳 PDF。其他支援格式會自動轉為 PDF，轉換品質不保證，請檢查轉換後內容。")
 

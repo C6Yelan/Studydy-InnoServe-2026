@@ -15,10 +15,8 @@ npm --prefix frontend ci
 npm --prefix frontend run build
 ```
 
-多來源功能需要獨立的本機轉檔環境，見[來源轉檔](document-normalization.md)。
-本工作區可唯讀共用 `../main/.studydy-runtime/normalizer-venv`，競賽版仍執行自己的 renderer source。
-在私有設定加入 `normalizer_python` 的絕對路徑，由 launcher 注入 `STUDYDY_NORMALIZER_PYTHON`。
-這個環境不啟動 OCR 或 AI，也不修改共用 backend 依賴。
+多來源轉檔使用共用的 `backend/.venv`，套件安裝與系統需求見[來源轉檔](document-normalization.md)。
+競賽版仍執行自己的 renderer，不需要另設 Python 路徑，也不會啟動 Unlimited-OCR。
 
 由操作者準備獨立、持久化 PostgreSQL 18 資料庫與 volume，以及私有 PDF artifact root。
 不得用 disposable test DB 取代產品資料庫；不得刪除既有 volume 或 PDF store。
