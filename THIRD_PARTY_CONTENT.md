@@ -1,49 +1,32 @@
-# Third-Party Content
+# 素材與第三方內容
 
-The following attribution and license notices are retained for the named works.
-The current application does not bundle a learning-resource excerpt library or source PDFs.
-These notices do not grant additional rights to uploaded material or imply author endorsement.
+本文件整理 Studydy 收錄的介面素材、測試文件與第三方設定，說明其來源及授權狀態。
 
-## Think Data Structures
+## AI 生成介面素材
 
-- Work: *Think Data Structures: Algorithms and Information Retrieval in Java*
-- Author: Allen B. Downey
-- Source: https://greenteapress.com/thinkdast/thinkdast.pdf
-- License: Creative Commons Attribution-NonCommercial-ShareAlike 3.0 Unported
-- License text: https://creativecommons.org/licenses/by-nc-sa/3.0/
+Studydy 的角色與介面插圖為 AI 生成素材，檔案位於：
 
-Excerpts from this work remain subject to its attribution, non-commercial, and
-ShareAlike terms. Redistribution or adaptation of those excerpts must comply
-with that license.
+- [frontend/public/assets/Studydy_角色素材/](frontend/public/assets/Studydy_角色素材/)
+- [frontend/public/assets/studydy/](frontend/public/assets/studydy/)
 
-## Open Data Structures
+生成工具及適用使用條款尚待維護者確認。目前尚未指定這些素材的對外使用授權。
 
-- Work: *Open Data Structures (in C++)*
-- Author: Pat Morin
-- Source: https://opendatastructures.org/ods-cpp.pdf
-- License: Creative Commons Attribution 2.5 Canada
-- License text: https://creativecommons.org/licenses/by/2.5/ca/
+## 測試教材
 
-Excerpts from this work may be shared and adapted, including commercially, when
-the license's attribution and other terms are followed.
+[backend/tests/fixtures/](backend/tests/fixtures/) 收錄自行建立的合成文字與文件，用於文件轉換、內容保留及來源定位測試。檔案來源與覆蓋內容見 [fixture 說明](backend/tests/fixtures/README.md)。
 
-## An Open Guide to Data Structures and Algorithms
+## 第三方設定
 
-- Work: *An Open Guide to Data Structures and Algorithms*
-- Authors: Paul W. Bible and Lucas Moser
-- Source: https://pressbooks.palni.org/anopenguidetodatastructuresandalgorithms/
-- License: Creative Commons Attribution 4.0 International, except where
-  otherwise noted
-- License text: https://creativecommons.org/licenses/by/4.0/
+容器的 seccomp 設定改自 Moby profiles 的預設規則，增加 Bubblewrap 建立沙箱所需的 namespace 操作。
 
-The book-level license does not override a different license or rights notice
-attached to an individual item. Such separately marked material is not covered
-by this notice.
+- **專案檔案**：[bubblewrap-seccomp.json](ops/docker/bubblewrap-seccomp.json)
+- **上游來源**：[Moby profiles／seccomp/default.json](https://github.com/moby/profiles/blob/65adc7e022c97f55e45c054ff012988027733b87/seccomp/default.json)
+- **原作授權**：Apache License 2.0，授權文字保留於 [MOBY-LICENSE](ops/docker/MOBY-LICENSE)。
 
-## License boundary
+## 套件與模型
 
-Studydy does not claim ownership of the third-party excerpts. Any license that
-applies to Studydy's own source code does not replace or broaden the licenses
-listed above. Users are responsible for following the applicable source license,
-including attribution, change indication, non-commercial, and ShareAlike terms
-where required.
+Python 與 npm 依賴版本分別記錄於 [backend/uv.lock](backend/uv.lock) 與 [frontend/package-lock.json](frontend/package-lock.json)。模型版本與執行設定見 [runtime-lock.json](local_ai/runtime-lock.json)。各套件與模型適用其發行者提供的授權條款。
+
+## 專案授權
+
+目前尚未提供 Studydy 的專案 LICENSE。專案程式與介面素材的授權方式仍待維護者確認；上述第三方來源與授權資訊不代表整個專案採用相同授權。

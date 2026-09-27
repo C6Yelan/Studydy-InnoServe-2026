@@ -42,6 +42,25 @@ def _request(path: Path) -> dict:
     }
 
 
+def _analyze(source: Path, settings: dict, **kwargs):
+    request = _request(source)
+    digest = request["expected_source_sha256"]
+    with pymupdf.open(source) as document:
+        page_count = document.page_count
+    binding = {
+        "source_set_digest": digest,
+        "manifest": {"items": [{
+            "normalized_sha256": digest,
+            "page_count": page_count,
+        }]},
+        "bundle": {"pages": [
+            {"page": page, "source_id": "synthetic-source", "normalized_page": page}
+            for page in range(1, page_count + 1)
+        ]},
+    }
+    return pipeline.analyze_material([request], binding, settings, **kwargs)
+
+
 def _semantic(calls: list[dict]):
     def call(_client, **arguments):
         request = arguments["request"]
@@ -63,8 +82,8 @@ def test_eight_native_pages_use_one_unified_semantic_call_without_ocr(tmp_path, 
     source = tmp_path / "eight.pdf"
     _pdf(source, 8)
     calls: list[dict] = []
-    structure = pipeline.analyze_material(
-        _request(source), _settings(tmp_path), client=Client(), semantic_call=_semantic(calls)
+    structure = _analyze(
+        source, _settings(tmp_path), client=Client(), semantic_call=_semantic(calls)
     )
     assert structure["metrics"]["semantic_calls"] == 1
     assert structure["metrics"]["ocr_calls"] == 0
@@ -84,7 +103,7 @@ def test_multiple_bundles_report_incremental_semantic_progress(tmp_path):
             return httpx.Response(200, json={"count": count, "max_model_len": 32768}, request=httpx.Request("POST", url))
     calls = []
     progress = []
-    pipeline.analyze_material(_request(source), _settings(tmp_path), client=BudgetClient(),
+    _analyze(source, _settings(tmp_path), client=BudgetClient(),
                               semantic_call=_semantic(calls), progress_callback=lambda stage, done, total: progress.append((stage, done, total)))
     assert len(calls) > 1
     assert {row[1] for call in calls for section in call["sections"] for row in section["evidence"]} == {1, 2, 3}
@@ -99,7 +118,7 @@ def test_no_native_text_fails_before_semantics(tmp_path):
     _pdf(source, 1, blank_first=True)
     calls = []
     with pytest.raises(pipeline.MaterialAnalysisError, match="NO_USABLE_EVIDENCE"):
-        pipeline.analyze_material(_request(source), _settings(tmp_path), client=Client(), semantic_call=_semantic(calls))
+        _analyze(source, _settings(tmp_path), client=Client(), semantic_call=_semantic(calls))
     assert calls == []
 
 
@@ -115,7 +134,7 @@ def test_cancellation_before_semantics_never_opens_a_model_request(tmp_path, mon
         if requested: raise Cancelled()
     monkeypatch.setattr(pipeline, "semantic_client", lambda: (_ for _ in ()).throw(AssertionError("no model client after cancellation")))
     with pytest.raises(Cancelled):
-        pipeline.analyze_material(_request(source), _settings(tmp_path), progress_callback=report, cancellation_check=check)
+        _analyze(source, _settings(tmp_path), progress_callback=report, cancellation_check=check)
 
 
 def test_cancellation_stops_semantic_retries_and_next_bundles(tmp_path, monkeypatch):
@@ -141,7 +160,7 @@ def test_cancellation_stops_semantic_retries_and_next_bundles(tmp_path, monkeypa
         with monkeypatch.context() as patch:
             patch.setattr(pipeline, "build_semantic_bundles", two_bundles)
             with pytest.raises(Cancelled):
-                pipeline.analyze_material(_request(source), _settings(tmp_path), client=Client(), semantic_call=semantic, cancellation_check=check)
+                _analyze(source, _settings(tmp_path), client=Client(), semantic_call=semantic, cancellation_check=check)
         assert len(calls) == 1
 
 
@@ -156,5 +175,5 @@ def test_cancellation_at_evidence_checkpoint_does_not_start_the_next_page(tmp_pa
     monkeypatch.setattr(pipeline, "extract_page", extract)
     def report(*_args): raise Cancelled()
     with pytest.raises(Cancelled):
-        pipeline.analyze_material(_request(source), _settings(tmp_path), client=Client(), progress_callback=report)
+        _analyze(source, _settings(tmp_path), client=Client(), progress_callback=report)
     assert pages == [1]

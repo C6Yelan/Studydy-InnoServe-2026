@@ -5,13 +5,12 @@ import os
 import sys
 from typing import Any, Mapping
 
-
 from .local_app import read_local_ai_config_from_environment
-from .material_processing import _runtime_error, runtime_preflight
+from .material_runtime import MaterialRuntimeError, runtime_preflight
 
 
 def verify_local_runtime(local_config: dict[str, Any]) -> dict[str, Any]:
-    """以現有production loaders驗證本機runtime具備必要能力。"""
+    """明確要求時才驗證語意服務；native 擷取沒有模型載入步驟。"""
 
     runtime_preflight(local_config)
     return {
@@ -22,7 +21,7 @@ def verify_local_runtime(local_config: dict[str, Any]) -> dict[str, Any]:
 
 def _failure(error: Exception) -> dict[str, Any]:
     component = getattr(error, "component", None)
-    reason = getattr(error, "reason", None)
+    reason = getattr(error, "reason", None) or getattr(error, "reason_code", None)
     return {
         "status": "failed",
         "command": "verify",
@@ -42,7 +41,7 @@ def main(
     arguments = list(sys.argv[1:] if argv is None else argv)
     try:
         if arguments != ["verify"]:
-            raise _runtime_error("layout", "LOCAL_RUNTIME_SETTINGS_MISMATCH")
+            raise MaterialRuntimeError("layout", "LOCAL_RUNTIME_SETTINGS_MISMATCH")
         local_config = read_local_ai_config_from_environment(
             os.environ if environment is None else environment
         )

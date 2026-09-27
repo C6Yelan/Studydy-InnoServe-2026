@@ -1,141 +1,78 @@
-# Studydy final architecture
+# 系統架構
 
-Production has one semantic path:
+[文件入口](../README.md) · [教材處理](materials.md) · [學習與評量](learning.md)
 
-```text
-來源檔案 → 本機轉為 PDF → native Evidence → sections + source bundle
-    → resident Gemma 4 unified semantics → deterministic projection
-    → Document Tree + canonical Concepts + typed Relations + Initial Path
-    → StudySession + AssessmentSet + AnswerEvent
-```
+## 系統組成
 
-Supplementary resource recommendation (Agent 2) is removed. Concepts retain only the uploaded
-material's Evidence and PDF locators. Source-bound Knowledge Structure and its public view use schema v4/v3, with
-no resource-library fields or separate resource PDF kind. Fresh pre-release databases use the
-initial migration followed by additive learner-credentials and material-name migrations; historical evaluation
-artifacts remain separate and are not rewritten.
+~~~mermaid
+flowchart LR
+    UI["React 前端"] --> API["FastAPI"]
+    API --> DB[("PostgreSQL")]
+    API --> Store[("本機 Artifact Store")]
+    DB --> Worker["串行 Runtime Worker"]
+    Worker --> Convert["隔離文件轉檔"]
+    Worker --> Evidence["Native Evidence"]
+    Evidence --> Semantic["外部 HTTP 語意模型"]
+    Semantic --> Validate["來源、結構與內容驗證"]
+    Validate --> DB
+    Validate --> Store
+~~~
 
-Gemma 4 owns Concept boundaries, Claim meaning, cross-section consolidation, Relation proposals/reasons,
-and Assessment semantics. Code owns source identity, Evidence/span binding, exact technical literals,
-schema, ownership, endpoints, duplicates/conflicts, prerequisite cycles, private answers, scoring,
-and stale/idempotency/concurrency behavior.
+前端使用同源 /v1 API，部署時由 Nginx 代理到 backend 容器。API 處理身分、讀寫邊界與工作建立；worker 執行來源轉檔、教材分析／檢核與題組準備。PostgreSQL 保存工作狀態、帳號、學習與內容 metadata；檔案保存在 data/artifacts。
 
-教材 worker 在初始語意分析後執行 [檢核與整理](material-review.md)，再發布 canonical 地圖。
-它共用既有 semantic transport；既有教材可重用已保存 Evidence 建立整理版本。原版地圖與舊作答不覆寫。
+後端採 native-text-only，不執行 OCR，也不管理外部語意模型服務的生命週期。API 啟動檢查設定，模型可用性由實際 AI 操作檢查；登入與已保存內容讀取可在模型離線時使用。
 
-Material requests retain document-global integer handles, page, kind, and exact text under section
-titles. Response v5 Claims select whole Evidence handles with `s: [handle, ...]`; character offsets
-are not accepted. Native Evidence joins geometrically consecutive lines within a PDF text block or a wrapped
-continuation across blocks, respecting heading levels, columns and new list items while preserving
-line breaks and bounding boxes. A null meaning reuses the
-selected units. Code expands quotes and canonical references; technical-literal protection still
-applies, but partial quotations cannot replace a complete meaning.
+## 模組責任
 
-Page processing policy `native-text-only/v1` uses reliable PyMuPDF text as the sole source
-for new Evidence. Images and diagrams remain in the source PDF and are reachable through page
-locators; they are not transcribed or sent to the semantic service. Pages without reliable text
-are explicitly excluded. A document without usable text fails before semantic inference.
-See [document ingestion](document-ingestion.md) for supported inputs and provenance.
+| 程式位置 | 責任 |
+| --- | --- |
+| [runtime/api/](../backend/src/runtime/api/) | HTTP 契約、身分、Origin、錯誤與公開投影 |
+| [document_normalization/](../backend/src/document_normalization/) | 隔離轉檔、格式檢查及來源 mapping |
+| [pdf_evidence/](../backend/src/pdf_evidence/) | 原生文字、Evidence 與語意分析流程 |
+| [knowledge_map/](../backend/src/knowledge_map/) | 觀念／重點／關係、確定性建構、檢核及結構驗證 |
+| [learning_adaptation/](../backend/src/learning_adaptation/) | 題組、私密答案、作答、進度與下一步 |
+| [runtime/storage/](../backend/src/runtime/storage/) | 持久資料、來源驗證、migration 與檔案恢復 |
+| [runtime/workers.py](../backend/src/runtime/workers.py) | 工作領取、啟停、恢復與執行協調 |
+| [local_ai/](../local_ai/) | 模型 runtime lock |
 
+## 模型與程式的責任邊界
 
-Original Evidence remains available. Claim candidates omit explicit copyright text in page margins,
-repeated marginal running text, and page numbers consistent with page order across pages. Headings,
-code-like text and non-margin content are preserved; an arbitrary bottom crop is not used. Filtered
-handles are never renumbered. These rules reduce known citation failures, not prove semantic
-support for every retained body-text citation.
-Formal `::=` definitions keep their indented bodies and start a new unit at the next definition.
-An unsupported literal string `null` is rejected as a Claim; source-backed null terminology and
-valid literal-restored content remain supported. Contrast relations retain their proposed endpoint
-order so positional explanations stay consistent; reverse duplicates are still removed.
+模型提出語意：觀念邊界、Claim 意思、關係理由、題目候選與盲解檢查。程式負責來源身分、頁碼／區塊、字面值、schema、關係循環、不可變性、權限、答案保密、評分、冪等與交易。
 
-Bundles are packed using the resident tokenizer with the actual prompt and current Concept catalog,
-reserving 8192 output tokens within the unchanged 32768-token context. New Evidence per bundle
-is bounded to 1536 input tokens without the existing Concept catalog, so longer documents make
-incremental progress without forcing their full semantic output into one response. An indivisible
-Evidence block may exceed this soft limit if the full request still fits the model context. A truncated response fails;
-it does not count as a successful material or trigger additional split calls.
-Material generation explicitly pins the existing thinking-enabled template and sampling settings in
-the runtime lock; packing and inference use the same template options. Relation instructions retain
-supported edges while distinguishing necessary dependencies, concrete uses, and the entities being
-compared.
+模型回傳符合 Structured Output，只代表資料可解析。正式 Knowledge Structure 必須完成來源集合綁定、內容驗證並計算 revision，才能發布。內部草稿沒有正式 schema／revision。
 
-Assessment generates three candidates with the v2 response contract, then makes one bounded batch
-check through the same resident Gemma 4 service. The checker receives source Evidence and reordered
-options without the proposed answer key. Publication requires a unique selected answer matching
-the generator's exact source span, and no duplicate of a prior question. Rewording the same task,
-referent and conditions is a duplicate; different requested attributes, referents or application
-scenarios can assess the same knowledge. Distractors may occur elsewhere in Evidence.
-Code retains exact source binding, option identities, private answers, scoring and idempotency.
-B5-Q 的安全候選品質排序、provenance v8 與 source-span-single-choice/v6 見
-[assessment-quality.md](assessment-quality.md)。品質提示不設最低分；舊題資料不改寫。
-每個 Claim 仍須兩道不同合格正確題且最新作答正確，單次答對不代表掌握。
+只有 prerequisite 關係能影響建議學習順序。part_of、application、example、contrast 保留其語意與方向；Document Tree 依教材結構建立。關係型別定義見 [structure_rules.py](../backend/src/knowledge_map/structure_rules.py)。
 
-B5-D 將一個 Concept 的多個重點預先準備成持久題組。計畫決定動態題數，現有 worker
-逐題在 DB 交易外生成並驗證，最後原子發布；失敗只明確重試未完成題，或選擇部分發布。
-`assessment_sets`／`assessment_set_items` 保存計畫、狀態與成員，作答沿用 AnswerEvent。
-詳見 [單一觀念題組](assessment-sets.md)。B5-R 以同一題組保留初篩關聯，
-直接對所有目前待補強的錯誤重點產生補強；一次新題答對可結束該點本次補強。
-補強作答在投影中保留 assisted 身分，不累計或恢復獨立掌握證據；地圖、進度與歷史共用
-本輪結果。詳見 [錯題補強](assessment-remediation.md)。
+## 執行設定與來源身分
 
-The only Relation types are `prerequisite`, `part_of`, `application`, `example`, and `contrast`.
-`prerequisite` is the only Relation that can change Initial Path order or create a learner prerequisite
-gap. Document Tree placement always comes from document structure.
+模型、revision、套件契約、token budgets 與 prompts 以 [runtime-lock.json](../local_ai/runtime-lock.json) 為單一設定來源。
 
-There is one production Python minor (3.12) and one externally resident
-`google/gemma-4-31B-it-qat-w4a16-ct` service. Native text is the sole new Evidence source. The backend never starts,
-stops, swaps, or unloads Gemma 4. Assessment uses the same authenticated loopback service.
-mDeBERTa is removed.
+實際模型 HTTP 位址由 STUDYDY_SEMANTIC_BASE_URL 提供，Bearer token 由 VLLM_API_KEY 提供。部署覆寫只影響連線，不改封存的 lock、binding 或內容 hash；快照中的預設位址不代表部署覆寫後的網路終點。
 
-Pre-release persistence is a clean final schema. `knowledge_structures` stores one immutable artifact
-instead of parallel material/map artifacts. The credentials migration upgrades the accepted schema
-without rewriting stored artifacts.
+教材工作與題組各自封存執行快照。讀取已保存內容時，核對產物與生成當時的快照，不能以目前設定冒充其身分。修改模型設定不會改寫既有產物或答案。
 
-Account credentials live on `learners`; `learner_sessions` remains the authorization authority.
-Registration creates one learner and session atomically. Login verifies the salted scrypt password
-hash and issues a new session for the same learner. Logout revokes only that session. Existing
-anonymous learners remain intact and are not automatically attached to accounts. All API/PDF
-responses are private and `no-store`. The frontend retires its client and unmounts private views on
-logout or session expiry; it never creates anonymous identities or replays failed writes under a
-new identity. The browser-global latest-material pointer and its consumers are removed.
+一般地圖／題組／進度讀取驗證資料庫 metadata，不反覆掃描所有原檔；發布與實際使用來源檔案時核對對應 bytes。來源檔損毀會阻止該檔案使用或新結果發布，不等於已保存地圖自動消失。
 
-The material library is a read projection over Material, Artifact, MaterialProcessingRun and
-KnowledgeStructure. Materials retain an optional uploaded display name; older rows have a
-recognizable date/ID label. Latest attempts and published revisions are listed independently, so a
-failed new attempt cannot hide a prior result. Reopen uses existing exact-revision GET endpoints
-and creates no learning records. There is no separate material-history store.
+## 帳號與資料隔離
 
-Study resume (`study-resume/v5`) projects the bound StudySession, KnowledgeStructure,
-AssessmentSet summaries and derived learner progress. The selected set is explicit in the
-Study Session URL. Published questions and feedback are read through the selected set, using
-its membership and private-answer validators. Reads never create sessions, questions or answers.
-Single-question generation/submission/history routes are removed.
-Completed-cycle navigation applies the current backend `advance` or `complete` decision through
-`POST /v1/study-sessions/{id}/guidance/apply` (`guidance-apply/v2`). The revision is checked under
-the shared Material/Study lock; replay cannot advance twice, and active assessments remain protected.
-There is no separate preparation page or mastery calculation.
+帳密保存在 learners，登入 session 是 API 的授權依據。Email 正規化後唯一；密碼採隨機 salt 的 scrypt，實際參數以 [learner_session.py](../backend/src/runtime/learner_session.py) 為準。
 
-Material creation uses the source collection and revision APIs (`/v2/materials`, sources,
-revisions); direct `/v1/materials` POST and `/v1/material-processing-runs` POST are retired.
-Public readers accept the current source-aware view/run/library contracts only. Historical
-migration files and persisted rows are not deleted or rewritten by this cleanup.
+Session token 使用 HttpOnly cookie。寫入請求檢查 Origin；資源以 owner scope 查詢，API 與教材回應使用 private/no-store。前端保存的 learner identity 提示只協助恢復頁框，不授予資料存取權。
 
-B3-A appends immutable source snapshots and analyzes only added sources, retaining verified prior
-Evidence and semantic content. PDFs remain separate, with source-aware reading positions in a v4
-KnowledgeStructure. Unchanged, unambiguous Claims can inherit existing answer evidence through the
-same learning-state reducer without copying or rewriting AnswerEvents. Valid updates containing new
-grounded Claims promote the head, including partial results with quality notices. Cancellation,
-processing failures and updates without usable added content retain the previous head. Unreferenced
-old structures are pruned, while structures required by saved learning remain readable. See
-[source revisions](source-revisions.md) for publication, retention and migration details.
+登出或 session 失效時，前端撤除私有畫面並使既有 client 失效；延遲回應不能重新展示前一帳號資料，失敗寫入不自動換身分重播。
 
-B3-B creates the initial map from one or more ordered, ready sources using the same pipeline.
-All uploads enter the source confirmation page before semantic analysis; per-file retries reuse
-their upload receipts. Initial source ordering is frozen by the revision request, with no second
-KnowledgeStructure schema or merged PDF.
+## 一致性與恢復
 
-Knowledge Map reads material metadata alongside its immutable structure and run binding. If a study
-exists, it reads the small learner-progress response rather than fetching the full StudySession
-resume envelope again. Progress and resume share a repeatable-read database snapshot: source-bound
-structure validation, study scope, AnswerEvents, assisted evidence and cycle projection are reused
-within that read. No global cache replaces owner or source checks.
+- Material／Study 鎖、唯一約束及版本欄位保護並行操作。
+- 工作持有 lease／worker token；失效 worker 的晚到結果不得發布。
+- Progress 與 resume 在同一個唯讀、repeatable-read snapshot 中投影。
+- 整組交卷以同一交易保存答案與題組結果，中途失敗全部回滾。
+- DB 與檔案寫入採 staging／quarantine 與 reconciliation，依實際 commit 結果保存、還原或清理。
+
+Migration runner 逐份套用 [領域 SQL](../backend/migrations/)，核對 checksum、序列及併發鎖。不要靠改寫帳本跳過不一致。
+
+## API 參考
+
+產品路由以 /v1 為前綴。預設前端入口下的 [OpenAPI JSON](http://127.0.0.1:4173/v1/openapi.json) 提供實際 request／response 定義；repo 內由 [app.py](../backend/src/runtime/api/app.py) 與 [models.py](../backend/src/runtime/api/models.py) 定義。
+
+功能文件解釋工作流程、交易與副作用，不另外維護一份完整欄位清單。

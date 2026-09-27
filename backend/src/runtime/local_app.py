@@ -64,11 +64,11 @@ def _app_arguments_from_environment(environment: Mapping[str, str]) -> dict[str,
 def read_local_ai_config_from_environment(
     environment: Mapping[str, str],
 ) -> dict[str, Any]:
-    """由單一 root 保存處理紀錄；Gemma 服務由 runtime lock 定義。"""
+    """從單一 root 組出 native 執行目錄；模型位址另由部署設定提供。"""
 
     root_value = environment.get(_LOCAL_RUNTIME_ROOT_ENVIRONMENT_KEY)
     if root_value is None:
-        root = Path.home() / ".local" / "share" / "studydy-innoserve"
+        root = Path.home() / ".local" / "share" / "studydy"
     elif (
         not isinstance(root_value, str)
         or not root_value

@@ -3,7 +3,6 @@ from __future__ import annotations
 from collections.abc import Mapping
 from copy import deepcopy
 import json
-import logging
 import os
 from typing import Any
 from urllib.parse import urlsplit
@@ -14,9 +13,10 @@ from pdf_evidence.ocr_page_evidence import canonical_bytes
 
 
 API_KEY_ENV = "VLLM_API_KEY"
+SERVICE_URL_ENV = "STUDYDY_SEMANTIC_BASE_URL"
 CHAT_PATH = "/v1/chat/completions"
 TOKENIZE_PATH = "/tokenize"
-PREFLIGHT_TIMEOUT_SECONDS = 45
+PREFLIGHT_TIMEOUT_SECONDS = 5
 MAX_RESPONSE_BYTES = 1024 * 1024
 INFERENCE_TIMEOUT = httpx.Timeout(None, connect=PREFLIGHT_TIMEOUT_SECONDS)
 
@@ -30,23 +30,22 @@ class SemanticServiceError(RuntimeError):
 
 
 def _origin(value: Any) -> str:
-    if not isinstance(value, str) or not value or "\x00" in value:
+    if not isinstance(value, str) or not value or any(ord(char) <= 32 or ord(char) == 127 for char in value):
         raise SemanticServiceError("SEMANTIC_SERVICE_CONFIG_INVALID")
-    parsed = urlsplit(value)
     try:
+        parsed = urlsplit(value)
         port = parsed.port
     except ValueError:
         raise SemanticServiceError("SEMANTIC_SERVICE_CONFIG_INVALID") from None
     if (
-        parsed.scheme != "http"
-        or parsed.hostname != "127.0.0.1"
+        parsed.scheme not in {"http", "https"}
+        or not parsed.hostname
         or parsed.username is not None
         or parsed.password is not None
         or parsed.path not in {"", "/"}
         or parsed.query
         or parsed.fragment
-        or port is None
-        or not 1 <= port <= 65_535
+        or (port is not None and not 1 <= port <= 65_535)
     ):
         raise SemanticServiceError("SEMANTIC_SERVICE_CONFIG_INVALID")
     return value.rstrip("/")
@@ -54,7 +53,7 @@ def _origin(value: Any) -> str:
 
 def _headers(environment: Mapping[str, str] | None = None) -> dict[str, str]:
     value = (os.environ if environment is None else environment).get(API_KEY_ENV)
-    if value is None:
+    if value is None or value == "":
         return {}
     if not value or len(value) > 4096 or any(character in value for character in "\x00\r\n"):
         raise SemanticServiceError("SEMANTIC_SERVICE_CONFIG_INVALID")
@@ -75,18 +74,19 @@ def _service(lock: Any) -> dict[str, Any]:
         service = lock["semantic_service"]
         origin = _origin(service["base_url"])
         if (
-            lock["schema"] != "studydy-runtime-lock/innoserve-v1"
-            or lock["python"] != "3.12"
-            or service["model_id"] != "google/gemma-4-31B-it-qat-w4a16-ct"
-            or service["revision"] != "52f3f65bc7a02d555763bc923bd1d9094898219d"
-            or origin != "http://127.0.0.1:18001"
+            lock["python"] != "3.12"
+            or not isinstance(service["model_id"], str) or not service["model_id"].strip()
+            or not isinstance(service["revision"], str) or not service["revision"].strip()
+            or origin != "http://127.0.0.1:18000"
             or service["max_model_len"] != 32768
             or service["max_num_seqs"] != 1
             or service["authentication"] != "environment-bearer:VLLM_API_KEY"
             or service["server"]["python"] != "3.12"
         ):
             raise SemanticServiceError("SEMANTIC_SERVICE_CONFIG_INVALID")
-        return {**service, "base_url": origin}
+        # 位址是部署設定；不改寫已保存的 lock／binding 或其內容 hash。
+        endpoint = _origin(os.environ.get(SERVICE_URL_ENV, origin))
+        return {**service, "base_url": endpoint}
     except (KeyError, TypeError):
         raise SemanticServiceError("SEMANTIC_SERVICE_CONFIG_INVALID") from None
 
@@ -128,11 +128,6 @@ def preflight_semantic_service(
     except httpx.TimeoutException as error:
         raise SemanticServiceError("SEMANTIC_SERVICE_TIMEOUT") from error
     except (httpx.HTTPError, UnicodeError, ValueError) as error:
-        response = getattr(error, "response", None)
-        logging.getLogger(__name__).warning(
-            "Gemma request failed: error=%s status=%s",
-            type(error).__name__, getattr(response, "status_code", None),
-        )
         raise SemanticServiceError("SEMANTIC_SERVICE_UNAVAILABLE") from error
     finally:
         if owned:
@@ -240,8 +235,7 @@ def request_semantics(
             raise SemanticServiceError("SEMANTIC_SERVICE_CONFIG_INVALID")
         messages = _messages(prompt, request)
         generation = deepcopy(task_lock[prefix + "generation"])
-        input_tokens = _token_count(client, service, messages, generation.get("chat_template_kwargs"))
-        if input_tokens + max_tokens > service["max_model_len"]:
+        if _token_count(client, service, messages, generation.get("chat_template_kwargs")) + max_tokens > service["max_model_len"]:
             raise SemanticServiceError("SEMANTIC_INPUT_TOO_LARGE")
         response = client.post(
             f"{service['base_url']}{CHAT_PATH}",
@@ -266,11 +260,6 @@ def request_semantics(
     except httpx.TimeoutException as error:
         raise SemanticServiceError("SEMANTIC_SERVICE_TIMEOUT") from error
     except (httpx.HTTPError, UnicodeError, ValueError) as error:
-        response = getattr(error, "response", None)
-        logging.getLogger(__name__).warning(
-            "Gemma request failed: error=%s status=%s",
-            type(error).__name__, getattr(response, "status_code", None),
-        )
         raise SemanticServiceError("SEMANTIC_SERVICE_UNAVAILABLE") from error
     if not response.content or len(response.content) > MAX_RESPONSE_BYTES:
         raise SemanticServiceError("SEMANTIC_RESPONSE_INVALID")
@@ -281,15 +270,6 @@ def request_semantics(
             parse_constant=_reject_constant,
         )
         choice = api_body["choices"][0]
-        usage = api_body.get("usage")
-        usage = usage if isinstance(usage, dict) else {}
-        finish = choice.get("finish_reason")
-        logging.getLogger(__name__).info(
-            "Semantic response: task=%s input_tokens=%d max_tokens=%d finish_reason=%s completion_tokens=%s",
-            task, input_tokens, max_tokens,
-            finish if finish in ("stop", "length", "content_filter", None) else "other",
-            usage.get("completion_tokens") if type(usage.get("completion_tokens")) is int else None,
-        )
         if choice.get("finish_reason") != "stop":
             raise SemanticServiceError("SEMANTIC_OUTPUT_TRUNCATED")
         content = choice["message"]["content"]
@@ -310,7 +290,7 @@ def request_semantics(
 def material_request_fits(
     client: httpx.Client, runtime_lock: dict[str, Any], request: dict[str, Any]
 ) -> bool:
-    """使用 resident tokenizer 與正式推論相同的 prompt 和輸出預算。"""
+    """以模型服務 tokenizer 計算分批容量；不截斷單一來源區塊。"""
 
     service = _service(runtime_lock)
     task = runtime_lock["material_semantics"]
@@ -328,10 +308,5 @@ def material_request_fits(
     except httpx.TimeoutException as error:
         raise SemanticServiceError("SEMANTIC_SERVICE_TIMEOUT") from error
     except (httpx.HTTPError, UnicodeError, ValueError) as error:
-        response = getattr(error, "response", None)
-        logging.getLogger(__name__).warning(
-            "Gemma request failed: error=%s status=%s",
-            type(error).__name__, getattr(response, "status_code", None),
-        )
         raise SemanticServiceError("SEMANTIC_SERVICE_UNAVAILABLE") from error
     return new_count <= task["max_new_input_tokens"]

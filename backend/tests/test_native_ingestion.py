@@ -7,7 +7,7 @@ import pytest
 
 import pdf_evidence.material_pipeline as pipeline
 from pdf_evidence.ocr_page_evidence import extract_page, build_native_page_evidence, _native_text_blocks, _native_region
-from test_material_pipeline_v1 import Client, _settings, _request, _semantic, _pdf
+from test_material_pipeline_v1 import Client, _settings, _request, _semantic, _pdf, _analyze
 
 
 def mixed_document(rotation=0, *, native=True):
@@ -41,7 +41,7 @@ def test_mixed_document_sends_only_native_text_to_semantics(tmp_path):
     source=tmp_path/'mixed.pdf'
     with mixed_document() as doc: doc.save(source)
     calls=[]
-    result=pipeline.analyze_material(_request(source),_settings(tmp_path),client=Client(),semantic_call=_semantic(calls))
+    result=_analyze(source,_settings(tmp_path),client=Client(),semantic_call=_semantic(calls))
     assert result['metrics']['ocr_calls']==0
     assert {e['source'] for e in result['evidence']}=={'native_text'}
     assert 'IMAGE ONLY' not in str(calls)
@@ -53,7 +53,7 @@ def test_pure_scan_is_unsupported_without_any_semantic_request(tmp_path):
     with mixed_document(native=False) as doc: doc.save(source)
     calls=[]
     with pytest.raises(pipeline.MaterialAnalysisError,match='NO_USABLE_EVIDENCE'):
-        pipeline.analyze_material(_request(source),_settings(tmp_path),client=Client(),semantic_call=_semantic(calls))
+        _analyze(source,_settings(tmp_path),client=Client(),semantic_call=_semantic(calls))
     assert calls==[]
 
 
@@ -63,7 +63,7 @@ def test_excluded_last_page_is_recorded_and_processing_can_finish(tmp_path):
         doc.new_page(); raw=doc.tobytes()
     source.write_bytes(raw)
     calls=[];progress=[]
-    result=pipeline.analyze_material(_request(source),_settings(tmp_path),client=Client(),semantic_call=_semantic(calls),progress_callback=lambda *a:progress.append(a))
+    result=_analyze(source,_settings(tmp_path),client=Client(),semantic_call=_semantic(calls),progress_callback=lambda *a:progress.append(a))
     assert [p['page'] for p in result['excluded_pages']]==[3]
     assert result['excluded_pages'][0]['page_ref']
     assert all(e['page']!=3 for e in result['evidence'])
@@ -108,4 +108,4 @@ def test_scan_with_only_native_copyright_footer_is_unsupported(tmp_path, monkeyp
         doc.save(source)
     monkeypatch.setattr(pipeline,'semantic_client',lambda: pytest.fail('no semantic client for metadata-only text'))
     with pytest.raises(pipeline.MaterialAnalysisError,match='NO_USABLE_EVIDENCE'):
-        pipeline.analyze_material(_request(source),_settings(tmp_path))
+        _analyze(source,_settings(tmp_path))

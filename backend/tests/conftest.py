@@ -5,11 +5,12 @@ import pytest
 
 @pytest.fixture(autouse=True)
 def forbid_live_model_http(monkeypatch):
-    original = httpx.HTTPTransport.handle_request
+    # TestClient／ASGITransport／MockTransport 不經這個入口；模型 HTTP 一律禁止。
+    def reject(*args, **kwargs):
+        raise AssertionError("LIVE_MODEL_HTTP_FORBIDDEN_IN_TESTS")
 
-    def handle_request(self, request):
-        if request.url.host not in {"127.0.0.1", "localhost", "::1"} or request.url.port in {18000, 18001}:
-            raise AssertionError("LIVE_MODEL_HTTP_FORBIDDEN_IN_TESTS")
-        return original(self, request)
+    async def reject_async(*args, **kwargs):
+        raise AssertionError("LIVE_MODEL_HTTP_FORBIDDEN_IN_TESTS")
 
-    monkeypatch.setattr(httpx.HTTPTransport, "handle_request", handle_request)
+    monkeypatch.setattr(httpx.HTTPTransport, "handle_request", reject)
+    monkeypatch.setattr(httpx.AsyncHTTPTransport, "handle_async_request", reject_async)
