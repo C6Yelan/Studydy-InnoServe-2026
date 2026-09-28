@@ -216,6 +216,7 @@ def analyze_material(
     produced_at: str | None = None,
     progress_callback: Progress | None = None,
     cancellation_check: Callable[[], None] | None = None,
+    wait_cancellation_check: Callable[[], None] | None = None,
     client: httpx.Client | None = None,
     semantic_call: Callable[..., dict[str, Any]] = request_semantics,
     base_structure: dict[str, Any] | None = None,
@@ -228,6 +229,7 @@ def analyze_material(
     resolved_time = produced_at or datetime.now(UTC).isoformat()
     report = progress_callback or (lambda _stage, _completed, _total: None)
     check_cancel = cancellation_check or (lambda: None)
+    check_wait = wait_cancellation_check or check_cancel
     source_digest = input_binding["source_set_digest"]
     restored = analysis_archive.load_checkpoint() if analysis_archive is not None else None
     check_cancel()
@@ -313,7 +315,7 @@ def analyze_material(
     try:
         bundles = iter(build_semantic_bundles(
             context, state=state,
-            fits=lambda request: material_request_fits(http, lock, request),
+            fits=lambda request: material_request_fits(http, lock, request, cancellation_check=check_wait),
             minimum_page=base_structure["page_count"] + 1 if base_structure else 1,
             minimum_evidence_index=cursor,
         ))
@@ -347,6 +349,7 @@ def analyze_material(
                             http,
                             runtime_lock=lock,
                             task="material_semantics",
+                            cancellation_check=check_wait,
                             request=request_document,
                             response_schema=semantic_response_schema([
                                 row[0]
