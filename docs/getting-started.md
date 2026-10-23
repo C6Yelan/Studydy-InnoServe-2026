@@ -27,7 +27,8 @@ chmod 600 .env
 | STUDYDY_PORT／STUDYDY_PUBLIC_ORIGIN | 對外 port 與完整 origin，預設 4176／http://127.0.0.1:4176 |
 | STUDYDY_SECURE_COOKIE | 本機 HTTP 用 false，HTTPS 用 true |
 | STUDYDY_DATA_DIR | 持久資料根目錄，預設 ./.studydy-product/compose |
-| STUDYDY_UID／STUDYDY_GID | 資料 owner，預設 1000 |
+| STUDYDY_UID／STUDYDY_GID | 主機資料管理者、SSH bridge／cloudflared 身分，預設 1000:1000 |
+| STUDYDY_BACKEND_UID | 後端專用 UID，預設 20002；GID 沿用 STUDYDY_GID，維持 1000 |
 | POSTGRES_DB／POSTGRES_USER／POSTGRES_PASSWORD | 本部署資料庫與認證 |
 | STUDYDY_SEMANTIC_BASE_URL | 模型 origin，不含 /v1、帳密、query 或 fragment |
 | VLLM_API_KEY | 選用模型 Bearer token；空值不送 Authorization |
@@ -37,6 +38,8 @@ chmod 600 .env
 
 ## 建置與服務管理
 
+首次使用時，先由主機資料管理者建立尚不存在的 `STUDYDY_DATA_DIR`（預設 `./.studydy-product/compose`），owner/group 對應 `STUDYDY_UID/GID`、權限0700，避免 Docker 自動建立 root-owned bind 目錄。若資料根已存在，不重設其擁有者或權限；先核對既有狀態，再依本次部署狀態檔處理需要遷移的 artifact 子樹。
+
 ~~~bash
 docker compose build
 docker compose up -d --wait
@@ -45,7 +48,7 @@ docker compose ps
 
 網站：http://127.0.0.1:4176。Nginx 代理同源 /v1 API；[OpenAPI](http://127.0.0.1:4176/v1/openapi.json)提供實際契約。模型、套件與請求設定以 [runtime-lock.json](../local_ai/runtime-lock.json) 為準。
 
-init 建立資料目錄及權限；後端依序核對 migration checksum、套用待執行版本，再啟動 API 與 worker。重跑不重建已有帳號或清空資料。登入、已保存資料讀取、上傳與轉檔不需語意模型。
+init 建立缺少的目錄：資料根目錄由 STUDYDY_UID/GID 管理，artifact 根由 STUDYDY_BACKEND_UID/STUDYDY_GID 擁有，PostgreSQL 保持 999:999。重跑不更動既有資料根目錄或 postgres 的 owner／mode；只設定 artifact 根，既有 artifact 子樹必須在切換身分前完成明確的擁有者遷移。後端依序核對 migration checksum、套用待執行版本，再啟動 API 與 worker。重跑不重建已有帳號或清空資料。登入、已保存資料讀取、上傳與轉檔不需語意模型。
 
 ~~~bash
 docker compose logs --tail 100 backend
@@ -74,7 +77,7 @@ STUDYDY_SSH_MODEL_PORT=18000
 
 ## 資料、備份與還原
 
-STUDYDY_DATA_DIR 包含 artifacts／postgres。.env 與 SSH 認證須另行安全保存。
+STUDYDY_DATA_DIR 包含 artifacts／postgres。.env 與 SSH 認證須另行安全保存。Artifact 的 0700 目錄、0400 發布檔與0600暫存檔契約保持不變；GID1000不代表 jerry 可直接讀寫。主機工具應透過後端 API 或以本版服務 UID 執行的受控命令存取，不直接修改已發布產物；不要遞迴 chown 整個資料根目錄、PostgreSQL 或共用 `.venv`。
 
 1. 備份前確認沒有進行中的工作並停止產品寫入；以 pg_dump 備份 PostgreSQL，同步保存 artifact store、私有設定、檔案權限及程式／映像版本。不要複製正在運行的 PGDATA 代替資料庫備份。
 2. 還原至明確命名的空白產品還原目標，使用相符的 PostgreSQL 與程式版本。以 pg_restore --no-owner --no-acl --exit-on-error --single-transaction 還原 dump，artifact 解到獨立私人目錄。

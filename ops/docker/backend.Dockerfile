@@ -46,7 +46,7 @@ COPY backend/src /app/backend/src
 COPY backend/migrations /app/backend/migrations
 COPY local_ai/runtime-lock.json /app/local_ai/runtime-lock.json
 RUN chmod -R a+rX /app/backend/src /app/backend/migrations /app/local_ai
-USER 1000:1000
+USER 20002:1000
 ENTRYPOINT ["/app/backend/.venv/bin/python", "-m", "runtime.container_app"]
 CMD ["serve"]
 
@@ -56,7 +56,7 @@ RUN --mount=type=cache,target=/root/.cache/uv uv sync --project backend --locked
 COPY backend/tests /app/backend/tests
 RUN chmod -R a+rX /app
 ENV PYTHONPATH=/app/backend/src:/app/backend/tests
-USER 1000:1000
+USER 20002:1000
 ENTRYPOINT ["/app/backend/.venv/bin/pytest"]
 CMD ["-q", "-o", "cache_dir=/tmp/pytest-cache", "backend/tests", "--ignore=backend/tests/runtime"]
 

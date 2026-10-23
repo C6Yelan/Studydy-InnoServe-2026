@@ -24,6 +24,12 @@ docker compose -p studydy-unit-tests -f compose.test.yaml run --build --rm unit
 
 後端使用 CPython 3.12.15；LibreOffice／Bubblewrap 保留原驗證快照，CA、XML／網路／文件解析相關系統庫由獨立安全快照定版安裝，版本見 `ops/docker/backend.Dockerfile`。競賽版沒有 OCR 或 lxml 依賴，不加入其建置階段；後端信任庫依官方修補範圍確認 emSign G3 已移除。前端採官方 nginx 1.30.6 映像，Alpine 3.24.3 等官方重建後再更新 digest，不自行 apk upgrade。
 
+## 身分與檔案權限驗證
+
+Backend／test 映像預設使用20002:1000；Compose由 `STUDYDY_BACKEND_UID` 選擇後端 UID，與資料管理／bridge／cloudflared的 `STUDYDY_UID` 分開。隔離驗證使用獨立 Compose project、暫存資料根及假金鑰，不掛載產品資料或真金鑰；確認init只處理允許的目錄、後端能寫入／正規化artifact、管理者只能透過API或服務UID受控命令讀取私有產物。
+
+保留0700／0400等現有斷言。Runtime需要模型替身及專用測試DB；使用新非root UID不代表可提高NPROC／pids、放寬seccomp或取消隔離。SSH bridge仍以1000:1000驗證假金鑰可讀，其他服務身分不可因此取得私鑰。
+
 ## 原始碼測試
 
 需先準備 backend/.venv、frontend/node_modules；真轉檔還需要部署相同的 LibreOffice、字型及 Bubblewrap。依賴版本以 lock files 為準，不重建其他 checkout 共用的環境。

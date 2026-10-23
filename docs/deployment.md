@@ -33,6 +33,14 @@
 不需 AI 的驗證包含 auth、ownership、上傳、normalization／download、private no-store
 與公開 HTTPS。真 AI generation／retry／map generation 標記 DEFERRED_AI_VALIDATION。
 
+## 後端專用身分
+
+Backend 與其轉檔子程序使用 `STUDYDY_BACKEND_UID`（預設20002），GID維持1000。容器 runtime tmpfs 使用同一身分；`nproc=1024`、容器 pids512、read_only、cap_drop、no-new-privileges、seccomp及bwrap參數均不變。
+
+`STUDYDY_UID/GID` 仍供主機資料管理、model-bridge與cloudflared使用（預設1000:1000）。這兩個低執行緒代理不執行轉檔或推論，保留原身分可避免更改私鑰／token的owner與私有權限。Init仍以0:0執行，僅初始化缺少的受管理目錄；既有資料根目錄與PostgreSQL權限保留，artifact根及其子樹的身分遷移須在部署時分開處理。
+
+Artifact仍採私有目錄／不可變發布檔契約，不能靠群組開權限繞過。具體遷移範圍、檔案數、擁有者切換及回滾命令應依本次部署狀態檔執行，不把整個資料根目錄一起變更，也不改主機共用 `.venv`。
+
 ## PostgreSQL 18.6 安全更新
 
 PostgreSQL 映像與隔離測試 fixture 固定同一個 18.6-bookworm digest；psycopg／psycopg-binary 3.3.5 的正式 wheel 內含 libpq 18.6，更新 server 不會替換這份 client library。

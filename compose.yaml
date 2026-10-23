@@ -10,6 +10,7 @@ services:
     environment:
       STUDYDY_UID: ${STUDYDY_UID:-1000}
       STUDYDY_GID: ${STUDYDY_GID:-1000}
+      STUDYDY_BACKEND_UID: ${STUDYDY_BACKEND_UID:-20002}
     volumes:
       - ${STUDYDY_DATA_DIR:-./.studydy-product/compose}:/data
     network_mode: none
@@ -44,7 +45,7 @@ services:
       context: .
       dockerfile: ops/docker/backend.Dockerfile
       target: backend
-    user: "${STUDYDY_UID:-1000}:${STUDYDY_GID:-1000}"
+    user: "${STUDYDY_BACKEND_UID:-20002}:${STUDYDY_GID:-1000}"
     depends_on:
       postgres:
         condition: service_healthy
@@ -61,7 +62,7 @@ services:
       - ${STUDYDY_DATA_DIR:-./.studydy-product/compose}/artifacts:/data/artifacts
     tmpfs:
       - /tmp:rw,nosuid,nodev,size=1g,mode=1777
-      - /opt/studydy/runtime:rw,nosuid,nodev,size=16m,mode=0700,uid=${STUDYDY_UID:-1000},gid=${STUDYDY_GID:-1000}
+      - /opt/studydy/runtime:rw,nosuid,nodev,size=16m,mode=0700,uid=${STUDYDY_BACKEND_UID:-20002},gid=${STUDYDY_GID:-1000}
     extra_hosts: ["host.docker.internal:host-gateway"]
     read_only: true
     cap_drop: [ALL]

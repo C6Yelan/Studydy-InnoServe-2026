@@ -12,21 +12,30 @@ from .semantic_service import _origin, SERVICE_URL_ENV
 from .storage.migrations import run_migrations
 
 
-def initialize_data(root: Path, uid: int, gid: int) -> None:
-    if uid <= 0 or gid <= 0 or root.is_symlink():
+def initialize_data(root: Path, uid: int, gid: int, *, backend_uid: int | None = None) -> None:
+    if backend_uid is None:
+        backend_uid = uid
+    if uid <= 0 or gid <= 0 or backend_uid <= 0 or root.is_symlink():
         raise ValueError("CONTAINER_DATA_INVALID")
+    root_created = not root.exists()
     root.mkdir(mode=0o700, parents=True, exist_ok=True)
-    root.chmod(0o700)
-    os.chown(root, uid, gid)
+    # 資料管理者仍使用原身分；重跑 init 不更動既有資料根目錄權限。
+    if root_created:
+        root.chmod(0o700)
+        os.chown(root, uid, gid)
     for relative, owner, group in (
-        ("artifacts", uid, gid), ("postgres", 999, 999),
+        ("artifacts", backend_uid, gid), ("postgres", 999, 999),
     ):
         path = root / relative
         if path.is_symlink():
             raise ValueError("CONTAINER_DATA_INVALID")
+        created = not path.exists()
         path.mkdir(mode=0o700, parents=True, exist_ok=True)
-        path.chmod(0o700)
-        os.chown(path, owner, group)
+        # 僅 artifact 根交給後端；既有子樹須由部署程序明確遷移。
+        # PostgreSQL 只在首次建立時設 owner，不能重設既有資料權限。
+        if relative == "artifacts" or created:
+            path.chmod(0o700)
+            os.chown(path, owner, group)
 
 
 def configure_database(environment) -> None:
@@ -55,7 +64,12 @@ def main() -> None:
     command = parser.parse_args().command
     try:
         if command == "init":
-            initialize_data(Path("/data"), int(os.environ["STUDYDY_UID"]), int(os.environ["STUDYDY_GID"]))
+            initialize_data(
+                Path("/data"),
+                int(os.environ["STUDYDY_UID"]),
+                int(os.environ["STUDYDY_GID"]),
+                backend_uid=int(os.environ["STUDYDY_BACKEND_UID"]),
+            )
             return
         if command == "serve":
             _origin(os.environ[SERVICE_URL_ENV])
