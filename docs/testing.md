@@ -22,6 +22,8 @@ docker compose -p studydy-unit-tests -f compose.test.yaml run --build --rm unit
 
 容器不掛載產品資料，不需要 GPU 或模型。前端映像建置包含 Node tests、TypeScript 與 production build。
 
+後端使用 CPython 3.12.15；LibreOffice／Bubblewrap 保留原驗證快照，CA、XML／網路／文件解析相關系統庫由獨立安全快照定版安裝，版本見 `ops/docker/backend.Dockerfile`。競賽版沒有 OCR 或 lxml 依賴，不加入其建置階段；後端信任庫依官方修補範圍確認 emSign G3 已移除。前端採官方 nginx 1.30.6 映像，Alpine 3.24.3 等官方重建後再更新 digest，不自行 apk upgrade。
+
 ## 原始碼測試
 
 需先準備 backend/.venv、frontend/node_modules；真轉檔還需要部署相同的 LibreOffice、字型及 Bubblewrap。依賴版本以 lock files 為準，不重建其他 checkout 共用的環境。
@@ -37,7 +39,7 @@ Node runner 的摘要可能按測試檔計數；需要個別案例時可直接�
 
 ## Runtime 與瀏覽器
 
-Runtime 按 accounts、assessments、infrastructure、materials、sources、study 分類。fixture 預設建立 disposable PostgreSQL 18，每個案例使用獨立 DB 與 artifact root；禁止接產品 DB。
+Runtime 按 accounts、assessments、infrastructure、materials、sources、study 分類。fixture 預設建立固定映像的 disposable PostgreSQL 18.6，每個案例使用獨立 DB 與 artifact root；禁止接產品 DB。
 
 如需指定資料庫，STUDYDY_TEST_POSTGRES_DSN 只接受本機、名稱以 studydy_test 開頭的專用 control database，並核對版本及 superuser 權限。
 
