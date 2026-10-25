@@ -30,6 +30,8 @@ Backend／test 映像預設使用20002:1000；Compose由 `STUDYDY_BACKEND_UID` �
 
 保留0700／0400等現有斷言。Runtime需要模型替身及專用測試DB；使用新非root UID不代表可提高NPROC／pids、放寬seccomp或取消隔離。SSH bridge仍以1000:1000驗證假金鑰可讀，其他服務身分不可因此取得私鑰。
 
+完整重建後端映像後，以 `python3 -B ops/tests/backend_identity.py <映像>` 核對執行 UID 有 passwd 身分、HOME 為 /tmp，且清空環境時 `getpass.getuser()` 與 `~` 仍可用。腳本以唯讀 rootfs、無網路執行，不 build／pull、不掛產品資料；UID 依 `STUDYDY_BACKEND_UID`（預設20002）。
+
 ## 原始碼測試
 
 需先準備 backend/.venv、frontend/node_modules；真轉檔還需要部署相同的 LibreOffice、字型及 Bubblewrap。依賴版本以 lock files 為準，不重建其他 checkout 共用的環境。

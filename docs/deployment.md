@@ -35,7 +35,7 @@
 
 ## 後端專用身分
 
-Backend 與其轉檔子程序使用 `STUDYDY_BACKEND_UID`（預設20002），GID維持1000。容器 runtime tmpfs 使用同一身分；`nproc=1024`、容器 pids512、read_only、cap_drop、no-new-privileges、seccomp及bwrap參數均不變。
+Backend 與其轉檔子程序使用 `STUDYDY_BACKEND_UID`（預設20002），GID維持1000。容器 runtime tmpfs 使用同一身分；完整建置時 Compose 以同名建置參數在 backend 階段建立 `studydy-backend` passwd 項目（HOME=/tmp tmpfs），讓 `getpass`、`~` 等依 passwd 查身分的程式可用；改 UID 須完整重建 backend 映像。`nproc=1024`、容器 pids512、read_only、cap_drop、no-new-privileges、seccomp及bwrap參數均不變。
 
 `STUDYDY_UID/GID` 仍供主機資料管理、model-bridge與cloudflared使用（預設1000:1000）。這兩個低執行緒代理不執行轉檔或推論，保留原身分可避免更改私鑰／token的owner與私有權限。Init仍以0:0執行，僅初始化缺少的受管理目錄；既有資料根目錄與PostgreSQL權限保留，artifact根及其子樹的身分遷移須在部署時分開處理。
 

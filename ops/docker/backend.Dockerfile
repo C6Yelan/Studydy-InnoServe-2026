@@ -1,3 +1,5 @@
+# 後端執行身分；Compose 由 .env 的 STUDYDY_BACKEND_UID 傳入。
+ARG STUDYDY_BACKEND_UID=20002
 FROM ubuntu:26.04@sha256:da6fc2be547864451aa253836dd926da33623312df4a9a243e35dc877c378a78 AS dependencies
 COPY --from=ghcr.io/astral-sh/uv:0.13.5@sha256:32a7bb39b496babbd997b0a39a4d66c126bdaf5661b302bf6f06abda8deca6ff /uv /usr/local/bin/uv
 # 保留已驗證的轉檔版本；一般套件站不保證保存已被取代的版本。
@@ -42,21 +44,26 @@ ENV PYTHONPATH=/app/backend/src \
     HF_HOME=/tmp/huggingface
 
 FROM dependencies AS backend
+ARG STUDYDY_BACKEND_UID
+# getpass、~ 需要 passwd 項目；HOME 放在可寫的 /tmp tmpfs，不落在 artifacts 等產品資料。
+RUN useradd --uid "$STUDYDY_BACKEND_UID" --gid 1000 --home-dir /tmp --no-create-home \
+    --no-log-init --shell /usr/sbin/nologin studydy-backend
 COPY backend/src /app/backend/src
 COPY backend/migrations /app/backend/migrations
 COPY local_ai/runtime-lock.json /app/local_ai/runtime-lock.json
 RUN chmod -R a+rX /app/backend/src /app/backend/migrations /app/local_ai
-USER 20002:1000
+USER ${STUDYDY_BACKEND_UID}:1000
 ENTRYPOINT ["/app/backend/.venv/bin/python", "-m", "runtime.container_app"]
 CMD ["serve"]
 
 FROM backend AS test
+ARG STUDYDY_BACKEND_UID
 USER root
 RUN --mount=type=cache,target=/root/.cache/uv uv sync --project backend --locked --no-dev --extra test --python 3.12.15
 COPY backend/tests /app/backend/tests
 RUN chmod -R a+rX /app
 ENV PYTHONPATH=/app/backend/src:/app/backend/tests
-USER 20002:1000
+USER ${STUDYDY_BACKEND_UID}:1000
 ENTRYPOINT ["/app/backend/.venv/bin/pytest"]
 CMD ["-q", "-o", "cache_dir=/tmp/pytest-cache", "backend/tests", "--ignore=backend/tests/runtime"]
 

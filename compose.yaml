@@ -5,6 +5,8 @@ services:
       context: .
       dockerfile: ops/docker/backend.Dockerfile
       target: backend
+      args:
+        STUDYDY_BACKEND_UID: ${STUDYDY_BACKEND_UID:-20002}
     user: "0:0"
     command: ["init"]
     environment:
@@ -45,6 +47,8 @@ services:
       context: .
       dockerfile: ops/docker/backend.Dockerfile
       target: backend
+      args:
+        STUDYDY_BACKEND_UID: ${STUDYDY_BACKEND_UID:-20002}
     user: "${STUDYDY_BACKEND_UID:-20002}:${STUDYDY_GID:-1000}"
     depends_on:
       postgres:
