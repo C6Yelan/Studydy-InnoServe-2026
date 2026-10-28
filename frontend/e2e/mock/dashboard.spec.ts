@@ -1,5 +1,6 @@
 import { expect, test, type Page } from "@playwright/test";
 import type { MaterialLibraryItem, StudySessionLink } from "../../src/api/contracts";
+import { goalSummary, goalView } from "../fixtures/learning-goals";
 import { emptyCelebrationClaim, learningActivity, learningRhythm } from "../fixtures/learning-activity";
 
 const uuid = (seed: number) => `00000000-0000-4000-8000-${String(seed).padStart(12, "0")}`;
@@ -554,9 +555,9 @@ test("today quests show done state and open the matching place", async ({ page }
   await page.goto("/");
   const quests = page.getByRole("region", { name: "今日任務" });
   await expect(quests.getByText("1 / 3")).toBeVisible();
-  await expect(quests.getByRole("listitem")).toHaveText([/標記 5 張概念卡已完成 2 \/ 5/, /完成 1 次題組作答今天還沒完成/, /聽完 1 集還沒聽完的 Podcast今天已完成/]);
-  // 已完成的任務不顯示動作按鈕。
-  await expect(quests.getByRole("button")).toHaveCount(2);
+  await expect(quests.getByRole("listitem")).toHaveText([/標記 5 張概念卡2\/5/, /完成題組作答0\/1/, /聽完 1 集 Podcast1\/1/]);
+  // 每列保留進度與入口，完成後仍可回到對應內容。
+  await expect(quests.getByRole("button")).toHaveCount(3);
   await quests.getByRole("button", { name: "繼續學習：完成 1 次題組作答" }).click();
   await expect.poll(() => new URL(page.url()).pathname).toBe(studyPath);
 });
@@ -804,11 +805,18 @@ for (const count of [3, 6, 9, 24])
       const viewport = (await page.locator(".island-map-viewport").boundingBox())!;
       const [x, y, w, h] = (await page.locator(".island-map-minimap").getAttribute("viewBox"))!.split(" ").map(Number);
       const view = await mapView(page);
-      expect(view.x + (x + w / 2) * view.k).toBeCloseTo(viewport.width / 2, 0);
-      expect(view.y + (y + h / 2) * view.k).toBeCloseTo(viewport.height / 2, 0);
+      // 全部放得進畫面（回到全覽的縮放與開啟相同）時置中；島太多（全覽縮放 < 0.35）則聚焦在最近學習的島，見 24 座島的案例。
+      await page.getByRole("button", { name: "回到全覽" }).click();
+      await page.waitForTimeout(500);
+      if (Math.abs((await mapView(page)).k - view.k) < 0.001) {
+        expect(view.x + (x + w / 2) * view.k).toBeCloseTo(viewport.width / 2, 0);
+        expect(view.y + (y + h / 2) * view.k).toBeCloseTo(viewport.height / 2, 0);
+      }
       if (count === 24) {
         expect(Math.min((viewport.width - 48) / w, (viewport.height - 48) / h)).toBeLessThan(0.5);
-        expect(view.k).toBe(0.5);
+        // 開啟縮放維持可讀，「回到全覽」才把全部島放進畫面。
+        expect(view.k).toBeGreaterThanOrEqual(0.35);
+        expect(view.k).toBeLessThanOrEqual(0.6);
       }
     });
   }
@@ -937,6 +945,83 @@ for (const [width, height, fits] of [[1920, 950, true], [2560, 1300, true], [144
     }
   });
 
+test("home at 1536×730 opens with every island label inside the map and the quests inside the window", async ({ page }) => {
+  await page.setViewportSize({ width: 1536, height: 730 });
+  await mockLibrary(page, () => manyMaterials(9));
+  await page.route("**/v1/learning-activity", (route) => route.fulfill({ json: learningActivity({
+    quests: [{ kind: "mark_cards", progress: 0, target: 5, done: false }, { kind: "continue_study", progress: 0, target: 1, done: false }],
+  }) }));
+  await page.goto("/");
+  await expect(islands(page)).toHaveCount(9);
+  const map = (await page.locator(".island-map-viewport").boundingBox())!;
+  const flags = await page.locator(".map-island:not(.is-new) .island-flag").evaluateAll((nodes) => nodes.map((node) => {
+    const { top, bottom, left, right } = node.getBoundingClientRect();
+    return { top, bottom, left, right };
+  }));
+  expect(flags).toHaveLength(9);
+  for (const flag of flags) {
+    expect(flag.top).toBeGreaterThanOrEqual(map.y);
+    expect(flag.bottom).toBeLessThanOrEqual(map.y + map.height);
+    expect(flag.left).toBeGreaterThanOrEqual(map.x);
+    expect(flag.right).toBeLessThanOrEqual(map.x + map.width);
+  }
+  const quests = (await page.getByRole("region", { name: "今日任務" }).boundingBox())!;
+  expect(quests.y + quests.height).toBeLessThanOrEqual(730);
+  expect(await page.evaluate(() => document.documentElement.scrollHeight - innerHeight)).toBeLessThanOrEqual(0);
+});
+
+test("24 islands open readable on the most recently studied island and the fit button still shows all", async ({ page }) => {
+  await page.setViewportSize({ width: 1536, height: 730 });
+  const items = manyMaterials(24);
+  // 最近學習的是第 17 份，不是第一份或最新建立的。
+  items[16] = { ...items[16], study_sessions: [{ ...active, started_at: "2026-10-01T00:00:00Z" }] };
+  items[0] = { ...items[0], study_sessions: [{ ...active, started_at: "2026-09-01T00:00:00Z" }] };
+  await mockLibrary(page, () => items);
+  await page.goto("/");
+  await expect(islands(page)).toHaveCount(24);
+  const map = (await page.locator(".island-map-viewport").boundingBox())!;
+  expect((await mapView(page)).k).toBeCloseTo(0.6, 2);
+  const recent = page.locator(".map-island", { hasText: "第 17 份" });
+  const inside = async () => {
+    const flag = (await recent.locator(".island-flag").boundingBox())!;
+    const goalFlag = (await recent.locator(".island-flag-text").boundingBox())!;
+    for (const box of [flag, goalFlag]) {
+      expect(box.x).toBeGreaterThanOrEqual(map.x); expect(box.y).toBeGreaterThanOrEqual(map.y);
+      expect(box.x + box.width).toBeLessThanOrEqual(map.x + map.width); expect(box.y + box.height).toBeLessThanOrEqual(map.y + map.height);
+    }
+  };
+  await inside();
+  await page.getByRole("button", { name: "回到全覽" }).click();
+  await expect.poll(async () => (await mapView(page)).k).toBeLessThan(0.5);
+  for (const flag of await page.locator(".map-island:not(.is-new) .island-flag").evaluateAll((nodes) => nodes.map((node) => node.getBoundingClientRect().toJSON())) as { x: number; y: number; right: number; bottom: number }[]) {
+    expect(flag.x).toBeGreaterThanOrEqual(map.x); expect(flag.y).toBeGreaterThanOrEqual(map.y);
+    expect(flag.right).toBeLessThanOrEqual(map.x + map.width); expect(flag.bottom).toBeLessThanOrEqual(map.y + map.height);
+  }
+});
+
+test("1536×730 with five daily tasks scrolls inside the right column and not the page", async ({ page }) => {
+  await page.setViewportSize({ width: 1536, height: 730 });
+  const items = manyMaterials(9);
+  await mockLibrary(page, () => items);
+  await page.route("**/v1/learning-activity", (route) => route.fulfill({ json: learningActivity({
+    quests: [{ kind: "mark_cards", progress: 0, target: 5, done: false }, { kind: "continue_study", progress: 0, target: 1, done: false }],
+  }) }));
+  await page.route(/\/v1\/learning-goals/, (route) => route.fulfill({ json: { schema: "learning-goals/v1", today: "2026-10-24",
+    goals: [0, 1, 2].map((index) => goalSummary(goalView(items[index].material_id, revision, runId, `concept:sha256:${"b".repeat(64)}`), items[index].display_name)) } }));
+  await page.goto("/");
+  await expect(page.locator(".dashboard-quests .quest-row")).toHaveCount(5);
+  const side = page.locator(".dashboard-side");
+  const [map, column] = await Promise.all([page.locator(".archipelago").boundingBox(), side.boundingBox()]);
+  expect(column!.y + column!.height).toBeLessThanOrEqual(map!.y + map!.height + 1);
+  expect(await page.evaluate(() => document.documentElement.scrollHeight - innerHeight)).toBeLessThanOrEqual(0);
+  const metrics = await side.evaluate((element) => ({ scroll: element.scrollHeight, client: element.clientHeight }));
+  expect(metrics.scroll).toBeGreaterThan(metrics.client);
+  await expect(quick(page)).not.toBeInViewport({ ratio: 1 });
+  await side.evaluate((element) => element.scrollTo(0, element.scrollHeight));
+  await expect(quick(page)).toBeInViewport({ ratio: 1 });
+  expect(await page.evaluate(() => document.documentElement.scrollHeight - innerHeight)).toBeLessThanOrEqual(0);
+});
+
 test("achievements scroll inside the overview on desktop while the page and level column stay put", async ({ page }) => {
   await page.setViewportSize({ width: 1920, height: 900 });
   await page.route("**/v1/learning-activity", (route) => route.fulfill({ json: learningActivity({}) }));
@@ -995,12 +1080,18 @@ test("sound switch silences cues and is remembered after reload", async ({ page 
   await page.addInitScript(() => {
     const w = window as unknown as { oscillators: number; AudioContext: unknown };
     w.oscillators = 0;
-    const param = { setValueAtTime() {}, linearRampToValueAtTime() {}, exponentialRampToValueAtTime() {} };
+    const param = () => ({ value: 0, setValueAtTime() {}, linearRampToValueAtTime() {}, exponentialRampToValueAtTime() {} });
+    const node = () => ({ gain: param(), frequency: param(), Q: param(), threshold: param(), ratio: param(), delayTime: param(), connect: (next: unknown) => next });
     w.AudioContext = class {
-      state = "running"; currentTime = 0; destination = {};
+      state = "running"; currentTime = 0; sampleRate = 8000; destination = {};
       resume() { return Promise.resolve(); }
-      createGain() { return { gain: param, connect: (next: unknown) => next }; }
-      createOscillator() { w.oscillators++; return { frequency: param, connect: (next: unknown) => next, start() {}, stop() {} }; }
+      createGain() { return node(); }
+      createDynamicsCompressor() { return node(); }
+      createDelay() { return node(); }
+      createBiquadFilter() { return node(); }
+      createBuffer(_: number, length: number) { return { getChannelData: () => new Float32Array(length) }; }
+      createBufferSource() { return { ...node(), start() {}, stop() {} }; }
+      createOscillator() { w.oscillators++; return { ...node(), start() {}, stop() {} }; }
     };
   });
   const oscillators = () => page.evaluate(() => (window as unknown as { oscillators: number }).oscillators);

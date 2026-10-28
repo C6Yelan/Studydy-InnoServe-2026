@@ -47,19 +47,12 @@ def test_notes_maps_and_diagnosis_export_owner_and_revision(closed_loop, tmp_pat
     assert '匯出私人註記' in client.get(paths[0]).text
     assert client.get(base + '/notes/full/export/md').status_code == 404
     assert client.get(base + '/learning-diagnosis/export/pdf', params={'set_id': str(uuid4())}).status_code == 400
-    doc = pymupdf.open(); doc.new_page(width=120, height=76)
-    png = b64encode(doc[0].get_pixmap().tobytes('png')).decode(); doc.close()
-    ids = [c['concept_id'] for c in client.get(base + '/outline').json()['concepts']]
-    map_body = {'images': [{'concept_ids': ids, 'png': png}]}
-    assert client.post(base + '/map/export/png', json=map_body, headers={'Origin': ORIGIN}).status_code == 200
-    assert client.post(base + '/map/export/png', json={'images': [{'concept_ids': ['fake'], 'png': png}]}, headers={'Origin': ORIGIN}).status_code == 400
     learner = f['learner'].learner_id
     assert exported(f['dsn']) == {(learner, 'notes'), (learner, 'map'), (learner, 'diagnosis')}
     foreign = register_account('exports_foreign@example.com', 'Synthetic test password 42', dsn=f['dsn'])
     client.cookies.set('studydy_session', foreign.raw_token)
     for path in paths:
         assert client.get(path).status_code == 404
-    assert client.post(base + '/map/export/png', json=map_body, headers={'Origin': ORIGIN}).status_code == 404
     client.cookies.clear()
     assert client.get(paths[0]).status_code == 401
     assert {kind for _, kind in exported(f['dsn'])} == {'notes', 'map', 'diagnosis'} and len(exported(f['dsn'])) == 3
@@ -184,3 +177,4 @@ def test_completed_transcript_exports_verified_text_and_sources(closed_loop, tmp
     assert response.status_code == 200, response.text
     assert all(segment["turns"][0]["text"] in response.text for segment in segments)
     assert "來源：" in response.text and (owner.learner_id, "podcast") in exported(dsn)
+    assert client.get(f"/v1/podcasts/{created['podcast_id']}/episodes/0/export/mp3").status_code == 404

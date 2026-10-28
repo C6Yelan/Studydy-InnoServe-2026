@@ -177,6 +177,18 @@ def test_podcast_quest_reads_episode_lists_saved_with_nul_text(closed_loop):
     assert (quests["finish_podcast_episode"]["podcast_id"], quests["finish_podcast_episode"]["episode_index"]) == (podcast, 0)
 
 
+def test_transcript_only_podcast_is_not_a_quest(closed_loop):
+    """競賽版只有講稿、沒有音訊的節目無法收聽，不可出現在今日任務。"""
+    fixture = concept_fixture(closed_loop, 2)
+    podcast = ready_podcast(fixture)
+    with database_session(fixture["dsn"]) as db:
+        row = db.get(Podcast, podcast)
+        episodes = deepcopy(row.episodes)
+        episodes[0]["audio"] = None
+        row.episodes = episodes
+    assert "finish_podcast_episode" not in {q["kind"] for q in activity(fixture)["quests"]}
+
+
 def test_repeated_question_counts_only_the_first_answer(closed_loop):
     fixture = concept_fixture(closed_loop, 2)
     dsn = fixture["dsn"]

@@ -97,7 +97,7 @@ export function PodcastTranscript({view,index,media,active,timelineState}:{
         </span>)}</span>
       </button>
     </li>)}</ol></>
-      :<>{episode.audio && <p className="podcast-meta-note">時間軸尚未準備完成，可先閱讀逐字稿。</p>}<ol ref={list}>{episode.script.segments.map((s,i)=><li key={s.beat_id??i}>
+      :<><p className="podcast-meta-note">{episode.audio ? "時間軸尚未準備完成，可先閱讀逐字稿。" : "逐字稿依主持人對話順序呈現。"}</p><ol ref={list}>{episode.script.segments.map((s,i)=><li key={s.beat_id??i}>
         {s.title&&<strong>{s.title}</strong>}{s.turns.map((turn,j)=><div key={j}><span className="podcast-transcript-speaker">{speakerName(episode,turn.speaker)}</span><p>{turn.text}</p></div>)}
       </li>)}</ol></>}
   </>;

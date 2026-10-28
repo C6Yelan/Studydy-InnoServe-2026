@@ -27,17 +27,17 @@ export function useMarkSubmit(apiClient: StudydyApiClient) {
   };
 }
 
-export function CardMarkButtons({ current, disabled, onMark, label = "標記這張卡" }: {
-  current: CardReviewRating | null; disabled?: boolean; onMark: (rating: CardReviewRating) => void; label?: string;
+export function CardMarkButtons({ current, disabled, onMark, label = "標記這張卡", hotkeys = false, title }: {
+  current: CardReviewRating | null; disabled?: boolean; onMark: (rating: CardReviewRating) => void; label?: string; hotkeys?: boolean; title?: string;
 }) {
   const [popped, setPopped] = useState<CardReviewRating | null>(null);
-  return <div className="review-grades" role="group" aria-label={label} data-silent-click>
+  return <div className="review-grades" role="group" aria-label={label} title={title} data-silent-click>
     {cardMarks.map((mark) => <button key={mark.rating} type="button" className={`is-${mark.rating}${current === mark.rating ? " is-selected" : ""}${popped === mark.rating ? " mark-pop" : ""}`}
       aria-pressed={current === mark.rating} disabled={disabled} onClick={() => {
         if (mark.rating === "remembered") { playCue("cardKnown"); setPopped(mark.rating); }
         onMark(mark.rating);
       }}>
-      <Icon name={mark.icon} size={20} />{mark.label}
+      <Icon name={mark.icon} size={20} />{mark.label}{hotkeys && <kbd aria-hidden="true">{mark.rating === "forgot" ? "1" : "2"}</kbd>}
     </button>)}
   </div>;
 }

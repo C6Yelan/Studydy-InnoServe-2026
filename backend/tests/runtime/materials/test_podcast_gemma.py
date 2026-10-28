@@ -59,7 +59,7 @@ def test_gemma_script_review_title_and_persistence(closed_loop, monkeypatch, fai
     assert view['status'] == 'ready' and view['completed_episodes'] == 1
     assert stages == ['script', 'review', 'title']
     script = episode['script']
-    assert script['provider'] == f"vllm:{lock['semantic_service']['model_id']};source-script/v16"
+    assert script['provider'] == f"vllm:{lock['semantic_service']['model_id']};source-script/v17"
     turn = script['segments'][0]['turns'][0]
     assert turn['text'] == claim['text']
     assert turn['parts'][0]['source_refs'] == [{'source_index': 0,

@@ -58,7 +58,7 @@ def test_concurrent_replay_conflict_and_delete_cannot_resurrect(closed_loop):
         card_sets.read_card_set(owner.learner_id, identity, dsn=dsn)
 
 
-@pytest.mark.parametrize("name,ids", [(" ", None), ("x\n", None), ("x" * 201, None), ("卡組", []), ("卡組", ["concept:sha256:" + "0" * 64])])
+@pytest.mark.parametrize("name,ids", [(" ", None), ("x\n", None), ("x" * 41, None), ("卡組", []), ("卡組", ["concept:sha256:" + "0" * 64])])
 def test_invalid_selection_or_name_does_not_save(closed_loop, name, ids):
     with pytest.raises(MaterialLibraryError, match="REQUEST_INVALID"):
         create(closed_loop, name=name, ids=ids)

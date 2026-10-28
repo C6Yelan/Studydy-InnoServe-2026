@@ -841,6 +841,11 @@ def _podcast_quest(session, owner, start, end):
         JOIN materials m ON m.material_id = p.material_id AND m.learner_id = p.learner_id
         LEFT JOIN podcast_episode_progress g ON g.podcast_id = p.podcast_id
         WHERE p.learner_id = :owner AND p.status = 'ready' AND m.discard_requested_at IS NULL
+          -- 只有講稿、沒有音訊的節目無法收聽，不列入任務。
+          AND NOT EXISTS (
+              SELECT 1 FROM jsonb_array_elements(CASE WHEN jsonb_typeof(p.episodes) = 'array'
+                                                      THEN p.episodes ELSE p.episodes -> 'items' END) AS e
+              WHERE coalesce(e -> 'audio', 'null'::jsonb) = 'null'::jsonb)
         GROUP BY p.podcast_id
         ORDER BY max(g.updated_at) DESC NULLS LAST, p.created_at DESC
         """

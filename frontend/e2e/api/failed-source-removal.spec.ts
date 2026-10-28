@@ -26,7 +26,7 @@ test('remove failed initial source, refresh, upload a replacement and publish', 
     name: 'Recovery.pdf', mimeType: 'application/pdf',
     buffer: readFileSync(process.env.STUDYDY_E2E_REMOVAL_PDF!),
   });
-  await page.getByRole('button', { name: /上傳.*教材/ }).click();
+  await page.getByRole('button', { name: '上傳並確認來源', exact: true }).click();
   const start = page.getByRole('button', { name: '開始分析教材', exact: true });
   await expect(start).toBeEnabled({ timeout: 20000 });
   await start.click();

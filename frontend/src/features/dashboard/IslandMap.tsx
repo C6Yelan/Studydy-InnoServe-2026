@@ -2,20 +2,26 @@ import { useCallback, useEffect, useMemo, useRef, type CSSProperties, type Keybo
 import type { MaterialLibraryItem } from "../../api/contracts";
 import { writeRoute } from "../../app/routes";
 import { IslandArt, islandColors, islandPalette } from "../../ui/art/Island";
+import { islandShape } from "../../ui/art/island-shape";
 import { ProgressRing } from "../../ui/art/ProgressRing";
 import { Icon } from "../../ui/Icon";
 import { Bone } from "../../ui/Skeleton";
 import { cellX, cellY, layoutIslands } from "./island-layout";
-import { islandState, openMaterial, statusText, type IslandProgress } from "./islands";
+import { headSession, islandState, openMaterial, statusText, type IslandProgress } from "./islands";
 import type { LearningGoalSummary } from "../../api/contracts";
 import { goalSummaryText } from "../learning-goals/goal-summary";
 
 // 可拖曳、縮放的群島地圖（島位見 island-layout.ts）。畫面位移與縮放存在 CSS 變數 --tx/--ty/--k，
 // 拖曳時直接改變數、不經過 React 重繪，島的標籤維持固定字級。
 
-const minZoom = 0.25;
+const minZoom = 0.1;
 const maxZoom = 1.6;
 const farZoom = 0.5;
+// 開啟時縮放不低於此值：標籤寬度 = k × 400 − 74 像素，0.35 時島名約可讀 5 個中文字；
+// 低於它（例如 16 座以上或手機寬度）改為置中在一座島，其餘讓使用者拖曳。
+const readableZoom = 0.35;
+// 聚焦模式的縮放：放大到島名較完整；地圖太矮放不下標籤時取放得下的最大值（不低於 readableZoom）。
+const focusZoom = 0.6;
 
 type View = { x: number; y: number; k: number };
 
@@ -36,14 +42,25 @@ export function IslandMap({ materials, progress, goals }: {
   const animation = useRef(0);
   const pointers = useRef(new Map<number, { x: number; y: number }>());
   const gesture = useRef({ startX: 0, startY: 0, moved: false });
-  const geometry = useRef({ islands, newSpot, bounds });
-  geometry.current = { islands, newSpot, bounds };
+  // 開啟時置中的島：最近學習的教材；沒有學習紀錄時取目標最緊迫的島。
+  const focusId = useMemo(() => {
+    let best: MaterialLibraryItem | undefined, at = "";
+    for (const material of materials ?? []) {
+      const started = headSession(material)?.started_at ?? "";
+      if (started > at) { at = started; best = material; }
+    }
+    if (best) return best.material_id;
+    let urgent: string | undefined, left = Infinity;
+    for (const material of materials ?? []) {
+      const goal = goals.get(material.material_id);
+      if (goal && goal.days_remaining - goal.overdue_days < left) { left = goal.days_remaining - goal.overdue_days; urgent = material.material_id; }
+    }
+    return urgent;
+  }, [materials, goals]);
+  const geometry = useRef({ islands, newSpot, bounds, focusId });
+  geometry.current = { islands, newSpot, bounds, focusId };
 
-  const fitZoom = () => {
-    const { bounds: b } = geometry.current;
-    return Math.min((size.current.w - 48) / (b.maxX - b.minX), (size.current.h - 48) / (b.maxY - b.minY), 1.1);
-  };
-  const zoomRange = () => [Math.max(minZoom, Math.min(0.5, fitZoom() * 0.8)), maxZoom] as const;
+  const zoomRange = () => [Math.max(minZoom, Math.min(0.5, fitAll().k * 0.8)), maxZoom] as const;
 
   // 畫面中心不離開地圖範圍；縮放限制在可讀範圍內。
   const constrain = (next: View): View => {
@@ -74,10 +91,34 @@ export function IslandMap({ materials, progress, goals }: {
   const centerOn = (x: number, y: number, k: number): View =>
     ({ k, x: size.current.w / 2 - x * k, y: size.current.h / 2 - y * k });
 
-  // 全覽維持群島範圍置中；島太多時將縮放下限設為 0.5，維持可讀的大小。
+  // 全部顯示：以群島範圍的中心置中，並讓所有島（含上緣的名稱標籤與新島入口）留在畫面內。
+  // 標籤字級固定，所以四邊各留 64／24／48／48 像素（上／下／左／右）的螢幕空間，其餘依縮放換算；縮放不低於 minZoom。
+  const fitAll = (): View => {
+    const { islands: placed, newSpot: spot, bounds: b } = geometry.current;
+    let minX = spot.x - 120, maxX = spot.x + 120, minY = spot.y - 100, maxY = spot.y + 100;
+    for (const island of placed) {
+      minX = Math.min(minX, island.x - island.w / 2); maxX = Math.max(maxX, island.x + island.w / 2);
+      minY = Math.min(minY, island.y - island.h / 2); maxY = Math.max(maxY, island.y + island.h / 2);
+    }
+    const cx = (b.minX + b.maxX) / 2, cy = (b.minY + b.maxY) / 2;
+    const { w, h } = size.current;
+    const k = clamp(Math.min(
+      (w / 2 - 48) / Math.max(cx - minX, maxX - cx), (h / 2 - 64) / (cy - minY), (h / 2 - 24) / (maxY - cy), 1.1,
+    ), minZoom, maxZoom);
+    return centerOn(cx, cy, k);
+  };
+
+  // 開啟畫面：全部放得進畫面且不小於 readableZoom 就全部顯示；島太多時放大到 focusZoom，置中在最近學習的島
+  // （沒有則取目標最緊迫的島、再沒有就維持地圖中心），讓使用者自己拖曳其餘區域。
   const overview = (): View => {
-    const { bounds: b } = geometry.current;
-    return centerOn((b.minX + b.maxX) / 2, (b.minY + b.maxY) / 2, Math.max(0.5, fitZoom()));
+    const all = fitAll();
+    if (all.k >= readableZoom) return all;
+    const { islands: placed, bounds: b, focusId: id } = geometry.current;
+    const target = placed.find((island) => island.material.material_id === id);
+    if (!target) return centerOn((b.minX + b.maxX) / 2, (b.minY + b.maxY) / 2, readableZoom);
+    // 標籤在島上緣外約 64 像素（螢幕空間），島本身依縮放換算。
+    const fits = (size.current.h / 2 - 64) / (target.h / 2);
+    return centerOn(target.x, target.y, clamp(Math.min(focusZoom, fits), readableZoom, focusZoom));
   };
 
   const animateTo = (target: View) => {
@@ -194,7 +235,7 @@ export function IslandMap({ materials, progress, goals }: {
     if (pan[event.key]) animateTo({ ...view.current, x: view.current.x + pan[event.key][0], y: view.current.y + pan[event.key][1] });
     else if (event.key === "+" || event.key === "=") zoomBy(1.4);
     else if (event.key === "-" || event.key === "_") zoomBy(1 / 1.4);
-    else if (event.key === "0") animateTo(overview());
+    else if (event.key === "0") animateTo(fitAll());
     else return;
     event.preventDefault();
   };
@@ -258,7 +299,7 @@ export function IslandMap({ materials, progress, goals }: {
           return <li key={material.material_id} className={`map-island is-${state}`}
             style={{ "--x": `${x}px`, "--y": `${y}px`, "--w": `${w}px`, "--h": `${h}px` } as CSSProperties}>
             <button type="button" onClick={() => openMaterial(material)} onFocus={() => reveal(x, y)} aria-label={`${material.display_name}，${status}${goalText ? `，${goalText}` : ""}`}>
-              <span className="map-island-art"><IslandArt palette={islandPalette(material.material_id)} viewBox="100 60 840 470" landmarks={state !== "building"} /></span>
+              <span className="map-island-art"><IslandArt palette={islandPalette(material.material_id)} seed={material.material_id} viewBox="100 60 840 470" landmarks={state !== "building"} /></span>
               {goal && <span className={`island-goal-flag${goal.overdue_days > 0 || goal.days_remaining <= 1 || goal.behind_points > 0 ? " is-warning" : ""}`} aria-label="目標倒數">⚑ {goal.target_percent}% · {goal.overdue_days > 0 ? `逾期 ${goal.overdue_days} 天` : goal.days_remaining <= 1 ? "今天到期" : `剩 ${goal.days_remaining} 天`}</span>}
               <span className="island-flag">
                 <ProgressRing ratio={goal ? (goal.target_points ? goal.completed_points / goal.target_points : 0) : value && value.total ? started / value.total : 0} tone={(goal ? goal.achieved : state === "completed") ? "complete" : "warning"}>
@@ -284,14 +325,15 @@ export function IslandMap({ materials, progress, goals }: {
     <div className="island-map-controls" role="group" aria-label="地圖縮放">
       <button type="button" aria-label="放大" onClick={() => zoomBy(1.4)}><Icon name="plus" size={18} /></button>
       <button type="button" aria-label="縮小" onClick={() => zoomBy(1 / 1.4)}><Icon name="minus" size={18} /></button>
-      <button type="button" aria-label="回到全覽" onClick={() => animateTo(overview())}><Icon name="fit" size={18} /></button>
+      <button type="button" aria-label="回到全覽" onClick={() => animateTo(fitAll())}><Icon name="fit" size={18} /></button>
     </div>
     {islands.length > 0 && <svg className="island-map-minimap" viewBox={`${bounds.minX} ${bounds.minY} ${width} ${height}`} preserveAspectRatio="xMidYMid meet"
       role="img" aria-label="群島縮圖，點選可移動地圖"
       onPointerDown={(event) => { event.currentTarget.setPointerCapture(event.pointerId); minimapMove(event, true); }}
       onPointerMove={(event) => { if (event.currentTarget.hasPointerCapture(event.pointerId)) minimapMove(event, false); }}>
       <rect x={bounds.minX} y={bounds.minY} width={width} height={height} className="minimap-sea" />
-      {islands.map(({ material, x, y, w, h }) => <ellipse key={material.material_id} cx={x} cy={y} rx={w * 0.42} ry={h * 0.36}
+      {islands.map(({ material, x, y, w, h }) => <path key={material.material_id} d={islandShape(material.material_id).path}
+        transform={`translate(${x - w / 2} ${y - h / 2}) scale(${w / 840} ${h / 470}) translate(-100 -60)`}
         fill={islandColors(islandPalette(material.material_id)).g2} />)}
       <rect ref={minimapView} className="minimap-view" />
     </svg>}

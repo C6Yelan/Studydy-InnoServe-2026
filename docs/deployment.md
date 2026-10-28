@@ -27,9 +27,9 @@ Access 非必要。每次切換須先完成本機驗收與部署核准；啟動 
 資料測試使用 disposable DB；不得掛載產品資料或呼叫模型。
 
 本版從 migration 0001 到最新序列使用獨立 baseline，只能套用到空的新資料庫，不能直接升級舊競賽資料庫。
-核准切換後，先保存舊 image identity、私有設定與 `pg_dump`，再將舊 `.studydy-product/compose/` 改名封存，另建新資料目錄。
-舊帳號不會自動轉入新資料庫。備份與舊目錄確認可回復後才開始新服務。
-回復時使用舊 images、設定與封存資料目錄；不把新 SQL 套到舊資料，也不清除 volume。
+核准切換後，先確認 DB 大小與剩餘空間，保存舊 image identity 與私有設定；停止寫入後執行 `pg_dump`，並以 `pg_restore --list` 驗證備份可讀。只重建 PostgreSQL DB，再從 0001 套用到最新 migration；artifact／原始 PDF 目錄原地保留，不改名、不搬移、不刪除。
+舊帳號不自動轉入新 DB；以已授權帳密透過 `/v1/accounts` 重新註冊，再執行登入檢查。舊檔保留供回復使用。
+回復時使用舊 images、設定與經驗證的 DB dump，搭配原地保留的 artifact 目錄；不把新 SQL 套到舊資料，也不清除 volume。
 
 語音辨識由本機獨立 `ops/podcast/provider.py` 提供 `/transcribe`、`/media-transcribe`、`/align`。
 以獨立 Python 環境安裝 `ops/podcast/stt-requirements.txt`，設定 `STUDYDY_STT_PYTHON`、`STUDYDY_STT_MODEL_DIR`、`STUDYDY_PODCAST_PROVIDER_TOKEN`；模型由本機目錄載入，不在請求時下載。

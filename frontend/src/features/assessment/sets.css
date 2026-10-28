@@ -26,11 +26,6 @@
   min-width: 0;
   scroll-margin-top: 1rem;
 }
-.assessment-set-number {
-  font-size: 0.85rem;
-  font-weight: 700;
-  margin: 0 0 0.45rem 0.35rem;
-}
 .assessment-set-item .assessment-card {
   margin: 0;
 }
@@ -98,3 +93,7 @@
 @media (max-width: 720px) {
   .assessment-set-actions > .primary-button, .assessment-set-actions > .secondary-button { width: 100%; }
 }
+
+.assessment-cycle-summary { display:grid; gap:var(--space-4); }
+.assessment-cycle-summary > h2,
+.assessment-cycle-summary > p { margin:0; }

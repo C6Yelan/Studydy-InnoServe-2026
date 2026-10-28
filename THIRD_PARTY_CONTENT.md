@@ -29,6 +29,8 @@ Studydy 原創程式碼除另有標示外採 [MIT License](LICENSE) 授權。第
 
 圖庫在概念卡開啟時載入，全程本機詞彙與語境比對，不增加模型推論。版本、來源 hash 及生成方式見 [圖庫維護](ops/icons/README.md)。
 
+競賽版的 [圖示目錄](frontend/src/features/concept-cards/icons/catalog.json) 與 [幾何資料](frontend/src/features/concept-cards/icons/shapes.json) 獨立保留，語音測試採用下列 LibriSpeech 素材；介面更新不替換這些來源與授權紀錄。
+
 ## 瀏覽器人聲辨識
 
 語音模式使用 [vad-web 0.0.31](https://github.com/ricky0123/vad)（ISC）、[Silero VAD v6](https://github.com/snakers4/silero-vad)（MIT）與 [ONNX Runtime Web 1.30.0](https://github.com/microsoft/onnxruntime)（MIT）。模型、worklet 與 WASM 從鎖定 npm 套件建置，隨本站發布；[完整授權文字](frontend/public/voice-assets/LICENSES.txt) 同時提供給網站使用者。人聲分類在瀏覽器執行，通過判定的錄音才交給既有 Studydy 語音問答服務。

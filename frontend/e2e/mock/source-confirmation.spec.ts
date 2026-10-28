@@ -192,7 +192,7 @@ for (const width of [1536, 390])
       });
       await page.goto(sourcesPath);
       await expect(page.getByRole("heading", { name: "確認教材", exact: true })).toBeVisible();
-      await expect(page.getByRole("button", { name: "教材問答", exact: true })).toHaveCount(0);
+      await expect(page.getByRole("button", { name: "Studydy AI BOT", exact: true })).toHaveCount(0);
       const hero = (await page.locator('.flow-head').boundingBox())!, header = (await page.locator('.app-header').boundingBox())!;
       expect(hero.x).toBeGreaterThanOrEqual(16); expect(hero.y).toBeGreaterThanOrEqual(header.y+header.height+16);
       expect(await page.evaluate(()=>document.documentElement.scrollWidth<=innerWidth)).toBe(true);
@@ -230,7 +230,7 @@ for (const width of [1536, 390])
       expect(state.starts).toEqual([]);
       await activate(start);
       await expect(page.getByRole("heading", { name: "等待開始處理", exact: true })).toBeVisible();
-      await expect(page.getByRole("button", { name: "教材問答", exact: true })).toHaveCount(0);
+      await expect(page.getByRole("button", { name: "Studydy AI BOT", exact: true })).toHaveCount(0);
       await expect(page).toHaveURL(new RegExp(`/runs/${newRunId}$`));
       expect(state.starts).toEqual([
         {
@@ -340,7 +340,7 @@ for (const width of [1536, 390])
       });
       await page.goto(sourcesPath);
       await activate(page.getByRole("button", {name:"新增來源",exact:true}));
-      await expect(page.getByRole("dialog",{name:"新增來源"})).toBeVisible();
+      await expect(page).toHaveURL(`${sourcesPath}/new`);
       await expect(page.getByLabel("選擇新增教材", { exact: true })).toBeEnabled();
       const chooser = page.waitForEvent("filechooser");
       await activate(page.getByLabel("選擇新增教材", {exact:true}));
@@ -350,27 +350,24 @@ for (const width of [1536, 390])
         { name: "Extra.txt", mimeType: "text/plain", buffer: Buffer.from("extra") },
         { name: "image.jpg", mimeType: "image/jpeg", buffer: Buffer.from("image") },
       ]);
-      const local = page.locator(".source-upload-row");
+      const local = page.locator(".chosen-file");
       const start = page.getByRole("button", { name: "開始分析教材", exact: true });
       await expect(local).toHaveCount(1);
-      await expect(local.getByRole("status")).toHaveText("待上傳");
+      await expect(local.getByRole("status")).toContainText("準備上傳");
       await expect(local.getByRole("link")).toHaveCount(0);
       await expect(page.locator("#source-selection-error")).toContainText("image.jpg");
-      await expect(page.locator(".source-summary")).toHaveText("3 份已準備 · 1 份待上傳");
       await expect(start).toHaveCount(0);
-      const primary = page.locator(".source-list-card .primary-button");
-      await activate(page.getByRole("button", { name: "上傳新增教材", exact: true }));
-      await expect(local.getByRole("status")).toHaveText("上傳中…");
+      const primary = page.locator(".upload-page .tool-stage-footer .primary-button");
+      await activate(page.getByRole("button", { name: "上傳並確認來源", exact: true }));
+      await expect(local.getByRole("status")).toContainText("上傳中");
       await expect(primary).toHaveText("正在上傳…");
       await expect(primary).toBeDisabled();
       releaseUpload();
-      await expect(local.getByRole("status")).toHaveText("上傳失敗");
+      await expect(local.getByRole("status")).toContainText("上傳失敗");
       await expect(local.getByRole("alert")).toBeVisible();
-      await expect(local.getByRole("button", { name: "移除", exact: true })).toBeEnabled();
-      await activate(page.getByRole("button", { name: "重試上傳", exact: true }));
-      await expect(local.getByRole("status")).toHaveText("已上傳");
-      await expect(page.locator(".source-row")).toHaveCount(4);
-      await expect(start).toHaveCount(0);
+      await expect(local.getByRole("button", { name: "移除 Extra.txt", exact: true })).toBeEnabled();
+      await activate(page.getByRole("button", { name: "重試未完成的上傳", exact: true }));
+      await expect(page).toHaveURL(sourcesPath);
       releaseRefresh();
       await expect(local).toHaveCount(0);
       await expect(page.locator(".source-row")).toHaveCount(4);
@@ -403,27 +400,29 @@ for (const width of [1536, 390])
   });
 
 
-for(const append of [false,true])test(`source picker shares upload controls and restores focus in ${append?'published':'confirmation'} view`,async({page},testInfo)=>{
+for(const append of [false,true])test(`add source page shares upload steps and returns to the original material in ${append?'published':'confirmation'} view`,async({page},testInfo)=>{
  await mockSources(page,append);
  await page.route('**/v1/source-capabilities',route=>route.fulfill({json:{schema:'source-capabilities/v2',max_request_bytes:104857600,max_images:50,max_media_seconds:7200,youtube:true,formats:[{extension:'.pdf',media_type:'application/pdf',max_bytes:104857600,kind:'document'}]}}));
  await page.goto(sourcesPath);
- const opener=page.getByRole('button',{name:'新增來源',exact:true});await opener.click();
- const dialog=page.getByRole('dialog',{name:'新增來源',exact:true});
- await expect(dialog).toBeVisible();await expect(dialog.locator('.file-drop')).toContainText('PDF');
- await expect(dialog.getByLabel('YouTube 影片網址',{exact:true})).toBeVisible();
- for(const [width,height] of [[1440,900],[1300,900],[1200,900],[1024,768],[390,844]]){
-  await page.setViewportSize({width,height});await page.screenshot({path:testInfo.outputPath(`source-picker-${append?'published':'confirmation'}-${width}.png`),animations:'disabled'});
+ await page.getByRole('button',{name:'新增來源',exact:true}).click();
+ await expect(page).toHaveURL(`${sourcesPath}/new`);
+ await expect(page.getByRole('heading',{name:'新增來源',exact:true})).toBeVisible();
+ await expect(page.locator('.file-drop')).toContainText('PDF');
+ await expect(page.getByLabel('YouTube 影片網址',{exact:true})).toBeVisible();
+ for(const [width,height] of [[1440,900],[1024,768],[390,844]]){
+  await page.setViewportSize({width,height});
   expect(await page.evaluate(()=>document.documentElement.scrollWidth<=innerWidth)).toBe(true);
  }
- await page.keyboard.press('Escape');await expect(dialog).toHaveCount(0);await expect(opener).toBeFocused();
- await opener.click();await dialog.getByRole('button',{name:'關閉新增來源'}).click();await expect(opener).toBeFocused();
- await opener.click();await dialog.getByLabel('YouTube 影片網址',{exact:true}).fill('https://www.youtube.com/watch?v=dQw4w9WgXcQ');
- await dialog.getByRole('button',{name:'加入影片',exact:true}).click();
- await expect(dialog).toHaveCount(0);await expect(opener).toBeFocused();
- await expect(page.locator('.source-upload-row')).toContainText('YouTube 影片');
- await expect(page.getByRole('button',{name:'上傳新增教材',exact:true})).toBeVisible();
+ await page.reload();
+ await expect(page.getByLabel('選擇新增教材',{exact:true})).toBeEnabled();
+ await page.getByRole('button',{name:'返回教材來源',exact:true}).click();
+ await expect(page).toHaveURL(sourcesPath);
+ await page.getByRole('button',{name:'新增來源',exact:true}).click();
+ await page.getByLabel('YouTube 影片網址',{exact:true}).fill('https://www.youtube.com/watch?v=dQw4w9WgXcQ');
+ await page.getByRole('button',{name:'加入影片',exact:true}).click();
+ await expect(page.locator('.chosen-file')).toContainText('YouTube 影片');
+ await expect(page.getByRole('button',{name:'上傳並確認來源',exact:true})).toBeEnabled();
 });
-
 
 for(const append of [false,true])test(`source display names drive labels and search in ${append?'published':'confirmation'} view`,async({page},testInfo)=>{
  const {state}=await mockSources(page,append);
@@ -454,4 +453,22 @@ for(const append of [false,true])test(`source display names drive labels and sea
   expect(await page.evaluate(()=>document.documentElement.scrollWidth<=innerWidth)).toBe(true);
  }
  if(append){await page.getByRole('searchbox',{name:'搜尋教材來源',exact:true}).fill('3 張圖片');await expect(page.locator('.source-row')).toHaveCount(1);await expect(pictures).toBeVisible();}
+});
+
+for (const append of [false, true]) test(`empty transcripts explain silence and retry only failed sources in ${append ? 'published' : 'confirmation'} view`, async ({ page }) => {
+ const {state} = await mockSources(page, append);
+ Object.assign(state.sources[0], {original_name:'已完成語音.wav',media_type:'audio/wav',source_kind:'audio',transcript_source:'whisper',transcript_display_name:'本機 Whisper'});
+ Object.assign(state.sources[2], {original_name:'未辨識到語音.wav',media_type:'audio/wav',source_kind:'audio',status:'failed',error_code:'TRANSCRIPT_EMPTY',normalized_artifact_id:null,page_count:null});
+ await page.route(`**/v1/materials/${materialId}/sources/${state.sources[0].normalization_id}/transcript`, route => route.fulfill({json:{schema:'source-transcript/v1',text:append ? ' \n\t ' : ''}}));
+ await page.goto(sourcesPath);
+ const failed = page.getByRole('listitem',{name:'未辨識到語音.wav',exact:true});
+ await expect(failed.getByRole('status')).toHaveText('這段沒有辨識到語音');
+ await failed.getByRole('button',{name:'重新辨識',exact:true}).click();
+ await expect.poll(() => state.retried).toEqual([state.sources[2].normalization_id]);
+ const ready = page.getByRole('listitem',{name:'已完成語音.wav',exact:true});
+ await ready.getByRole('button',{name:'查看逐字稿',exact:true}).click();
+ const dialog = page.getByRole('dialog',{name:'已完成語音.wav',exact:true});
+ await expect(dialog.getByRole('status')).toHaveText('這段沒有辨識到語音');
+ await expect(ready.getByRole('button',{name:'重新辨識',exact:true})).toHaveCount(0);
+ await expect(dialog.getByRole('button',{name:'重新辨識',exact:true})).toHaveCount(0);
 });

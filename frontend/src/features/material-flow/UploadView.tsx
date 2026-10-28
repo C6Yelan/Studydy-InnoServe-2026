@@ -16,7 +16,7 @@ import {
   type QueuedSource,
 } from "./source-uploads";
 
-export function UploadView({ apiClient }: { apiClient: StudydyApiClient }) {
+export function UploadView({ apiClient, materialId }: { apiClient: StudydyApiClient; materialId?: string }) {
   const [capabilities, setCapabilities] = useState<SourceCapabilities | null>(null);
   const [capabilityError, setCapabilityError] = useState<string | null>(null);
   const [queue, setQueue] = useState<QueuedSource[]>([]);
@@ -65,7 +65,7 @@ export function UploadView({ apiClient }: { apiClient: StudydyApiClient }) {
       draft.current ??= {
         key: crypto.randomUUID(),
         name: queue[0].kind === "youtube" ? "YouTube 影片" : (queue[0].kind === "images" ? queue[0].images![0].name : queue[0].file!.name).replace(/\.[^.]+$/, "").slice(0, 40),
-        id: null,
+        id: materialId ?? null,
       };
       const intent = draft.current;
       intent.id ??= (await apiClient.createDraft(intent.name, intent.key)).material_id;
@@ -109,11 +109,11 @@ export function UploadView({ apiClient }: { apiClient: StudydyApiClient }) {
     <section className="flow-page upload-page task-page" aria-labelledby="upload-title">
       <FlowHeader
         headingId="upload-title"
-        title="上傳教材"
+        title={materialId ? "新增來源" : "上傳教材"}
         description="選擇文件、圖片、音訊、影片或 YouTube 影片，確認來源後再開始分析。"
-        back={<BackLink label="返回我的教材" route={{ name: "materials" }} />}
+        back={materialId ? <BackLink label="返回教材來源" route={{ name: "material-sources", materialId }} /> : <BackLink label="返回我的教材" route={{ name: "materials" }} />}
       />
-      <LearningSteps labels={uploadSteps} current={0} />
+      <LearningSteps labels={materialId ? [...uploadSteps.slice(0, 2), "更新知識地圖"] : uploadSteps} current={0} />
       <FlowStage
         icon="upload"
         title="選擇教材檔案"
@@ -141,7 +141,7 @@ export function UploadView({ apiClient }: { apiClient: StudydyApiClient }) {
       >
         <div className="upload-stage-body">
         <SourceUploadPicker capabilities={capabilities} disabled={busy} hasFiles={queue.length > 0}
-          inputLabel="選擇教材檔案" error={selectionError} errorId="upload-selection-error"
+          inputLabel={materialId ? "選擇新增教材" : "選擇教材檔案"} error={selectionError} errorId={materialId ? "source-selection-error" : "upload-selection-error"}
           onFiles={chooseFiles} onSelectionError={setSelectionError}
           onYoutube={url => {setQueue(previous => [...previous, {key:crypto.randomUUID(),kind:"youtube",status:"pending",error:null,progress:null,url}]);setError(null);}}>
         {queue.length > 0 && (
@@ -229,7 +229,7 @@ export function UploadView({ apiClient }: { apiClient: StudydyApiClient }) {
           <li>
             <span><Icon name="map" size={18} /></span>
             <div>
-              <strong>建立知識地圖</strong>
+              <strong>{materialId ? "更新知識地圖" : "建立知識地圖"}</strong>
               <p>整理重要概念、概念關係與建議學習順序。</p>
             </div>
           </li>

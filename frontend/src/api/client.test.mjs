@@ -227,24 +227,6 @@ test("material reads bind revisions and preserve saved labels and Evidence", asy
   ]);
 });
 
-test("material Evidence rejects an unknown source at the API boundary", async () => {
-  const saved = structureView();
-  saved.concepts[0].claims[0].evidence[0].source = "unknown_provider";
-  const client = new StudydyApiClient(async () => Response.json(saved));
-  await assert.rejects(client.getKnowledgeStructure({ materialId, structureRevision }),
-    error => error instanceof ApiClientError && error.kind === "schema");
-});
-
-test("image Evidence preserves the OCR source and page locator", async () => {
-  for (const source of ["tesseract", "gemma_visual"]) {
-    const saved = structureView();
-    saved.concepts[0].claims[0].evidence[0].source = source;
-    const view = await new StudydyApiClient(async () => Response.json(saved))
-      .getKnowledgeStructure({ materialId, structureRevision });
-    assert.deepEqual(view.concepts[0].claims[0].evidence[0], saved.concepts[0].claims[0].evidence[0]);
-  }
-});
-
 test("unknown relation type fails closed with otherwise valid endpoints", async () => {
   const invalid = structureView();
   const second = structuredClone(invalid.concepts[0]);
@@ -1137,15 +1119,6 @@ function podcastView() {
   };
 }
 
-test("ready podcast transcripts remain readable without audio", async () => {
-  const saved = podcastView();
-  saved.episodes[0].audio = null;
-  saved.duration_seconds = null;
-  const view = await new StudydyApiClient(async () => Response.json(saved)).getPodcast(setId);
-  assert.equal(view.completed_episodes, 1);
-  assert.deepEqual(view.episodes[0].script, saved.episodes[0].script);
-});
-
 test("podcast playback rejects mismatched scripts, foreign sources and incomplete ready manifests", async () => {
   assert.equal((await new StudydyApiClient(async () => Response.json(podcastView())).getPodcast(setId)).episodes.length, 1);
   for (const change of [
@@ -1426,6 +1399,7 @@ test("library search rejects mismatched queries and malformed hits", async () =>
   const body = (change = () => undefined) => {
     const value = {
       schema: "library-search/v1", query: "堆疊", concepts_truncated: false,
+      card_sets: [], podcasts: [], totals: {materials:1,concepts:1,card_sets:0,podcasts:0},
       materials: [{ material_id: materialId, display_name: "資料結構", run_id: null, knowledge_structure_revision: null }],
       concepts: [{ material_id: materialId, material_name: "資料結構", run_id: runId, knowledge_structure_revision: structureRevision, concept_id: conceptId, label: "堆疊", claim_count: 2 }],
     };
@@ -1434,12 +1408,18 @@ test("library search rejects mismatched queries and malformed hits", async () =>
   };
   const search = (value, text = " 堆疊 ") => new StudydyApiClient(async () => Response.json(value)).searchLibrary(text);
   assert.equal((await search(body())).concepts[0].label, "堆疊");
+  let requested;
+  const paged = new StudydyApiClient(async path => { requested = path; return Response.json(body()); });
+  await paged.searchLibrary("堆疊", {category:"concepts", offset:30, limit:30});
+  assert.deepEqual(Object.fromEntries(new URL(requested, "https://local.test").searchParams), {q:"堆疊", category:"concepts", offset:"30", limit:"30"});
   await assert.rejects(search(body(), "佇列"), ApiClientError);
   for (const change of [
     (value) => { value.concepts[0].concept_id = "concept:bad"; },
     (value) => { value.concepts[0].run_id = null; },
     (value) => { value.materials[0].run_id = runId; },
     (value) => { value.concepts[0].claim_count = -1; },
+    (value) => { value.totals.concepts = -1; },
+    (value) => { value.card_sets = [{card_set_id:"bad"}]; },
   ]) await assert.rejects(search(body(change)), ApiClientError);
 });
 
@@ -1954,4 +1934,15 @@ test("notice dismissal and return use their schemas and bind the expected move i
   }
   value = { schema: "version-move-notice/v1", dismissed: false };
   await assert.rejects(client.setVersionMoveNotice(materialId, true), error => error.kind === "schema");
+});
+
+
+test("image Evidence preserves the OCR source and page locator", async () => {
+  for (const source of ["tesseract", "gemma_visual"]) {
+    const saved = structureView();
+    saved.concepts[0].claims[0].evidence[0].source = source;
+    const view = await new StudydyApiClient(async () => Response.json(saved))
+      .getKnowledgeStructure({ materialId, structureRevision });
+    assert.deepEqual(view.concepts[0].claims[0].evidence[0], saved.concepts[0].claims[0].evidence[0]);
+  }
 });

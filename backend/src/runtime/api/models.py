@@ -115,12 +115,38 @@ class LibrarySearchConceptView(_Closed):
     claim_count: int
 
 
+class LibrarySearchCardSetView(_Closed):
+    card_set_id: UUID
+    material_id: UUID
+    material_name: str
+    name: str
+    card_count: int | None
+
+
+class LibrarySearchPodcastView(_Closed):
+    podcast_id: UUID
+    material_id: UUID
+    material_name: str
+    name: str
+    episode_count: int
+
+
+class LibrarySearchTotals(_Closed):
+    materials: int
+    concepts: int
+    card_sets: int
+    podcasts: int
+
+
 class LibrarySearchView(_Closed):
     schema_: Literal["library-search/v1"] = Field(alias="schema")
     query: str
     materials: list[LibrarySearchMaterialView]
     concepts: list[LibrarySearchConceptView]
     concepts_truncated: bool
+    card_sets: list[LibrarySearchCardSetView]
+    podcasts: list[LibrarySearchPodcastView]
+    totals: LibrarySearchTotals
 
 
 class MaterialOutputBindingView(_Closed):
@@ -587,7 +613,7 @@ class KnowledgeSearchView(_Closed):
 class CardSetCreate(_Closed):
     schema_: Literal["card-set-create/v1"] = Field(alias="schema")
     knowledge_structure_revision: str
-    name: str = Field(min_length=1, max_length=200)
+    name: str = Field(min_length=1, max_length=40)
     concept_ids: list[str] = Field(min_length=1)
 
 
@@ -617,7 +643,7 @@ class CardSetSummary(_Closed):
 
 class CardSetUpdate(_Closed):
     schema_: Literal["card-set-update/v1"] = Field(alias="schema")
-    name: str = Field(min_length=1, max_length=200)
+    name: str = Field(min_length=1, max_length=40)
     expected_version: int = Field(ge=1, strict=True)
     concept_ids: list[str] | None = Field(default=None, min_length=1)
 
@@ -1485,7 +1511,7 @@ class EvidenceSourceView(SourcePresentation):
 class PodcastCreate(_Closed):
     schema_: Literal["podcast-create/v1"] = Field(alias="schema")
     knowledge_structure_revision: str
-    name: str = Field(min_length=1, max_length=200)
+    name: str = Field(min_length=1, max_length=40)
     concept_ids: list[str] = Field(min_length=1)
     delivery: Literal["solo", "dialogue"]
     # 勾選才在每集音訊完成後生成影片；預設只有音訊。
@@ -1496,7 +1522,7 @@ class PodcastAction(_Closed):
     schema_: Literal["podcast-action/v1"] = Field(alias="schema")
     action: Literal["rename", "retry", "cancel"]
     expected_version: int = Field(ge=1, strict=True)
-    name: str | None = Field(default=None, min_length=1, max_length=200)
+    name: str | None = Field(default=None, min_length=1, max_length=40)
 
 
 class PodcastGenerationStep(_Closed):
