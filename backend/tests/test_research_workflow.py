@@ -35,7 +35,7 @@ def drive(value,provider=review_provider):
 def test_stages_are_resumable_and_complete_all_planned_searches(monkeypatch):
     calls=[]
     def provider(path,body):
-        if body['request']['task']=='plan':return {'summary':'agent','topics':['Agent memory'],
+        if body['request']['task']=='plan':return {'summary':'agent',
             'searches':[{'query':'LLM agent memory','channel':'wikipedia','topics':[0],'reason':'English'},{'query':'智慧代理 記憶 原理','channel':'wikipedia','topics':[0],'reason':'Chinese'}]}
         return review_provider(path,body)
     monkeypatch.setattr(flow.research_sources,'search',lambda q,c,**kwargs:(calls.append(q) or [candidate()],None,[]))
@@ -1046,7 +1046,7 @@ def test_provided_urls_read_originals_before_any_search(monkeypatch):
     def provider(path,body):
         if body['request']['task']=='plan':
             assert body['request']['provided_sources']==['https://example.org/a','https://example.org/b']
-            return {'summary':'讀指定文件','topics':['Agent memory'],'searches':[],'source_indices':[0,1]}
+            return {'summary':'讀指定文件','searches':[],'source_indices':[0,1]}
         return review_provider(path,body)
     planned={**value,**flow.advance(value,provider)}
     assert planned['search_state']['stage']=='reading'
@@ -1078,7 +1078,7 @@ def test_organizing_saved_results_keeps_gaps_and_excludes_unreviewed_sources():
 
 def test_provided_url_selection_can_exclude_a_url_and_rejects_foreign_indices():
     value=state();value['query']='讀 https://example.org/a，不要用 https://example.org/b。'
-    plan={'summary':'只讀 a','topics':['Agent memory'],'searches':[],'source_indices':[0]}
+    plan={'summary':'只讀 a','searches':[],'source_indices':[0]}
     result=flow.advance(value,lambda *args:plan)
     assert [c['url'] for c in result['candidates']]==['https://example.org/a']
     for selected in [[2],[True],None]:
