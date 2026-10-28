@@ -42,7 +42,7 @@ export function DailyQuests({ quests, goals, onOpen, onOpenGoal }: {
       {goals.map(goal => <li key={`goal_stage:${goal.material_id}`} className={`goal-quest${goal.today_stage.done ? " is-done" : ""}`}>
         <span className="quest-icon" aria-hidden="true"><Icon name={goal.today_stage.done ? "check" : "learning"} size={18} /></span>
         <div className="quest-text"><b>今天的關卡 · {goal.material_name}</b>
-          <DailyGoalProgress stage={goal.today_stage} />
+          <DailyGoalProgress stage={goal.today_stage} stageKey={goal.material_id} />
           {goal.achieved && <small>學習目標已達成</small>}
           {goal.assessable_points === 0 && <small>目前沒有可檢測重點</small>}
         </div>
