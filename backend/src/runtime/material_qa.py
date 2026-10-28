@@ -19,9 +19,6 @@ SOURCE_TOKENS = 7500
 HISTORY_TOKENS = 1200
 SUMMARY_TOKENS = 550
 
-SPOKEN_STYLE = """\n這次回答會直接朗讀，使用者無須看螢幕也要能理解。一般概念先用簡短中文說清楚，無須每次另加例子。除非使用者明確要求原句、逐字內容、拼寫或程式碼，否則不要展示或拼讀示例原字串、字母片段、分詞清單或程式語法，即使只列一兩個片段也不需要；需要例子時用中文口語情境說明機制，只保留回答核心所需的技術名稱。
-使用者要求的精確字面值、核心公式、條件、數值與否定仍須保留，不得為口語化改錯或省略。不要使用 Markdown 格式符號。覆核時也檢查這項要求；不必要的逐字例子應在 correction 改述為來源支持的機制，不要補成更長的字元清單。\n"""
-
 
 def _strings(maximum, length=240):
     return {
@@ -445,14 +442,12 @@ def answer(
     catalog=(),
     memory=None,
     user_history=(),
-    spoken=False,
+    voice_input=False,
     recognition=None,
     on_stage=None,
 ):
     if on_stage:
         on_stage("retrieval")
-    answer_prompt = ANSWER_PROMPT + (SPOKEN_STYLE if spoken else "")
-    review_prompt = REVIEW_PROMPT + (SPOKEN_STYLE if spoken else "")
     original_question = question
     metrics = {
         "calls": 0,
@@ -540,8 +535,8 @@ def answer(
             r"\n\s*2[.、．]|另外|兩件事|分別|比較|以及|、[^。！？\n]*、", question
         )
     )
-    passages = [] if contextual or multiple or spoken else retrieve([question])
-    if contextual or multiple or spoken or not passages:
+    passages = [] if contextual or multiple or voice_input else retrieve([question])
+    if contextual or multiple or voice_input or not passages:
         recognition_context = None
         if recognition:
             uncertain = [
@@ -563,7 +558,7 @@ def answer(
                             "maxLength": 4000,
                         }
                     }
-                    if spoken
+                    if voice_input
                     else {}
                 ),
                 "queries": {**_strings(4), "minItems": 1},
@@ -571,7 +566,7 @@ def answer(
         )
         plan = _request(
             call,
-            SPOKEN_SEARCH_PROMPT if spoken else SEARCH_PROMPT,
+            SPOKEN_SEARCH_PROMPT if voice_input else SEARCH_PROMPT,
             {
                 "question": question,
                 "history": history,
@@ -579,7 +574,7 @@ def answer(
                 "catalog_for_search_only": outline,
                 **(
                     {"recognition": recognition_context}
-                    if spoken and recognition_context
+                    if voice_input and recognition_context
                     else {}
                 ),
             },
@@ -595,7 +590,7 @@ def answer(
             )
         ):
             raise SourceError("VOICE_ANSWER_INVALID")
-        if spoken:
+        if voice_input:
             interpreted = plan.get("interpreted_question")
             if (
                 not isinstance(interpreted, str)
@@ -639,7 +634,7 @@ def answer(
         }
         remaining = (
             INPUT_TOKENS
-            - estimate_o200k_tokens(answer_prompt)
+            - estimate_o200k_tokens(ANSWER_PROMPT)
             - _count(fixed)
             - _count(ANSWER_SCHEMA)
             - 300
@@ -666,7 +661,7 @@ def answer(
         }
         if on_stage:
             on_stage("answering")
-        generated = _request(call, answer_prompt, payload, ANSWER_SCHEMA, metrics)
+        generated = _request(call, ANSWER_PROMPT, payload, ANSWER_SCHEMA, metrics)
         segments, next_queries, missing = _segments(generated, len(bound))
         generated_queries = next_queries
         if segments:
@@ -678,7 +673,7 @@ def answer(
                 segments,
                 sources,
                 bound,
-                review_prompt,
+                REVIEW_PROMPT,
                 call,
                 metrics,
                 generated_queries,

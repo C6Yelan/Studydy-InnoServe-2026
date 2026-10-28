@@ -313,10 +313,12 @@ def test_spoken_interpretation_is_shared_by_retrieval_answer_and_review():
             return {'queries': ['threshold'], 'interpreted_question': used}
         assert body['request']['question'] == used
         return model(path, body)
-    result = qa.answer(raw, [], None, spoken=True,
+    result = qa.answer(raw, [], None, voice_input=True,
         retrieve=lambda queries: searches.append(queries) or [passage()], call=call)
     assert result['question_interpretation'] == {'original': raw, 'used': used}
     assert searches == [['threshold']]
+    assert calls[0]["prompt"] == qa.ANSWER_PROMPT
+    assert calls[1]["prompt"] == qa.REVIEW_PROMPT
 
 
 def test_spoken_interpretation_cannot_change_explicit_numbers_or_identifiers():
@@ -328,7 +330,7 @@ def test_spoken_interpretation_cannot_change_explicit_numbers_or_identifiers():
             return {'queries': ['v3 threshold 0.8'], 'interpreted_question': '模型 v3 的門檻是 0.8 嗎？'}
         assert body['request']['question'] == raw
         return model(path, body)
-    result = qa.answer(raw, [], None, spoken=True,
+    result = qa.answer(raw, [], None, voice_input=True,
         retrieve=lambda queries: searches.append(queries) or [passage()], call=call)
     assert 'question_interpretation' not in result
     assert searches == [[raw]]
@@ -391,5 +393,5 @@ def test_spoken_interpretation_cannot_remove_comparison_negation(raw,changed):
             return {'interpreted_question':changed,'queries':[changed]}
         assert body['request']['question']==raw
         return model(path,body)
-    result=qa.answer(raw,[],None,spoken=True,retrieve=lambda _: [passage()],call=call)
+    result=qa.answer(raw,[],None,voice_input=True,retrieve=lambda _: [passage()],call=call)
     assert 'question_interpretation' not in result

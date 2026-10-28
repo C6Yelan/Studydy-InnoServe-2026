@@ -726,7 +726,7 @@ def step(*, dsn=None):
                     catalog=catalog,
                     memory=state["memory"],
                     user_history=state["user_history"],
-                    spoken=state["mode"] == "voice",
+                    voice_input=state.get("transcription") is not None,
                     recognition=state.get("transcription"),
                     on_stage=lambda stage: _record_stage(state, stage, dsn=dsn),
                 )
