@@ -174,4 +174,11 @@ def collect_source_set(
         offset += page_count
     if offset != total_pages:
         raise ValueError("SOURCE_BINDING_INVALID")
+    if not pages:
+        from runtime.material_runtime import MaterialAnalysisError
+        reason = "OCR_VISUAL_REVIEW_REQUIRED" if any(
+            item["reason_code"] == "OCR_VISUAL_REVIEW_REQUIRED" for item in excluded
+        ) else next((item["reason_code"] for item in excluded if item["reason_code"] in {
+            "OCR_UNAVAILABLE", "OCR_TIMEOUT"}), "NO_USABLE_EVIDENCE")
+        raise MaterialAnalysisError(reason)
     return pages, excluded, ocr_calls

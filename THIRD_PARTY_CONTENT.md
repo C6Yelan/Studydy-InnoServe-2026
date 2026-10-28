@@ -42,3 +42,7 @@ Studydy 原創程式碼除另有標示外採 [MIT License](LICENSE) 授權。第
 | SYSTRAN faster-whisper | [`v1.2.1`](https://github.com/SYSTRAN/faster-whisper/tree/v1.2.1)，以 CTranslate2 執行 Whisper | [MIT](https://raw.githubusercontent.com/SYSTRAN/faster-whisper/v1.2.1/LICENSE) |
 
 語音服務由 `STUDYDY_STT_MODEL_DIR` 載入本機轉換後權重。套件的 `large-v3-turbo` 別名對應 [`mobiuslabsgmbh/faster-whisper-large-v3-turbo`](https://huggingface.co/mobiuslabsgmbh/faster-whisper-large-v3-turbo)；實際部署須記錄本機目錄的來源與 revision，不能由套件版本推定權重身分。
+
+## Tesseract OCR
+
+圖片文字辨識使用 Tesseract（Apache-2.0），繁體中文 chi_tra 與英文 eng 語言資料隨 Ubuntu 套件安裝。來源：https://github.com/tesseract-ocr/tesseract 、https://github.com/tesseract-ocr/tessdata 。系統套件版本由 Docker 的 Ubuntu snapshot 固定。

@@ -25,7 +25,7 @@
 
 ## Evidence 與分析
 
-只使用 PDF 原生文字建立 Evidence，不呼叫 OCR。無可讀文字的頁面列為 excluded；整份來源無可用 Evidence 時拒絕分析。圖片、圖表與掃描內容留在 PDF 供人工回查，不生成視覺 Evidence。
+PDF 有可讀文字層時直接建立原生 Evidence；其餘頁面以 Tesseract chi_tra+eng 取得文字與區塊位置。純文字頁建立 Tesseract Evidence；公式或表格頁標示「需對照原圖」，暫不納入概念與練習。混合來源保留可用頁；整個來源集合沒有可用 Evidence 時顯示原因，不發布空地圖。
 
 Evidence 保留教材、1-based 頁碼、區塊、定位及技術字面值。換行合併依幾何與段落結構，不跨欄猜讀序。
 
@@ -55,4 +55,10 @@ Checkpoint 保存 Evidence、累積狀態、游標及執行快照。相同 owner
 
 取消不保證外部服務立即停止已送出的計算。教材改名只更新顯示名稱，不改 hash 或學習紀錄。
 
-影音與 YouTube 來源以本機語音辨識產生逐字稿，再依原有來源工作建立可回查的教材內容。上傳能力與大小依 `/v1/source-capabilities` 回傳的實際清單顯示；本版不接受圖片組上傳。
+影音與 YouTube 來源以本機語音辨識產生逐字稿，再依原有來源工作建立可回查的教材內容。上傳能力與大小依 `/v1/source-capabilities` 回傳的實際清單顯示；圖片組沿用 PNG／JPG／JPEG／WebP、最多 50 張、合計 100 MiB 與單張 4000 萬像素限制，依既有順序轉成 PDF 後走相同三級處理。
+
+### 圖片頁分級與視覺接點
+
+分類先採可讀文字層；無文字層時以 Tesseract TSV 的字詞及位置檢查公式符號、格線或跨列欄位空白。來源、1-based 頁碼、原圖 hash 與區塊座標都保留。這些規則不保證找出所有公式／表格，未自動驗收辨識品質。
+
+`pdf_evidence.image_text.image_blocks` 的 `visual_reader` 接點只供已驗收的影像辨識器使用，接收原頁、公式／表格原因與取消檢查，回傳未旋轉 PDF 座標的 type/text/bbox 區塊。預設沒有接入器，產品不送出視覺模型請求；R0 候選結果不會自動發布。接入後以 gemma_visual 保留來源身分，仍通過共用區塊與座標驗證。

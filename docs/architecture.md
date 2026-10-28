@@ -11,7 +11,7 @@ flowchart LR
     API --> Store[(Artifact Store)]
     DB --> Worker[串行 Worker]
     Worker --> Convert[隔離轉檔]
-    Worker --> Evidence[原生文字 Evidence]
+    Worker --> Evidence[原生／圖片文字 Evidence]
     Evidence --> Model[Gemma HTTP 服務]
     Model --> Validate[來源與結構驗證]
     Validate --> DB
@@ -20,7 +20,7 @@ flowchart LR
 
 Nginx 代理同源/v1 API。API 處理身分、讀寫邊界及建立工作；worker 執行轉檔、分析／檢核與題組準備。PostgreSQL 保存狀態與 metadata，檔案位於 STUDYDY_DATA_DIR/artifacts。
 
-後端只擷取原生文字，不執行 OCR。外部語意模型獨立運行；模型離線時仍可登入及讀取已保存內容。
+後端優先擷取原生文字，圖片頁以 Tesseract chi_tra+eng 取得文字與座標；公式／表格頁保留原圖待核對。外部語意模型獨立運行；模型離線時仍可登入及讀取已保存內容。
 
 ## 模組
 

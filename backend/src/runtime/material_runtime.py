@@ -35,12 +35,16 @@ def _validate_versions_contract(lock):
 
 
 def _validate_ingestion_contract(ingestion):
-    if ingestion != {
+    current = {
         "page_schema": "page-evidence/v1", "native_schema": "page-native/v1",
-        "processing_policy": "native-text-only/v1",
+        "processing_policy": "tiered-ocr/v1",
+        "ocr": {"engine": "tesseract", "languages": "chi_tra+eng", "classification_policy": "text-formula-table/v1"},
         "normalizer_policy": "text-nfc-line-preserving/v1",
         "render": {"dpi": 200, "colorspace": "RGB", "format": "PNG"},
-    }:
+    }
+    historical = {key: value for key, value in current.items() if key != "ocr"}
+    historical["processing_policy"] = "native-text-only/v1"
+    if ingestion not in (current, historical):
         raise ValueError
 
 
@@ -307,7 +311,8 @@ def runtime_binding(local_config: Any) -> dict[str, Any]:
             "server": deepcopy(lock["semantic_service"]["server"]),
         },
         "ingestion": {"policy": lock["ingestion"]["processing_policy"]},
-        "policy": "native-text-semantics-product/v1",
+        "policy": ("tiered-ocr-semantics-product/v1" if lock["ingestion"]["processing_policy"] == "tiered-ocr/v1"
+                   else "native-text-semantics-product/v1"),
     }
     binding["runtime_binding_sha256"] = canonical_sha256(binding)
     return binding
@@ -355,8 +360,11 @@ def runtime_binding_is_valid(value: Any) -> bool:
         if (value["schema"] != "material-runtime-binding/v1" or value["python"] != "3.12"
             or value["runtime_binding_sha256"] != canonical_sha256(identity)
             or not digest(value["runtime_lock_sha256"])
-            or value["policy"] != "native-text-semantics-product/v1"
-            or value["ingestion"] != {"policy": "native-text-only/v1"}):
+            or not isinstance(value["ingestion"], dict)
+            or (value["policy"], value["ingestion"].get("policy")) not in {
+                ("native-text-semantics-product/v1", "native-text-only/v1"),
+                ("tiered-ocr-semantics-product/v1", "tiered-ocr/v1")}
+            or set(value["ingestion"]) != {"policy"}):
             return False
         service = value["semantic_service"]
         if not isinstance(service, dict) or service.get("max_model_len") not in (32768, 65536):

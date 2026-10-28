@@ -235,6 +235,16 @@ test("material Evidence rejects an unknown source at the API boundary", async ()
     error => error instanceof ApiClientError && error.kind === "schema");
 });
 
+test("image Evidence preserves the OCR source and page locator", async () => {
+  for (const source of ["tesseract", "gemma_visual"]) {
+    const saved = structureView();
+    saved.concepts[0].claims[0].evidence[0].source = source;
+    const view = await new StudydyApiClient(async () => Response.json(saved))
+      .getKnowledgeStructure({ materialId, structureRevision });
+    assert.deepEqual(view.concepts[0].claims[0].evidence[0], saved.concepts[0].claims[0].evidence[0]);
+  }
+});
+
 test("unknown relation type fails closed with otherwise valid endpoints", async () => {
   const invalid = structureView();
   const second = structuredClone(invalid.concepts[0]);

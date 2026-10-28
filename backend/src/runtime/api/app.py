@@ -1006,6 +1006,9 @@ def create_app(settings: ApiSettings) -> FastAPI:
         ]
         if media:
             formats += [
+                {"extension": ext, "media_type": mime, "max_bytes": MAX_FILE_BYTES, "kind": "image"}
+                for ext, mime in IMAGE_MIME.items()
+            ] + [
                 {"extension": ext, "media_type": mime, "max_bytes": MAX_AUDIO_BYTES, "kind": "audio"}
                 for ext, mime in AUDIO_MIME.items()
             ] + [

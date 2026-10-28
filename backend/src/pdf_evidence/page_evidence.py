@@ -13,7 +13,7 @@ import pymupdf
 
 PAGE_SCHEMA = "page-evidence/v1"
 NATIVE_SCHEMA = "page-native/v1"
-PROCESSING_POLICY = "native-text-only/v1"
+PROCESSING_POLICY = "tiered-ocr/v1"
 NORMALIZER_POLICY = "text-nfc-line-preserving/v1"
 RENDER_DPI = 200
 PDF_POINTS_PER_INCH = 72
@@ -449,7 +449,7 @@ def _build_page_evidence(
     route: str,
     source: str,
 ) -> dict[str, Any]:
-    if (route, source) != ("native_sufficient", "native_text"):
+    if (route, source) not in {("native_sufficient", "native_text"), ("tesseract_text", "tesseract"), ("visual_ocr", "gemma_visual")}:
         raise ValueError("PAGE_ROUTE_INVALID")
     if not isinstance(source_blocks, list) or not source_blocks:
         raise ValueError("OCR_OUTPUT_INVALID")
@@ -585,7 +585,7 @@ def _build_page_evidence(
         "evidence_blocks": evidence_blocks,
         "images": image_artifacts,
         "input_binding": input_binding,
-        "processing_policy": PROCESSING_POLICY,
+        "processing_policy": input_binding.get("processing_policy", PROCESSING_POLICY),
         "normalizer_policy": NORMALIZER_POLICY,
         "produced_at": produced_at,
         "processing": (

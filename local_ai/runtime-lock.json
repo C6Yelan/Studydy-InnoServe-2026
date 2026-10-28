@@ -96,12 +96,17 @@
   "ingestion": {
     "page_schema": "page-evidence/v1",
     "native_schema": "page-native/v1",
-    "processing_policy": "native-text-only/v1",
+    "processing_policy": "tiered-ocr/v1",
     "normalizer_policy": "text-nfc-line-preserving/v1",
     "render": {
       "dpi": 200,
       "colorspace": "RGB",
       "format": "PNG"
+    },
+    "ocr": {
+      "engine": "tesseract",
+      "languages": "chi_tra+eng",
+      "classification_policy": "text-formula-table/v1"
     }
   }
 }

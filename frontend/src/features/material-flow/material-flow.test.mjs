@@ -9,6 +9,8 @@ import {
 } from "./material-flow.ts";
 
 test("review failures explain the actual cause instead of a generic failure", () => {
+  assert.match(materialFailureMessage('OCR_VISUAL_REVIEW_REQUIRED'), /需對照原圖/);
+  assert.match(materialFailureMessage('OCR_UNAVAILABLE'), /辨識未能完成.*重試/);
   assert.match(materialFailureMessage('REVIEW_METADATA_REASON_INVALID'), /非教學內容.*分類理由/);
   assert.match(materialFailureMessage('REVIEW_ALIAS_EDIT_INVALID'), /別名.*大小寫/);
   assert.match(materialFailureMessage('REVIEW_GROUPING_CYCLE'), /循環/);
