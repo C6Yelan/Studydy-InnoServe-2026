@@ -111,6 +111,10 @@ export function materialFailureMessage(errorCode: string): string {
   if (errorCode === "MATERIAL_CONFIGURATION_INVALID" || errorCode === "RUNTIME_BINDING_INVALID") {
     return "本機教材處理環境未通過安全檢查。";
   }
+  if (errorCode === "OCR_VISUAL_REVIEW_REQUIRED")
+    return "教材的圖片頁需對照原圖，目前尚未產生可回查的文字依據。請從原始教材閱讀。";
+  if (errorCode === "OCR_UNAVAILABLE" || errorCode === "OCR_TIMEOUT")
+    return "圖片文字辨識未能完成，請稍後重試。原始教材已保留。";
   if (errorCode === "NO_USABLE_EVIDENCE" || errorCode === "NO_USABLE_CONCEPT") {
     return "教材沒有產生可安全回查的概念與依據。";
   }

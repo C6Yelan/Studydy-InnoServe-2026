@@ -160,13 +160,14 @@ def test_http_batching_carries_concepts_across_all_ninety_pages(tmp_path):
 
 
 def test_native_extraction_excludes_scan_and_semantics_still_runs(tmp_path, monkeypatch):
+    monkeypatch.setattr("pdf_evidence.image_text.tesseract_words", lambda *_: [])
     source = tmp_path / "mixed.pdf"
     _pdf(source, 2, blank_first=True)
     calls: list[dict] = []
     structure = _analyze(
         source, _settings(tmp_path), client=Client(), semantic_call=_semantic(calls)
     )
-    assert structure["metrics"]["ocr_calls"] == 0
+    assert structure["metrics"]["ocr_calls"] == 1
     assert structure["metrics"]["semantic_calls"] == 1
     assert structure["status"]["processing"] == "partial"
     assert structure["excluded_pages"] == [{

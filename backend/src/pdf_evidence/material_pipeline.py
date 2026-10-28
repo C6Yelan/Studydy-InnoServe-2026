@@ -36,10 +36,12 @@ from runtime.semantic_service import (
 )
 
 from .page_evidence import (
+    _build_page_evidence,
     build_native_page_evidence,
     extract_page,
     route_page,
 )
+from .image_text import image_blocks
 from content_identity import canonical_sha256
 from .source_set import collect_source_set
 
@@ -88,6 +90,9 @@ def material_analysis_lock(
 def _reason(error: Exception) -> str:
     reason = getattr(error, "reason_code", None) or str(error)
     allowed = {
+        "OCR_VISUAL_REVIEW_REQUIRED",
+        "OCR_UNAVAILABLE",
+        "OCR_TIMEOUT",
         "CHILD_EXITED",
         "CHILD_TIMEOUT",
         "CHILD_RESPONSE_INVALID",
@@ -151,10 +156,12 @@ def _page_evidence(
                     not isinstance(cached_binding, dict)
                     or cached.get("schema") != "page-evidence/v1"
                     or cached.get("material_id") != "material:sha256:" + source_sha256
-                    or cached.get("route") != "native_sufficient"
+                    or cached.get("route") not in {"native_sufficient", "tesseract_text", "visual_ocr"}
                     or cached.get("page_number") != page_number
                     or cached_binding.get("source_sha256") != source_sha256
                     or cached_binding.get("page") != page_number
+                    or cached_binding.get("route") != cached.get("route")
+                    or cached_binding.get("runtime_lock_sha256") != canonical_sha256(settings["runtime_lock"])
                     or cached.get("page_evidence_id")
                     != "page-evidence:sha256:"
                     + canonical_sha256(
@@ -177,6 +184,7 @@ def _page_evidence(
                     "render_sha256": page["render"]["sha256"],
                     "route": route,
                     "runtime_lock_sha256": canonical_sha256(settings["runtime_lock"]),
+                    "processing_policy": settings["runtime_lock"]["ingestion"]["processing_policy"],
                 }
                 if route == "native_sufficient":
                     artifact = build_native_page_evidence(
@@ -185,7 +193,13 @@ def _page_evidence(
                         produced_at=produced_at,
                     )
                 else:
-                    raise ValueError("NO_USABLE_EVIDENCE")
+                    if settings["runtime_lock"]["ingestion"]["processing_policy"] == "native-text-only/v1":
+                        raise ValueError("NO_USABLE_EVIDENCE")
+                    ocr_calls += 1
+                    blocks, image_route, source = image_blocks(page, cancellation_check)
+                    binding["route"] = image_route
+                    artifact = _build_page_evidence(page, blocks, input_binding=binding,
+                        produced_at=produced_at, route=image_route, source=source)
                 pages.append(artifact)
             except ValueError as error:
                 excluded.append(_excluded(page, _reason(error)))
@@ -198,8 +212,6 @@ def _page_evidence(
             report("evidence", completed, len(page_numbers))
     finally:
         document.close()
-    if not pages:
-        raise MaterialAnalysisError("NO_USABLE_EVIDENCE")
     return pages, excluded, ocr_calls
 
 

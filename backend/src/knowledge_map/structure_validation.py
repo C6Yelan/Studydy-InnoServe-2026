@@ -129,7 +129,7 @@ def _validate_evidence_and_pages(document, source_digest):
             "section_id",
             "source_locator",
         }
-        or item["source"] not in {"native_text"}
+        or item["source"] not in {"native_text", "tesseract", "gemma_visual"}
         or not isinstance(item["kind"], str)
         or not item["kind"]
         or type(item["page"]) is not int

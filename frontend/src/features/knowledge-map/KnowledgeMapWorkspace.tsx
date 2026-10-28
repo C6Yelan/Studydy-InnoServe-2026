@@ -1271,6 +1271,8 @@ export function KnowledgeMapWorkspace({
         <p className="form-error" role="status">
           第 {view.excluded_pages.map((item) => item.page).join("、")}{" "}
           頁未納入概念與練習，請從原始教材閱讀。
+          {view.excluded_pages.some(item => item.reason_code === "OCR_VISUAL_REVIEW_REQUIRED") &&
+            <> 第 {view.excluded_pages.filter(item => item.reason_code === "OCR_VISUAL_REVIEW_REQUIRED").map(item => item.page).join("、")} 頁需對照原圖。</>}
         </p>
       )}
       <div className="map-content">
