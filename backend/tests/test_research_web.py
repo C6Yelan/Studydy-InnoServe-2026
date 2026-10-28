@@ -227,3 +227,25 @@ def test_later_search_does_not_reactivate_an_exhausted_source():
     new={**old,'eligible':True,'reason':'New search result','access':{'status':'not_reviewed'}}
     merged=sources.merge_candidates([old],[new])[0]
     assert not merged['eligible'] and merged['access']['exhausted']
+
+
+def test_wikipedia_edit_citations_and_bold_preserve_teaching_content():
+    body = BODY.replace(
+        '<h1>A learning example</h1>',
+        '<h1>A learning example<span class="mw-editsection">[edit]</span></h1>',
+    ).replace(
+        '<p>This paragraph',
+        '<p><b>Learning</b> uses <strong>examples</strong>'
+        '<sup class="reference"><a href="#cite_note-1">[1]</a></sup>'
+        '<sup class="noprint Inline-Template">citation needed</sup>'
+        '<sup>citation needed</sup>.'
+        ' The value is x<sup>2</sup>.</p><p>This paragraph',
+    ).replace('return x != 0', 'return x ** 2')
+    doc = web.html_document(body.encode(), 'https://en.wikipedia.org/wiki/Learning', 'text/html')
+    assert 'edit' not in doc['text']
+    assert 'citation needed' not in doc['text']
+    assert '**Learning**' not in doc['text'] and '**examples**' not in doc['text']
+    assert 'Learning' in doc['text'] and 'examples' in doc['text']
+    assert 'x²' in doc['text'] or 'x^2' in doc['text'] or 'x2' in doc['text'] or 'x<sup>2</sup>' in doc['text']
+    assert 'return x ** 2' in doc['text']
+    assert '| Code | Meaning |' in doc['text']

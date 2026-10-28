@@ -56,3 +56,5 @@ Artifact仍採私有目錄／不可變發布檔契約，不能靠群組開權限
 PostgreSQL 映像與隔離測試 fixture 固定同一個 18.6-bookworm digest；psycopg／psycopg-binary 3.3.5 的正式 wheel 內含 libpq 18.6，更新 server 不會替換這份 client library。
 
 [18.6 release notes](https://www.postgresql.org/docs/release/18.6/) 說明 18.5 未發布；同一 18 系列不需 dump／restore，但有針對既有索引的人工處置條件：GIN 統計需檢查是否應 ANALYZE，btree_gist 的浮點 NaN／bit 與 ltree 超長 label 等特定索引可能需 REINDEX。競賽版 `backend/migrations` 只建立一般 B-tree／unique 索引，沒有 GIN、btree_gist、ltree 或 extension 宣告，因此未找到適用這些特定重建要求的 repository 索引。此結論不涵蓋產品 DB 中手動建立而未記入 migrations 的物件；本輪沒有查詢或操作產品 DB。
+
+繁中提示更新：新題組使用 `source-span-single-choice/v2`，筆記契約為 `material-notes/v13`，localization 與 Podcast 核對提示各升為 v2。Gemma 講稿提示位於 `backend/src/runtime/podcast_script_generation.py`（`source-script/v17`），不在 ASR provider。封存 v1 題組仍依原 lock 生成及驗證，已存資料與 hash 不重寫，無 migration；開 Pod 後另做真模型驗收。

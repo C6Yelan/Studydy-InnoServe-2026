@@ -276,6 +276,17 @@ def html_document(data, final, media):
             policy.get("license_url"),
         )
     metadata = extract_metadata(tree, default_url=final)
+    # 移除網頁編輯與引註標記，保留一般數學上標與程式碼字面值。
+    for node in tree.xpath(
+        '//*[contains(concat(" ", normalize-space(@class), " "), " mw-editsection ")]'
+        ' | //sup[contains(concat(" ", normalize-space(@class), " "), " reference ")'
+        ' or contains(concat(" ", normalize-space(@class), " "), " noprint ")'
+        ' or .//a[starts-with(@href, "#cite_note")]'
+        ' or contains(translate(string(.), "ABCDEFGHIJKLMNOPQRSTUVWXYZ", "abcdefghijklmnopqrstuvwxyz"), "citation needed")]'
+    ):
+        node.drop_tree()
+    for node in tree.xpath("//b | //strong"):
+        node.drop_tag()
     text = extract(
         tree,
         output_format="markdown",
