@@ -1,3 +1,4 @@
+import { outlineView, conceptsView, readResponse } from "./knowledge-read-views.mjs";
 // 合成資料只驗證版面與公開契約；真實交卷／補強語意由隔離 API browser tests 驗證。
 export async function studyLayoutFixture(page, initialStage = "preparation", scenario = null) {
   const uuid = (seedNumber) => `00000000-0000-4000-8000-${String(seedNumber).padStart(12, "0")}`;
@@ -96,6 +97,7 @@ export async function studyLayoutFixture(page, initialStage = "preparation", sce
       reason: "document_order",
     });
   }
+  if (scenario?.singleClaimConcepts) knowledgeStructure.concepts.forEach(concept => { concept.claims = concept.claims.slice(0, 1); });
   let guidanceApplied = false;
   let nextAction = scenario?.nextAction ?? "advance";
   let guidanceVersion = 1;
@@ -143,6 +145,7 @@ export async function studyLayoutFixture(page, initialStage = "preparation", sce
       assessment_revision: assessment.assessment_revision,
       question_id: assessment.question_id,
       selected_option_id: selectedOptionId,
+      ...(scenario?.missingCorrectOption ? {} : { correct_option_id: assessment.options[0].option_id }),
       is_correct: isCorrect,
       rationale:
         "請依照教材描述的通訊角色判斷。" +
@@ -154,11 +157,16 @@ export async function studyLayoutFixture(page, initialStage = "preparation", sce
       created_at: timestamp,
     };
   };
+  let inheritedCheck = !!scenario?.inheritedCheck;
+  let startedNext = false;
+  let sessionFinished = !!scenario?.sessionCompleted;
+  let selectedConceptId = conceptId;
   let assessmentStage = initialStage;
   let isPartialPublication = false;
   let setVersion = 1;
   let verifiedCount = 2;
   const requests = [];
+  const presence = [];
   const buildAssessmentSet = (historical = false) => {
     const status = historical ? "completed" : assessmentStage;
     const isCompleted = status === "completed";
@@ -175,6 +183,12 @@ export async function studyLayoutFixture(page, initialStage = "preparation", sce
     const items = claims.slice(0, count).map((claim, index) => {
       const assessment =
         index < publishedCount ? buildAssessment(index, historical ? 20 : 0) : null;
+      const targetConcept = knowledgeStructure.concepts.find(concept => concept.concept_id === (historical ? conceptId : selectedConceptId));
+      const targetClaim = targetConcept.claims[index];
+      if (assessment) Object.assign(assessment, {
+        target_concept_id: targetConcept.concept_id, target_claim_id: targetClaim.claim_id,
+        source_evidence_ids: targetClaim.evidence.map(evidence => evidence.evidence_id),
+      });
       let itemState = "failed";
       if (index >= availableCount) itemState = "omitted";
       else if (assessment) itemState = "published";
@@ -185,7 +199,8 @@ export async function studyLayoutFixture(page, initialStage = "preparation", sce
       } else if (status === "partial_ready" && index < 4) itemState = "verified";
       return {
         ordinal: index + 1,
-        target_claim_id: claim.claim_id,
+        target_concept_id: targetConcept.concept_id,
+        target_claim_id: targetClaim.claim_id,
         state: itemState,
         attempts: 1,
         failure_reason: null,
@@ -226,11 +241,11 @@ export async function studyLayoutFixture(page, initialStage = "preparation", sce
           ? "incomplete"
           : "passed";
     return {
-      schema: "assessment-set/v1",
+      schema: "assessment-set/v2",
       kind,
       diagnostic_set_id: kind === "remediation" ? historySetId : null,
       set_id: groupId,
-      target_concept_id: conceptId,
+      target_concept_id: historical ? conceptId : selectedConceptId,
       study_session_id: sessionId,
       material_id: materialId,
       knowledge_structure_revision: structureRevision,
@@ -255,7 +270,7 @@ export async function studyLayoutFixture(page, initialStage = "preparation", sce
       can_complete: publishedCount > 0 && !isCompleted,
       cycle: {
         diagnostic_set_id: kind === "remediation" ? historySetId : groupId,
-        concept_id: conceptId,
+        concept_id: historical ? conceptId : selectedConceptId,
         set_version: historical ? 1 : setVersion,
         outcome,
         active_set_id: isCompleted ? null : groupId,
@@ -292,9 +307,36 @@ export async function studyLayoutFixture(page, initialStage = "preparation", sce
   await page.route(/\/v[12]\//, async (route) => {
     const request = route.request();
     const address = new URL(request.url());
-    const path = decodeURIComponent(address.pathname);
+    const actualPath = decodeURIComponent(address.pathname);
+    const path = actualPath.replace(/\/workspace$/, "/resume");
     const query = address.searchParams;
-    const send = (json, status = 200) => route.fulfill({ json, status });
+    const send = (body, status = 200) => route.fulfill({ json: readResponse(request.url(), body, runId), status });
+    if (actualPath === `/v1/materials/${materialId}/assessment-presence` && request.method() === "PUT") {
+      const body = request.postDataJSON(); presence.push({ body, browserId: request.headers()["x-studydy-browser-id"] });
+      return send({ schema: "assessment-presence/v1", active: body.active, expires_at: body.active ? new Date(Date.now() + 60000).toISOString() : null });
+    }
+    if (actualPath === `/v1/materials/${materialId}/study-start`) {
+      requests.push({ path: actualPath, body: request.postData() });
+      const wanted = request.postDataJSON().current_concept_id;
+      selectedConceptId = wanted ?? latestProgress?.current_concept_id ?? selectedConceptId;
+      if (assessmentStage === "preparation" || wanted && assessmentStage === "completed" || guidanceApplied && nextAction === "advance") {
+        startedNext = guidanceApplied && nextAction === "advance";
+        assessmentStage = "preparing"; setVersion++; inheritedCheck = false; sessionFinished = false;
+      }
+      const current = selectedConceptId;
+      const selected = inheritedCheck || ["preparation", "no-safe"].includes(assessmentStage) ? null : setId;
+      return send({ schema: "study-start/v2", selected_set_id: selected,
+        session: { schema: "study-session/v1", study_session_id: sessionId, material_id: materialId, knowledge_structure_revision: structureRevision,
+          current_concept_id: current, deferred_concept_ids: [], no_safe_claim_ids: [], status: sessionFinished ? "completed" : "active", started_at: timestamp, completed_at: sessionFinished ? timestamp : null, event_watermark: 1 } });
+    }
+    if (request.method() === "GET" && actualPath === `${mapPath}/learning-diagnosis`) return send({
+      schema: "learning-diagnosis/v2", material_id: materialId, knowledge_structure_revision: structureRevision,
+      source_resolver: `${mapPath}/evidence`,
+      scope: "material",
+      strengths: [], weaknesses: [], recommendations: [],
+    });
+    if (request.method() === "GET" && actualPath === `${mapPath}/outline`) return send(outlineView(knowledgeStructure, materialId, runId));
+    if (request.method() === "GET" && actualPath === `${mapPath}/concepts`) return send(conceptsView(knowledgeStructure, materialId, (query.get("ids") ?? "").split(","), query.get("neighbors") === "true"));
     const reject = (reason_code, status) =>
       send(
         {
@@ -318,7 +360,7 @@ export async function studyLayoutFixture(page, initialStage = "preparation", sce
       });
     if (path === "/v1/session") return send({ schema: "learner-identity/v1", learner_id: uuid(9) });
     if (path === "/v1/source-capabilities")
-      return send({ schema: "source-capabilities/v1", quality_notice: "PDF", formats: [] });
+      return send({ schema: "source-capabilities/v2", max_request_bytes: 104857600, max_images: 50, max_media_seconds: 7200, youtube: false, quality_notice: "PDF", formats: [] });
     if (isSource) {
       const evidenceId = path.slice(sourcePrefix.length, -"/source".length);
       const evidence = claims
@@ -345,17 +387,19 @@ export async function studyLayoutFixture(page, initialStage = "preparation", sce
         return reject("RESOURCE_NOT_FOUND", 404);
       const active = !["preparation", "no-safe"].includes(assessmentStage);
       const historical = selectedId === historySetId;
-      const selected = scenario?.inheritedCheck ? null : historical
+      // 剛開始且沒有指定題組時，與 study_workspace._selection 一致：只恢復進行中的題組。
+      const selected = inheritedCheck ? null : historical
         ? buildAssessmentSet(true)
-        : active && (!guidanceApplied || nextAction === "complete")
+        : active && (!guidanceApplied || nextAction === "complete" || startedNext)
           ? buildAssessmentSet()
           : null;
-      const current = guidanceApplied && nextAction === "advance" ? nextConceptId : conceptId;
-      const sessionCompleted = guidanceApplied && nextAction === "complete";
+      const current = guidanceApplied && nextAction === "advance" ? nextConceptId : selectedConceptId;
+      const sessionCompleted = sessionFinished || guidanceApplied && nextAction === "complete";
       let assessmentCycles = [];
       if (scenario?.navigation) assessmentCycles = [buildAssessmentSet().cycle];
       else if (selected) assessmentCycles = [selected.cycle];
-      if (scenario?.inheritedCheck) {
+      assessmentCycles = assessmentCycles.filter(Boolean);
+      if (inheritedCheck) {
         assessmentCycles = [{
           ...buildAssessmentSet().cycle,
           inherited_from: {
@@ -368,10 +412,10 @@ export async function studyLayoutFixture(page, initialStage = "preparation", sce
 
       const hasPendingNavigation = scenario?.navigation && !guidanceApplied;
       let targetConceptId = current;
-      if (hasPendingNavigation) targetConceptId = nextAction === "advance" ? nextConceptId : null;
+      if (hasPendingNavigation) targetConceptId = nextAction === "advance" ? nextConceptId : nextAction === "complete" ? null : current;
 
       let assessmentSets = [];
-      if (!scenario?.noHistory && !scenario?.inheritedCheck) {
+      if (!scenario?.noHistory && !inheritedCheck) {
         if (scenario?.preparingHistory) {
           assessmentSets.push({
             ...buildAssessmentSet(),
@@ -383,30 +427,41 @@ export async function studyLayoutFixture(page, initialStage = "preparation", sce
             assessment_revisions: [],
           });
         }
-        if (active) assessmentSets.push(buildAssessmentSet());
         assessmentSets.push(buildAssessmentSet(true));
       }
+      if (active && !inheritedCheck) assessmentSets.unshift(buildAssessmentSet());
 
       const progress = {
-        schema: "learner-progress/v1",
+        schema: "learner-progress/v2",
+
+        learning_path: knowledgeStructure.concepts.map(concept => concept.concept_id),
         assessment_cycles: assessmentCycles,
         study_session_id: sessionId,
         knowledge_structure_revision: structureRevision,
         event_watermark: 1,
         current_concept_id: current,
         deferred_concept_ids: [],
-        concept_states: knowledgeStructure.concepts.map((concept) => ({
-          concept_id: concept.concept_id,
-          label: concept.label,
-          status: "learning",
-          attempts: 1,
-          correct_answers: 1,
-          qualified_correct_items: 1,
-          covered_claim_ids: [concept.claims[0].claim_id],
-          mastered_claim_ids: [],
-          weak_claim_ids: [],
-          latest_is_correct: true,
-        })),
+        concept_states: knowledgeStructure.concepts.map((concept) => {
+          const status = concept.concept_id === conceptId && scenario?.conceptStatus
+            ? scenario.conceptStatus
+            : assessmentStage === "completed" ? "completed" : "in_progress";
+          return {
+            concept_id: concept.concept_id,
+            label: concept.label,
+            status,
+            attempts: 1,
+            correct_answers: 1,
+            qualified_correct_items: 1,
+            covered_claim_ids: [concept.claims[0].claim_id],
+            completed_claim_ids: status === "completed" ? concept.claims.map(c=>c.claim_id) : [],
+            assessable_claim_ids: assessmentStage === "no-safe" ? [] : concept.claims.map(c=>c.claim_id),
+            unavailable_claim_ids: [],
+            weak_claim_ids: concept.concept_id === conceptId && status === "needs_review"
+              ? (buildAssessmentSet().cycle?.points ?? []).filter(point => point.result === "needs_review").map(point => point.claim_id)
+              : [],
+            latest_is_correct: status !== "needs_review",
+          };
+        }),
         weaknesses: [],
         next_action: {
           action: hasPendingNavigation ? nextAction : "assess",
@@ -439,6 +494,7 @@ export async function studyLayoutFixture(page, initialStage = "preparation", sce
         run_id: runId,
         assessment_sets: assessmentSets,
         selected_set_id: selected?.set_id ?? null,
+        selected_set: selected,
       });
     }
     if (path.endsWith("/guidance/apply")) {
@@ -450,10 +506,8 @@ export async function studyLayoutFixture(page, initialStage = "preparation", sce
       )
         return reject("LEARNER_GUIDANCE_STALE", 409);
       guidanceApplied = true;
-      return send({
-        ...latestProgress,
-        current_concept_id: nextAction === "advance" ? nextConceptId : conceptId,
-      });
+      latestProgress = { ...latestProgress, current_concept_id: nextAction === "advance" ? nextConceptId : conceptId };
+      return send(latestProgress);
     }
     if (path.endsWith("/assessment-plan")) {
       const concept = knowledgeStructure.concepts.find(
@@ -485,8 +539,10 @@ export async function studyLayoutFixture(page, initialStage = "preparation", sce
     }
     if (path.endsWith("/assessment-sets") && request.method() === "POST") {
       const body = request.postDataJSON();
-      if (body?.schema !== "assessment-set-create/v1" || body.target_concept_id !== conceptId)
+      if (body?.schema !== "assessment-set-create/v1" || !knowledgeStructure.concepts.some(concept => concept.concept_id === body.target_concept_id))
         return reject("RESOURCE_NOT_FOUND", 404);
+      selectedConceptId = body.target_concept_id;
+      sessionFinished = false; inheritedCheck = false;
       assessmentStage = "preparing";
       setVersion++;
       return send(buildAssessmentSet(), 202);
@@ -510,6 +566,7 @@ export async function studyLayoutFixture(page, initialStage = "preparation", sce
       );
       assessmentStage = "completed";
       setVersion++;
+      if (scenario?.lostSubmissionResponse) return route.abort();
       return send(buildAssessmentSet());
     }
     if (path.endsWith(`/assessment-sets/${historySetId}`)) return send(buildAssessmentSet(true));
@@ -518,8 +575,10 @@ export async function studyLayoutFixture(page, initialStage = "preparation", sce
   });
   return {
     path: basePath,
+    knowledgeStructure,
     historyPath: `${basePath}/assessment-sets/${historySetId}`,
     requests,
+    presence,
     setGuidance(action, version) {
       nextAction = action;
       guidanceVersion = version;
@@ -533,9 +592,9 @@ export async function studyLayoutFixture(page, initialStage = "preparation", sce
       setVersion++;
     },
     async open() {
-      await page.goto(basePath);
+      await page.goto(initialStage === "completed" && !inheritedCheck && !sessionFinished ? `${basePath}/assessment-sets/${setId}` : basePath);
       await page
-        .locator(".assessment-set-header, .assessment-cycle, .assessment-card, .inherited-check")
+        .locator(".assessment-set-header, .assessment-cycle, .assessment-card, .inherited-check, .state-view")
         .first()
         .waitFor();
     },

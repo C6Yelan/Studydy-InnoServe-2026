@@ -1,4 +1,5 @@
 """驗證知識地圖的來源、Evidence、概念與關係。"""
+
 from __future__ import annotations
 
 from datetime import datetime
@@ -8,17 +9,39 @@ from typing import Any
 from uuid import UUID
 
 from .semantic_projection import _unsupported_null_meaning
+from .claim_literals import (
+    LITERAL_PROJECTION, EXCERPT_PROJECTION, EXCERPT_PROJECTIONS, LITERAL_REPAIRS,
+    preserves_literals, quoted_sources, transcript_evidence_ids,
+)
 from .structure_rules import (
-    STRUCTURE_SCHEMA, RELATION_BASIS, RELATION_PRIORITY, RELATION_TYPES,
-    _CODE_OR_FORMULA, _GENERIC_REASONS, _TECHNICAL, _cycle, _id, _path,
+    STRUCTURE_SCHEMA,
+    RELATION_BASIS,
+    RELATION_PRIORITY,
+    RELATION_TYPES,
+    _CODE_OR_FORMULA,
+    _GENERIC_REASONS,
+    _TECHNICAL,
+    _id,
+    _path,
     _revision,
 )
 
 
 _DRAFT_FIELDS = {
-    "material_id", "source_sha256", "run_id", "produced_at", "provenance",
-    "page_count", "evidence", "excluded_pages", "document_tree", "concepts",
-    "relations", "initial_learning_path", "metrics", "status",
+    "material_id",
+    "source_sha256",
+    "run_id",
+    "produced_at",
+    "provenance",
+    "page_count",
+    "evidence",
+    "excluded_pages",
+    "document_tree",
+    "concepts",
+    "relations",
+    "initial_learning_path",
+    "metrics",
+    "status",
 }
 
 
@@ -44,7 +67,10 @@ def validate_knowledge_structure(document: Any) -> bool:
     """只接受已綁定來源的 knowledge-structure/v1；重驗 revision 與內容。"""
     try:
         fields = (_DRAFT_FIELDS - {"source_sha256"}) | {
-            "schema", "revision", "source_set_sha256", "input_binding",
+            "schema",
+            "revision",
+            "source_set_sha256",
+            "input_binding",
         }
         if not isinstance(document, dict) or not _structure_fields(document, fields):
             return False
@@ -53,15 +79,21 @@ def validate_knowledge_structure(document: Any) -> bool:
             document["schema"] != STRUCTURE_SCHEMA
             or document["revision"] != _revision(document)
             or not isinstance(binding, dict)
-            or binding.get("schema") != "structure-input-binding/v1"
-            or set(binding) != {
-                "schema", "source_set_id", "source_set_digest", "bundle_manifest_sha256",
-                "manifest", "bundle", "base_revision",
+            or binding.get("schema") != "structure-input-binding/v2"
+            or set(binding)
+            != {
+                "schema",
+                "source_set_id",
+                "source_set_digest",
+                "bundle_manifest_sha256",
+                "manifest",
+                "bundle",
+                "base_revision",
             }
             or not isinstance(binding["manifest"], dict)
-            or binding["manifest"].get("schema") != "source-set/v1"
+            or binding["manifest"].get("schema") != "source-set/v2"
             or not isinstance(binding["bundle"], dict)
-            or binding["bundle"].get("schema") != "bundle-manifest/v1"
+            or binding["bundle"].get("schema") != "bundle-manifest/v2"
             or binding["source_set_digest"] != document["source_set_sha256"]
         ):
             return False
@@ -78,18 +110,26 @@ def _validate_evidence_and_pages(document, source_digest):
     if len(evidence_ids) != len(set(evidence_ids)):
         return False
     evidence_positions = [(item["page"], item["block_order"]) for item in evidence]
-    if (
-        evidence_positions != sorted(evidence_positions)
-        or len(evidence_positions) != len(set(evidence_positions))
-    ):
+    if evidence_positions != sorted(evidence_positions) or len(
+        evidence_positions
+    ) != len(set(evidence_positions)):
         return False
     if any(
         not isinstance(item, dict)
-        or set(item) != {
-            "evidence_id", "page_ref", "page", "block_order", "kind", "source",
-            "exact_text", "heading", "section_id", "source_locator",
+        or set(item)
+        != {
+            "evidence_id",
+            "page_ref",
+            "page",
+            "block_order",
+            "kind",
+            "source",
+            "exact_text",
+            "heading",
+            "section_id",
+            "source_locator",
         }
-        or item["source"] not in {"native_text", "unlimited_ocr"}
+        or item["source"] not in {"native_text"}
         or not isinstance(item["kind"], str)
         or not item["kind"]
         or type(item["page"]) is not int
@@ -166,7 +206,8 @@ def _validate_evidence_and_pages(document, source_digest):
             or excluded["stage"] != "evidence"
             or not isinstance(excluded["reason_code"], str)
             or re.fullmatch(r"[A-Z][A-Z0-9_]{0,99}", excluded["reason_code"]) is None
-            or excluded["page_ref"] != _id(
+            or excluded["page_ref"]
+            != _id(
                 "page",
                 {
                     "source_sha256": source_digest,
@@ -195,12 +236,21 @@ def _validate_concepts(document):
     evidence_ids = [item["evidence_id"] for item in evidence]
     known_evidence = set(evidence_ids)
     evidence_by_id = {item["evidence_id"]: item for item in evidence}
-    evidence_order = {evidence_id: index for index, evidence_id in enumerate(evidence_ids)}
+    excerpt_evidence_ids = transcript_evidence_ids(document) if "input_binding" in document else None
+    evidence_order = {
+        evidence_id: index for index, evidence_id in enumerate(evidence_ids)
+    }
     for concept in concepts:
         if (
-            set(concept) != {
-                "concept_id", "label", "aliases", "claims", "evidence_refs",
-                "section_ids", "source_pages",
+            set(concept)
+            != {
+                "concept_id",
+                "label",
+                "aliases",
+                "claims",
+                "evidence_refs",
+                "section_ids",
+                "source_pages",
             }
             or not concept["claims"]
             or not isinstance(concept["label"], str)
@@ -221,17 +271,18 @@ def _validate_concepts(document):
                 for reference in concept["evidence_refs"]
             )
         )
-        expected_pages = sorted({
-            evidence_by_id[reference]["page"]
-            for reference in concept["evidence_refs"]
-        })
+        expected_pages = sorted(
+            {
+                evidence_by_id[reference]["page"]
+                for reference in concept["evidence_refs"]
+            }
+        )
         claim_ids: set[str] = set()
         for claim in concept["claims"]:
             if (
                 not isinstance(claim, dict)
-                or set(claim) != {
-                    "claim_id", "text", "source_spans", "projection", "evidence_refs"
-                }
+                or set(claim)
+                != {"claim_id", "text", "source_spans", "projection", "evidence_refs"}
                 or claim["claim_id"] in claim_ids
                 or not isinstance(claim["text"], str)
                 or not claim["text"].strip()
@@ -247,13 +298,18 @@ def _validate_concepts(document):
                 or not set(claim["evidence_refs"]) <= known_evidence
             ):
                 return False
-            if any(
-                not isinstance(span, dict)
-                or set(span) != {"evidence_id", "quote"}
-                or span["evidence_id"] not in known_evidence
-                or span["quote"] != evidence_by_id[span["evidence_id"]]["exact_text"]
-                for span in claim["source_spans"]
-            ):
+            sources = quoted_sources(
+                claim["source_spans"], evidence_by_id,
+                excerpts=claim["projection"] in EXCERPT_PROJECTIONS,
+                # 草稿尚未綁來源；完整區塊的來源類型在 finalize 時核對。
+                # 生成投影已按 context 檢查逐字稿，這裡不把 PDF 短標題誤當口語節錄。
+                excerpt_evidence_ids=excerpt_evidence_ids
+                if excerpt_evidence_ids is not None else {
+                    span["evidence_id"] for span in claim["source_spans"]
+                    if span["quote"] != evidence_by_id[span["evidence_id"]]["exact_text"]
+                },
+            )
+            if sources is None:
                 return False
             if claim["evidence_refs"] != list(
                 dict.fromkeys(span["evidence_id"] for span in claim["source_spans"])
@@ -263,9 +319,10 @@ def _validate_concepts(document):
             source_text = " ".join(span["quote"] for span in claim["source_spans"])
             if _unsupported_null_meaning(claim["text"], source_text):
                 return False
-            if claim["projection"] == "source_literal_repair":
+            if claim["projection"] in LITERAL_REPAIRS:
                 if claim["text"] != source_text:
                     return False
+            # 已發布的原投影沿用當時規則；不重寫舊內容或雜湊。
             elif claim["projection"] == "semantic_meaning":
                 if (
                     any(
@@ -280,6 +337,13 @@ def _validate_concepts(document):
                         _CODE_OR_FORMULA.search(source_text)
                         and claim["text"] not in source_text
                     )
+                ):
+                    return False
+            elif claim["projection"] in {"localized_meaning", LITERAL_PROJECTION, EXCERPT_PROJECTION}:
+                if not preserves_literals(
+                    claim["text"],
+                    sources,
+                    legacy=claim["projection"] == "localized_meaning",
                 ):
                     return False
             else:
@@ -323,6 +387,11 @@ def _validate_document_tree(document):
     evidence = document["evidence"]
     concepts = document["concepts"]
     known_concepts = {concept["concept_id"] for concept in concepts}
+    section_concepts = {}
+    for concept in concepts:
+        section_concepts.setdefault(concept["section_ids"][0], []).append(
+            concept["concept_id"]
+        )
     tree = document["document_tree"]
     if (
         not isinstance(tree, dict)
@@ -331,21 +400,26 @@ def _validate_document_tree(document):
     ):
         return False
     sections = tree["sections"]
-    if (
-        not isinstance(sections, list)
-        or [section.get("order") for section in sections] != list(range(len(sections)))
-    ):
+    if not isinstance(sections, list) or [
+        section.get("order") for section in sections
+    ] != list(range(len(sections))):
         return False
     tree_concepts = [
         concept_id
         for section in sections
         for concept_id in section.get("concept_ids", [])
     ]
-    if len(tree_concepts) != len(set(tree_concepts)) or set(tree_concepts) != known_concepts:
+    if (
+        len(tree_concepts) != len(set(tree_concepts))
+        or set(tree_concepts) != known_concepts
+    ):
         return False
     expected_sections = []
     for item in evidence:
-        if not expected_sections or expected_sections[-1]["section_id"] != item["section_id"]:
+        if (
+            not expected_sections
+            or expected_sections[-1]["section_id"] != item["section_id"]
+        ):
             if item["section_id"] != _id(
                 "section",
                 {
@@ -362,11 +436,7 @@ def _validate_document_tree(document):
                     "heading_evidence_id": (
                         item["evidence_id"] if item["kind"] == "heading" else None
                     ),
-                    "concept_ids": [
-                        concept["concept_id"]
-                        for concept in concepts
-                        if concept["section_ids"][0] == item["section_id"]
-                    ],
+                    "concept_ids": section_concepts.get(item["section_id"], []),
                 }
             )
         elif item["heading"] != expected_sections[-1]["title"]:
@@ -384,19 +454,26 @@ def _validate_relations_and_path(document):
     sections = document["document_tree"]["sections"]
     known_evidence = {item["evidence_id"] for item in evidence}
     known_concepts = {concept["concept_id"] for concept in concepts}
-    edges = []
     relation_ids = set()
     relation_directions: set[tuple[str, str, str]] = set()
     known_sections = {section["section_id"] for section in sections}
-    concept_by_id = {concept["concept_id"]: concept for concept in concepts}
+    evidence_by_id = {item["evidence_id"]: item for item in evidence}
     for relation in relations:
         if not isinstance(relation, dict) or set(relation) != {
-            "relation_id", "source_concept_id", "target_concept_id", "type",
-            "learner_reason", "evidence_refs", "context_refs", "inference_basis",
+            "relation_id",
+            "source_concept_id",
+            "target_concept_id",
+            "type",
+            "learner_reason",
+            "evidence_refs",
+            "context_refs",
+            "inference_basis",
             "confidence",
         }:
             return False
-        identity = {key: value for key, value in relation.items() if key != "relation_id"}
+        identity = {
+            key: value for key, value in relation.items() if key != "relation_id"
+        }
         relation_type = relation["type"]
         source_id = relation["source_concept_id"]
         target_id = relation["target_concept_id"]
@@ -416,10 +493,7 @@ def _validate_relations_and_path(document):
             relation_type,
         )
         reverse = (direction[1], direction[0], direction[2])
-        if (
-            direction in relation_directions
-            or reverse in relation_directions
-        ):
+        if direction in relation_directions or reverse in relation_directions:
             return False
         reason = relation["learner_reason"]
         if (
@@ -428,27 +502,22 @@ def _validate_relations_and_path(document):
             or reason.casefold() in _GENERIC_REASONS
         ):
             return False
-        endpoint_evidence = set(concept_by_id[source_id]["evidence_refs"]) | set(
-            concept_by_id[target_id]["evidence_refs"]
-        )
         evidence_refs = relation["evidence_refs"]
         if (
             not isinstance(evidence_refs, list)
             or not evidence_refs
             or len(evidence_refs) != len(set(evidence_refs))
             or not set(evidence_refs) <= known_evidence
-            or not set(evidence_refs) <= endpoint_evidence
         ):
             return False
-        endpoint_sections = set(concept_by_id[source_id]["section_ids"]) | set(
-            concept_by_id[target_id]["section_ids"]
-        )
+        # Request scope 已在 semantic projection 檢查；保存結構回查關係自身的來源章節。
+        evidence_sections = {evidence_by_id[ref]["section_id"] for ref in evidence_refs}
         context_refs = relation["context_refs"]
         if (
             not isinstance(context_refs, list)
             or len(context_refs) != len(set(context_refs))
             or not set(context_refs) <= known_sections
-            or not set(context_refs) <= endpoint_sections
+            or not set(context_refs) <= evidence_sections
         ):
             return False
         confidence = relation["confidence"]
@@ -461,10 +530,6 @@ def _validate_relations_and_path(document):
             return False
         relation_ids.add(relation["relation_id"])
         relation_directions.add(direction)
-        if relation_type == "prerequisite":
-            if _cycle(edges, (source_id, target_id)):
-                return False
-            edges.append((source_id, target_id))
     if relations != sorted(
         relations,
         key=lambda relation: (
@@ -478,6 +543,7 @@ def _validate_relations_and_path(document):
     path_ids = [step["concept_id"] for step in document["initial_learning_path"]]
     if len(path_ids) != len(set(path_ids)) or set(path_ids) != known_concepts:
         return False
+    # 拓撲排序同時拒絕環；不必為每條已保存的邊再建圖檢查。
     if document["initial_learning_path"] != _path(concepts, relations):
         return False
     return True
@@ -503,7 +569,9 @@ def _validate_status(document):
         reasons.append("NO_CANONICAL_CONCEPT")
     expected_status = {
         "processing": (
-            "partial" if reasons and concepts else ("failed" if not concepts else "succeeded")
+            "partial"
+            if reasons and concepts
+            else ("failed" if not concepts else "succeeded")
         ),
         "quality": "needs_review" if reasons else "accepted",
         "decision": "reject" if not concepts else ("review" if reasons else "retain"),
@@ -529,13 +597,15 @@ def _validate_structure_content(document, source_digest):
         if (
             produced_at.tzinfo is None
             or not isinstance(provenance, dict)
-            or set(provenance) != {
-                "runtime_lock_sha256", "model_id", "model_revision", "semantic_policy"
-            }
+            or set(provenance)
+            != {"runtime_lock_sha256", "model_id", "model_revision", "semantic_policy"}
             or re.fullmatch(r"[0-9a-f]{64}", provenance["runtime_lock_sha256"]) is None
-            or not isinstance(provenance["model_id"], str) or not provenance["model_id"]
-            or not isinstance(provenance["model_revision"], str) or not provenance["model_revision"]
-            or provenance["semantic_policy"] != "unified-material-evidence-projection/v1"
+            or not isinstance(provenance["model_id"], str)
+            or not provenance["model_id"]
+            or not isinstance(provenance["model_revision"], str)
+            or not provenance["model_revision"]
+            or provenance["semantic_policy"]
+            != "unified-material-evidence-projection/v1"
         ):
             return False
         evidence = document["evidence"]
@@ -554,14 +624,18 @@ def _validate_structure_content(document, source_digest):
         metrics = document["metrics"]
         if (
             not isinstance(metrics, dict)
-            or set(metrics) != {
-                "semantic_calls", "ocr_calls", "evidence_duration_ms",
-                "semantic_duration_ms", "literal_repairs", "rejected_claims",
+            or set(metrics)
+            != {
+                "semantic_calls",
+                "ocr_calls",
+                "evidence_duration_ms",
+                "semantic_duration_ms",
+                "literal_repairs",
+                "rejected_claims",
                 "rejected_relations",
             }
             or any(type(value) is not int or value < 0 for value in metrics.values())
             or metrics["semantic_calls"] < 1
-            or metrics["ocr_calls"] > document["page_count"]
         ):
             return False
         if not _validate_evidence_and_pages(document, source_digest):

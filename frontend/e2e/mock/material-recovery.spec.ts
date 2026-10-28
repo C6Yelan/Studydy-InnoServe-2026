@@ -1,5 +1,6 @@
 import { expect, test } from "@playwright/test";
 import type { MaterialLibraryItem, MaterialProcessingRunView } from "../../src/api/contracts";
+import { emptyCelebrationClaim, emptyLearningActivity } from "../fixtures/learning-activity";
 
 const materialId = "11111111-1111-4111-8111-111111111111";
 const oldId = "22222222-2222-4222-8222-222222222222";
@@ -8,6 +9,8 @@ const newId = "44444444-4444-4444-8444-444444444444";
 const stamp = "2026-09-12T12:00:00Z";
 const oldRun: MaterialProcessingRunView = {
   schema: "material-processing-run/v1",
+  auto_retry_count: 0,
+  auto_retry_reason: null,
   material_id: materialId,
   run_id: oldId,
   source_artifact_id: sourceId,
@@ -66,11 +69,28 @@ test.beforeEach(async ({ page }) => {
       learner_id: "99999999-9999-4999-8999-999999999999",
     },
     "/v1/materials": { schema: "material-library/v1", materials: [item] },
+    [`/v1/materials/${materialId}`]: item,
+    "/v1/topics": { topics: [] },
     [`/v1/material-processing-runs/${oldId}`]: oldRun,
     [`/v1/material-processing-runs/${newId}`]: newRun,
+    // 處理頁依教材來源決定步驟列；這份是上傳的教材。
+    [`/v1/materials/${materialId}/sources`]: { schema: "material-sources/v1", material_id: materialId, sources: [{
+      origin: "upload", source_id: "55555555-5555-4555-8555-555555555555", normalization_id: "55555555-5555-4555-8555-555555555555", original_artifact_id: sourceId,
+      original_name: "資料結構講義.pdf", media_type: "application/pdf", status: "ready",
+      normalized_artifact_id: sourceId, page_count: 8, error_code: null,
+    }] },
   };
   await page.route(/\/v[12]\//, (route) => {
     const path = new URL(route.request().url()).pathname;
+    if (path === "/v1/learning-activity/celebrations/claim") {
+      expect(route.request().method()).toBe("POST");
+      return route.fulfill({ json: emptyCelebrationClaim });
+    }
+    // 頁首帳號設定讀取名稱；這些案例不涉及名稱。
+    if (path === "/v1/profile") return route.fulfill({ json: { schema: "learner-profile/v1", display_name: null } });
+    // 頁首學習進度；這些案例不涉及學習紀錄。
+    if (path === "/v1/learning-activity") return route.fulfill({ json: emptyLearningActivity });
+    if (route.request().method() === "GET" && new URL(route.request().url()).pathname === "/v1/account/storage") return route.fulfill({ json: { schema: "account-storage/v2", used_bytes: 0, reserved_bytes: 0, limit_bytes: 5368709120, remaining_bytes: 5368709120, breakdown: { material_files_bytes: 0, podcast_audio_bytes: 0, podcast_video_bytes: 0, analysis_bytes: 0, reserved_bytes: 0 }, largest_materials: [] } });
     if (!responses[path])
       throw new Error(`Unexpected recovery request: ${route.request().method()} ${path}`);
     expect(route.request().method()).toBe(path === "/v1/session/refresh" ? "POST" : "GET");
@@ -108,9 +128,9 @@ for (const width of [1536, 390])
     });
     await page.goto(oldPath);
     await expect(page.getByRole("heading", { name: "教材處理失敗", exact: true })).toBeVisible();
-    await expect(page.getByText("已完成的分析批次保存在本機。", { exact: false })).toBeVisible();
-    await expect(page.getByText("最後記錄進度：", { exact: false })).toContainText("90 / 90 頁");
-    await expect(page.getByRole("button", { name: "開啟知識地圖", exact: true })).toHaveCount(0);
+    await expect(page.getByText("已完成的處理進度已保存；", { exact: false })).toBeVisible();
+    await expect(page.getByText("最後記錄進度：", { exact: false })).toContainText("建立概念、關係與學習順序");
+    await expect(page.getByRole("link", { name: "開啟知識地圖", exact: true })).toHaveCount(0);
     await page.getByRole("button", { name: "接續已保存的分析", exact: true }).click();
     await expect(page.locator(".material-recovery-error")).toBeVisible();
     await expect(page.getByRole("button", { name: "接續已保存的分析", exact: true })).toBeFocused();
@@ -121,7 +141,7 @@ for (const width of [1536, 390])
     expect(retryKeys[0]).toBe(retryKeys[1]);
     await expect(page.getByRole("heading", { name: "等待開始處理", exact: true })).toBeVisible();
     await page.goto(oldPath);
-    await expect(page.getByText("最後記錄進度：", { exact: false })).toContainText("90 / 90 頁");
+    await expect(page.getByText("最後記錄進度：", { exact: false })).toContainText("建立概念、關係與學習順序");
   });
 
 for (const viewport of [
@@ -203,10 +223,10 @@ test("run read failure retries and returns to the material collection", async ({
   );
   await page.goto(oldPath);
   await expect(page.getByRole("heading", { name: "無法讀取處理狀態" })).toBeVisible();
-  await expect(page.getByRole("button", { name: "返回教材庫" })).toBeVisible();
+  await expect(page.getByRole("button", { name: "回到我的教材", exact: true })).toBeVisible();
   await page.getByRole("button", { name: "重新讀取", exact: true }).click();
   await expect(page.getByRole("heading", { name: "教材處理失敗", exact: true })).toBeVisible();
-  await page.getByRole("button", { name: "返回教材庫" }).click();
+  await page.getByRole("button", { name: "回到我的教材", exact: true }).click();
   await expect(page).toHaveURL(/\/materials$/);
   await expect(page.getByRole("article").getByRole("heading")).toHaveText(item.display_name);
 });
@@ -240,12 +260,17 @@ for (const status of ["active", "completed"] as const)
     await page.route("**/v1/materials", (route) =>
       route.fulfill({ json: { schema: "material-library/v1", materials: [saved] } }),
     );
+    await page.route(`**/v1/materials/${materialId}/study-start`, route => route.fulfill({ json: {
+      schema: "study-start/v2", selected_set_id: null,
+      session: { ...saved.study_sessions[0], schema: "study-session/v1", material_id: materialId,
+        deferred_concept_ids: [], no_safe_claim_ids: [], event_watermark: 0, completed_at: status === "completed" ? stamp : null },
+    } }));
     const retries: string[] = [];
     page.on("request", (request) => {
       if (new URL(request.url()).pathname.endsWith("/retry")) retries.push(request.url());
     });
     await page.route(
-      `**/v1/materials/${materialId}/knowledge-structures/${encodeURIComponent(revision)}/study-sessions/${studyId}/resume?*`,
+      `**/v1/materials/${materialId}/knowledge-structures/${encodeURIComponent(revision)}/study-sessions/${studyId}/workspace?*`,
       (route) => {
         expect(route.request().method()).toBe("GET");
         expect(new URL(route.request().url()).searchParams.get("run_id")).toBe(publishedId);
@@ -260,19 +285,20 @@ for (const status of ["active", "completed"] as const)
     await expect(actions.locator(".primary-button")).toHaveText(
       status === "active" ? "繼續學習" : "查看學習成果",
     );
-    await expect(actions.getByRole("button", { name: "開啟知識地圖", exact: true })).toHaveClass(
+    await expect(actions.getByRole("link", { name: "開啟知識地圖", exact: true })).toHaveClass(
       "secondary-button",
     );
-    await expect(actions.getByRole("button", { name: "重新處理教材", exact: true })).toHaveCount(0);
     await expect(actions.getByRole("button", { name: "查看問題", exact: true })).toHaveClass(
       "text-button",
     );
     saved.latest_attempt = newRun;
     await page.reload();
-    await expect(actions.getByRole("button")).toHaveText([
+    await expect(actions.locator(":is(button, a)")).toHaveText([
       status === "active" ? "繼續學習" : "查看學習成果",
       "開啟知識地圖",
       "查看進度",
+      "概念卡",
+      "Podcast",
     ]);
     await actions.locator(".primary-button").click();
     await expect(page).toHaveURL(

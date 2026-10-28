@@ -1,19 +1,22 @@
 from __future__ import annotations
 
-from collections.abc import Generator
-from contextlib import contextmanager
+from collections import OrderedDict
+from contextlib import contextmanager, nullcontext
 from dataclasses import dataclass, field
+from datetime import UTC, datetime
 from hashlib import sha256
 import os
 from pathlib import Path
 import stat
+import threading
 from typing import BinaryIO
-from uuid import UUID
+from uuid import UUID, uuid4
 
 from sqlalchemy import select, text
 from sqlalchemy.orm import Session
 
-from .tables import Artifact, database_session
+from .tables import Artifact
+from .database import database_session
 
 ARTIFACT_ROOT_ENV = "STUDYDY_ARTIFACT_ROOT"
 _CHUNK = 1024 * 1024
@@ -24,12 +27,13 @@ class ArtifactError(RuntimeError):
 
 
 @dataclass(frozen=True)
-class VerifiedSourcePdf:
+class VerifiedArtifact:
     material_id: UUID
     artifact_id: UUID
     sha256: str
     size_bytes: int
     file: BinaryIO = field(repr=False, compare=False)
+    media_type: str = ""
 
 
 def _root() -> Path:
@@ -82,22 +86,31 @@ def _sync_directory(path: Path) -> None:
         os.close(descriptor)
 
 
-def _lock_source_discard(session: Session, artifact_id: UUID, *, wait: bool = True) -> bool:
+def _lock_artifact_discard(
+    session: Session, artifact_id: UUID, *, wait: bool = True
+) -> bool:
     # 核對必須與 rename 所屬 transaction 互斥，不能誤還原未提交的刪除。
     function = "pg_advisory_xact_lock" if wait else "pg_try_advisory_xact_lock"
-    acquired = session.scalar(text(f"SELECT {function}(:key)"), {
-        "key": int.from_bytes(artifact_id.bytes[:8], "big", signed=True),
-    })
+    acquired = session.scalar(
+        text(f"SELECT {function}(:key)"),
+        {
+            "key": int.from_bytes(artifact_id.bytes[:8], "big", signed=True),
+        },
+    )
     return True if wait else bool(acquired)
 
 
-def _reconcile_source(session: Session, root: Path, artifact_id: UUID) -> None:
+def _reconcile_discarded_artifact(
+    session: Session, root: Path, artifact_id: UUID
+) -> None:
     trash = root / ".trash" / artifact_id.hex
     if not trash.exists():
         return
     if not stat.S_ISREG(trash.stat(follow_symlinks=False).st_mode):
         raise OSError
-    referenced = session.scalar(select(Artifact.artifact_id).where(Artifact.artifact_id == artifact_id))
+    referenced = session.scalar(
+        select(Artifact.artifact_id).where(Artifact.artifact_id == artifact_id)
+    )
     if referenced is not None:
         destination = _object_path(root, artifact_id)
         if destination.exists():
@@ -109,12 +122,12 @@ def _reconcile_source(session: Session, root: Path, artifact_id: UUID) -> None:
     _sync_directory(trash.parent)
 
 
-def quarantine_source_pdf(session: Session, artifact_id: UUID) -> None:
+def quarantine_artifact(session: Session, artifact_id: UUID) -> None:
     """Caller 已鎖 Material/runs/artifact；advisory lock 隨 DB commit/rollback 釋放。"""
     try:
         root = _root()
-        _lock_source_discard(session, artifact_id)
-        _reconcile_source(session, root, artifact_id)
+        _lock_artifact_discard(session, artifact_id)
+        _reconcile_discarded_artifact(session, root, artifact_id)
         source = _object_path(root, artifact_id)
         if not stat.S_ISREG(source.stat(follow_symlinks=False).st_mode):
             raise OSError
@@ -125,22 +138,49 @@ def quarantine_source_pdf(session: Session, artifact_id: UUID) -> None:
         raise ArtifactError("ARTIFACT_STORAGE_FAILED") from None
 
 
-def reconcile_discarded_sources(*, dsn: str | None = None, artifact_id: UUID | None = None) -> None:
+def reconcile_discarded_artifacts(
+    *, dsn: str | None = None, artifact_id: UUID | None = None
+) -> None:
     """只處理 discard quarantine：仍有 DB reference 就還原，否則實體刪除。"""
     try:
         root = _root()
-        identities = [artifact_id] if artifact_id else [UUID(hex=path.name) for path in (root / ".trash").iterdir()]
+        identities = (
+            [artifact_id]
+            if artifact_id
+            else [UUID(hex=path.name) for path in (root / ".trash").iterdir()]
+        )
         for identity in identities:
             with database_session(dsn) as session:
                 # 仍在寫入／刪除的項目留待下次核對，不阻擋其他教材。
-                if not _lock_source_discard(session, identity, wait=False):
+                if not _lock_artifact_discard(session, identity, wait=False):
                     continue
-                _reconcile_source(session, root, identity)
+                _reconcile_discarded_artifact(session, root, identity)
     except Exception:
         raise ArtifactError("ARTIFACT_STORAGE_FAILED") from None
 
 
-def _verify_file(path: Path, expected_digest: bytes, expected_size: int) -> BinaryIO:
+# 媒體 Range 串流：同一程序內，檔案身分（裝置、inode、大小、mtime、ctime）未變且已整檔
+# 核對過已保存雜湊，就不再重讀整檔。物件寫入後為 0400 且只會整檔替換（換 inode／ctime），
+# 因此任何改寫都會讓快取失效並重新整檔核對。
+_STREAM_VERIFIED: OrderedDict[tuple, bool] = OrderedDict()
+_STREAM_VERIFIED_LIMIT = 4096
+_STREAM_VERIFIED_LOCK = threading.Lock()
+
+
+def _file_identity(details: os.stat_result, expected_digest: bytes) -> tuple:
+    return (
+        details.st_dev,
+        details.st_ino,
+        details.st_size,
+        details.st_mtime_ns,
+        details.st_ctime_ns,
+        expected_digest,
+    )
+
+
+def _verify_file(
+    path: Path, expected_digest: bytes, expected_size: int, *, reuse: bool = False
+) -> BinaryIO:
     descriptor = None
     try:
         descriptor = os.open(
@@ -150,6 +190,14 @@ def _verify_file(path: Path, expected_digest: bytes, expected_size: int) -> Bina
         details = os.fstat(descriptor)
         if not stat.S_ISREG(details.st_mode) or details.st_size != expected_size:
             raise OSError
+        identity = _file_identity(details, expected_digest)
+        if reuse:
+            with _STREAM_VERIFIED_LOCK:
+                if identity in _STREAM_VERIFIED:
+                    _STREAM_VERIFIED.move_to_end(identity)
+                    opened = os.fdopen(descriptor, "rb", closefd=True)
+                    descriptor = None
+                    return opened
         digest = sha256()
         while True:
             chunk = os.read(descriptor, _CHUNK)
@@ -158,6 +206,11 @@ def _verify_file(path: Path, expected_digest: bytes, expected_size: int) -> Bina
             digest.update(chunk)
         if digest.digest() != expected_digest:
             raise OSError
+        if reuse:
+            with _STREAM_VERIFIED_LOCK:
+                _STREAM_VERIFIED[identity] = True
+                while len(_STREAM_VERIFIED) > _STREAM_VERIFIED_LIMIT:
+                    _STREAM_VERIFIED.popitem(last=False)
         os.lseek(descriptor, 0, os.SEEK_SET)
         opened = os.fdopen(descriptor, "rb", closefd=True)
         descriptor = None
@@ -171,32 +224,105 @@ def _verify_file(path: Path, expected_digest: bytes, expected_size: int) -> Bina
         raise ArtifactError("ARTIFACT_NOT_AVAILABLE") from None
 
 
+def write_blob(
+    session, learner_id, material_id, data: bytes, kind: str, media_type: str
+):
+    # 只有音訊原檔（含影片抽出的音軌）可到 300 MiB，其餘維持 100 MiB。
+    limit = (
+        300 * 1024 * 1024
+        if kind == "original" and media_type.startswith("audio/")
+        else 100 * 1024 * 1024
+    )
+    if not data or len(data) > limit:
+        raise ArtifactError("ARTIFACT_TOO_LARGE")
+
+    artifact_id = uuid4()
+    root = _root()
+    _lock_artifact_discard(session, artifact_id)
+    marker = root / ".staging" / f"{artifact_id.hex}.pending"
+    marker.touch(mode=0o600, exist_ok=False)
+    destination = _object_path(root, artifact_id)
+    with destination.open("xb") as stream:
+        stream.write(data)
+        stream.flush()
+        os.fsync(stream.fileno())
+    destination.chmod(0o400)
+    _sync_directory(destination.parent)
+
+    row = Artifact(
+        artifact_id=artifact_id,
+        learner_id=learner_id,
+        material_id=material_id,
+        kind=kind,
+        media_type=media_type,
+        sha256=sha256(data).digest(),
+        size_bytes=len(data),
+        created_at=datetime.now(UTC),
+    )
+    session.add(row)
+    session.flush()
+    return row
+
+
+def reconcile_new_artifacts(*, dsn=None):
+    root = _root()
+    for marker in (root / ".staging").glob("*.pending"):
+        artifact_id = UUID(hex=marker.stem)
+        with database_session(dsn) as session:
+            if not _lock_artifact_discard(session, artifact_id, wait=False):
+                continue
+            if session.get(Artifact, artifact_id) is None:
+                _object_path(root, artifact_id).unlink(missing_ok=True)
+            marker.unlink(missing_ok=True)
+    _sync_directory(root / ".staging")
+
+
 @contextmanager
-def open_verified_source_pdf(
-    learner_id: UUID, artifact_id: UUID, *, dsn: str | None = None
-) -> Generator[VerifiedSourcePdf, None, None]:
+def open_verified_artifact(
+    learner_id, artifact_id, *, dsn=None, session=None, kind=None, stream=False
+):
+    """核對 owner、用途與實體 bytes；發布可沿用已鎖住父資料的交易。
+
+    stream=True 供媒體 Range 串流：已在本程序整檔核對過且檔案身分未變時，只核對大小與檔案身分。
+    """
     if not isinstance(learner_id, UUID) or not isinstance(artifact_id, UUID):
         raise ArtifactError("ARTIFACT_NOT_AVAILABLE")
     try:
-        with database_session(dsn) as session:
-            row = session.execute(
-                select(Artifact.material_id, Artifact.sha256, Artifact.size_bytes).where(
-                    Artifact.learner_id == learner_id,
-                    Artifact.artifact_id == artifact_id,
-                    Artifact.kind == "normalized_pdf",
-                )
-            ).one_or_none()
+        query = select(
+            Artifact.material_id,
+            Artifact.sha256,
+            Artifact.size_bytes,
+            Artifact.media_type,
+        ).where(
+            Artifact.learner_id == learner_id,
+            Artifact.artifact_id == artifact_id,
+        )
+        if kind is not None:
+            query = query.where(Artifact.kind == kind)
+        transaction = nullcontext(session) if session is not None else database_session(dsn)
+        with transaction as active:
+            row = active.execute(query).one_or_none()
         if row is None:
             raise ArtifactError("ARTIFACT_NOT_AVAILABLE")
-        opened = _verify_file(_object_path(_root(), artifact_id), bytes(row[1]), row[2])
+        digest = bytes(row.sha256)
+        path = _object_path(_root(), artifact_id)
+        opened = (
+            _verify_file(path, digest, row.size_bytes, reuse=True)
+            if stream
+            else _verify_file(path, digest, row.size_bytes)
+        )
     except ArtifactError:
         raise
     except Exception:
         raise ArtifactError("ARTIFACT_NOT_AVAILABLE") from None
     try:
-        yield VerifiedSourcePdf(row[0], artifact_id, bytes(row[1]).hex(), row[2], opened)
+        yield VerifiedArtifact(
+            row.material_id,
+            artifact_id,
+            digest.hex(),
+            row.size_bytes,
+            opened,
+            row.media_type,
+        )
     finally:
-        try:
-            opened.close()
-        except Exception:
-            pass
+        opened.close()

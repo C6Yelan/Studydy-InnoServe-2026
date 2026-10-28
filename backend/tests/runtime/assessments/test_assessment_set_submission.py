@@ -8,9 +8,11 @@ import pytest
 from fastapi.testclient import TestClient
 from sqlalchemy import select
 
+from learning_adaptation import assessment_state
 from learning_adaptation import answer_events, assessment_sets as sets
-from runtime.storage.tables import Assessment, AnswerEvent, StudySession, database_session
-from product_fixtures import HEADERS, ORIGIN, _app, closed_loop
+from runtime.storage.tables import Assessment, AnswerEvent, StudySession
+from runtime.storage.database import database_session
+from product_fixtures import HEADERS, ORIGIN, _app, closed_loop, read_answer_events
 from assessment_fixtures import concept_fixture, create, finish_set, read, answers_for, send
 
 
@@ -62,7 +64,7 @@ def test_whole_set_submission_publishes_all_feedback_and_replays_once(closed_loo
         json={**body, "answers": list(reversed(answers))},
     )
     assert replay.json() == completed
-    events = answer_events.read_answer_events(
+    events = read_answer_events(
         fixture["learner"], study_session_id, dsn=fixture["dsn"],
     )
     assert len(events) == 3
@@ -96,10 +98,10 @@ def test_invalid_member_rejects_every_answer_without_partial_scoring(closed_loop
     elif corrupt == "foreign-assessment":
         answers[-1]["assessment_revision"] = "assessment:sha256:" + "f" * 64
 
-    with pytest.raises(sets.AssessmentSetError, match="REQUEST_INVALID"):
+    with pytest.raises(assessment_state.AssessmentSetError, match="REQUEST_INVALID"):
         send(fixture, set_id, answers)
     assert read(fixture, set_id) == before
-    assert answer_events.read_answer_events(
+    assert read_answer_events(
         fixture["learner"], fixture["study"].study_session_id, dsn=fixture["dsn"],
     ) == ()
 
@@ -148,14 +150,14 @@ def test_concurrent_set_submissions_cannot_double_score(closed_loop, same_key):
         try:
             send(fixture, set_id, answers, key=key, version=version)
             return "saved"
-        except sets.AssessmentSetError:
+        except assessment_state.AssessmentSetError:
             return "conflict"
 
     with ThreadPoolExecutor(max_workers=2) as pool:
         results = list(pool.map(submit, range(2)))
     assert results.count("saved") == (2 if same_key else 1)
     assert read(fixture, set_id)["answered_count"] == 3
-    events = answer_events.read_answer_events(
+    events = read_answer_events(
         fixture["learner"], fixture["study"].study_session_id, dsn=fixture["dsn"],
     )
     assert [event.event_number for event in events] == [1, 2, 3]
@@ -169,7 +171,7 @@ def test_previously_saved_individual_answer_is_preserved_when_finishing_set(clos
 
     # 模擬已有部分答案的題組，驗證單題 API 不得新增題組答案。
     with database_session(fixture["dsn"]) as session:
-        study, _, _ = sets._scope(
+        study, _, _ = assessment_state._scope(
             session, fixture["learner"], fixture["study"].study_session_id, lock=True,
         )
         assessment = session.get(Assessment, answers[0]["assessment_revision"])
@@ -184,7 +186,7 @@ def test_previously_saved_individual_answer_is_preserved_when_finishing_set(clos
         option["option_id"] for option in public["options"]
         if option["option_id"] != answers[0]["selected_option_id"]
     )
-    with pytest.raises(sets.AssessmentSetError, match="CONFLICT"):
+    with pytest.raises(assessment_state.AssessmentSetError, match="CONFLICT"):
         send(fixture, set_id, conflicting_answers)
     assert read(fixture, set_id)["answered_count"] == 1
 

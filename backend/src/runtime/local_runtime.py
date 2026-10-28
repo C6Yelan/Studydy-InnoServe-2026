@@ -5,12 +5,16 @@ import os
 import sys
 from typing import Any, Mapping
 
-from .local_app import read_local_ai_config_from_environment
+
+from .local_ai_config import read_local_ai_config_from_environment
 from .material_runtime import MaterialRuntimeError, runtime_preflight
 
 
+
+
+
 def verify_local_runtime(local_config: dict[str, Any]) -> dict[str, Any]:
-    """明確要求時才驗證語意服務；native 擷取沒有模型載入步驟。"""
+    """以產品載入器驗證執行環境與模型能力。"""
 
     runtime_preflight(local_config)
     return {
@@ -26,11 +30,7 @@ def _failure(error: Exception) -> dict[str, Any]:
         "status": "failed",
         "command": "verify",
         "component": component if component is not None else "layout",
-        "reason": (
-            reason
-            if reason is not None
-            else "LOCAL_RUNTIME_SETTINGS_MISMATCH"
-        ),
+        "reason": (reason if reason is not None else "LOCAL_RUNTIME_SETTINGS_MISMATCH"),
     }
 
 

@@ -8,7 +8,8 @@ from sqlalchemy import func, select
 
 from learning_adaptation.study_sessions import StudySessionError, create_study_session
 from runtime.storage.materials import read_material_library
-from runtime.storage.tables import StudySession, database_session
+from runtime.storage.tables import StudySession
+from runtime.storage.database import database_session
 from assessment_fixtures import answer, concept_fixture, create, finish_set, learning_records
 from product_fixtures import HEADERS, ORIGIN, _app, closed_loop, library_materials, product_snapshot
 
@@ -43,7 +44,7 @@ def test_ensure_initial_idempotency_completed_and_focus_api(closed_loop, tmp_pat
         stored.completed_at = datetime.now(UTC)
     assert ensure("after-complete").status == "completed"
     assert ensure("after-complete").study_session_id == first.study_session_id
-    assert client.post(path, headers=HEADERS, json=body).status_code >= 400
+    assert client.post(path, headers=HEADERS, json=body).json()["status"] == "completed"
     client.cookies.clear()
     assert client.post(path, headers=HEADERS, json=body).status_code == 401
     with database_session(dsn) as db:

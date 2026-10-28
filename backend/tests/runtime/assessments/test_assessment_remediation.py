@@ -6,12 +6,14 @@ import psycopg
 import pytest
 from fastapi.testclient import TestClient
 
+from learning_adaptation import assessment_state
 from learning_adaptation import answer_events, assessment_sets as sets
-from learning_adaptation.answer_events import read_answer_events
+from product_fixtures import read_answer_events
 from learning_adaptation.learner_progress import derive_learner_progress
 from runtime.material_discard import request_material_discard
 from runtime.storage.database import connect_database
-from runtime.storage.tables import Assessment, AssessmentSet, database_session
+from runtime.storage.tables import Assessment, AssessmentSet
+from runtime.storage.database import database_session
 from assessment_fixtures import (
     answers_for,
     concept_fixture,
@@ -34,6 +36,8 @@ def test_new_remediation_uses_current_budget_without_rewriting_diagnostic_histor
     finish(fixture)
     answer(fixture, root, wrong={1})
     old_items = read(fixture, root)['items']
+    progress = derive_learner_progress(fixture['learner'], fixture['study'].study_session_id, dsn=fixture['dsn'])
+    assert [weakness.reason for weakness in progress.weaknesses] == ['latest_answer_incorrect']
 
     fixture['settings']['runtime_lock'] = current_lock
     child = supplement(fixture, root)
@@ -48,7 +52,18 @@ def test_new_remediation_uses_current_budget_without_rewriting_diagnostic_histor
     assert read(fixture, child)['status'] == 'ready'
     assert read(fixture, root)['items'] == old_items
     answer(fixture, child)
+    assert read(fixture, root)['cycle']['outcome'] == 'needs_review'
+    progress = derive_learner_progress(fixture['learner'], fixture['study'].study_session_id, dsn=fixture['dsn'])
+    state = next(state for state in progress.concept_states if state.concept_id == fixture['concept']['concept_id'])
+    assert state.latest_is_correct is True and state.status == 'needs_review'
+    assert [weakness.reason for weakness in progress.weaknesses] == ['remediation_incomplete']
+    assert progress.next_action.action == 'remediate'
+    second = supplement(fixture, root)
+    finish(fixture, 'second-new-budget-remediation')
+    answer(fixture, second)
     assert read(fixture, root)['cycle']['outcome'] == 'passed'
+    progress = derive_learner_progress(fixture['learner'], fixture['study'].study_session_id, dsn=fixture['dsn'])
+    assert progress.weaknesses == []
 
 
 def test_remediation_origin_is_immutable_in_database(closed_loop):
@@ -104,13 +119,14 @@ def test_remediation_targets_only_remaining_wrong_points(closed_loop):
         fixture["learner"], fixture["study"].study_session_id, dsn=fixture["dsn"],
     )
     assert progress.next_action.action == "continue_set"
-    with pytest.raises(sets.AssessmentSetError, match="CONFLICT"):
+    with pytest.raises(assessment_state.AssessmentSetError, match="CONFLICT"):
         supplement(fixture, root)
 
     finish(fixture, "first supplement")
     answer(fixture, first_child, wrong={2})
     cycle = read(fixture, root)["cycle"]
-    assert cycle["pending_count"] == cycle["remediation_passed_count"] == 1
+    assert cycle["pending_count"] == 2
+    assert cycle["remediation_passed_count"] == 0
     assert cycle["can_create_remediation"]
     assert cycle["outcome"] == "needs_review"
     assert sets.claim_set_work(dsn=fixture["dsn"]) is None
@@ -127,6 +143,12 @@ def test_remediation_targets_only_remaining_wrong_points(closed_loop):
     answer(fixture, second_child)
 
     cycle = read(fixture, root)["cycle"]
+    assert cycle["pending_count"] == 1
+    assert cycle["remediation_passed_count"] == 1
+    third_child = supplement(fixture, root)
+    finish(fixture, "third supplement")
+    answer(fixture, third_child)
+    cycle = read(fixture, root)["cycle"]
     assert cycle["outcome"] == "passed"
     assert cycle["pending_count"] == 0
     assert cycle["passed_count"] == 4
@@ -138,8 +160,8 @@ def test_remediation_targets_only_remaining_wrong_points(closed_loop):
         row for row in progress.concept_states
         if row.concept_id == fixture["concept"]["concept_id"]
     )
-    assert state.status != "mastered"
-    assert state.qualified_correct_items == 2
+    assert state.status == "completed"
+    assert state.qualified_correct_items == 6
     assert progress.next_action.action in ("advance", "complete")
     snapshot = read(fixture, root)
     assert read(fixture, root) == snapshot
@@ -167,12 +189,14 @@ def test_wrong_again_remains_pending_on_reload_without_automatic_generation(clos
     assert len(events) == 2
 
 
-def test_assisted_correct_does_not_restore_mastery_after_latest_independent_error(closed_loop):
+def test_completed_concept_survives_incorrect_practice_and_keeps_answer_history(closed_loop):
     fixture = concept_fixture(closed_loop, 1)
     for index in range(3):
         group = create(fixture, f"round-{index}")
         finish(fixture, f"round-{index}")
         answer(fixture, group, wrong={1} if index == 2 else set())
+        progress = derive_learner_progress(fixture['learner'], fixture['study'].study_session_id, dsn=fixture['dsn'])
+        assert progress.weaknesses == []
 
     child = supplement(fixture, group)
     finish(fixture, "assisted")
@@ -184,9 +208,9 @@ def test_assisted_correct_does_not_restore_mastery_after_latest_independent_erro
         row for row in progress.concept_states
         if row.concept_id == fixture["concept"]["concept_id"]
     )
-    assert state.status == "learning"
-    assert state.qualified_correct_items == 2
-    assert not state.mastered_claim_ids
+    assert state.status == "completed"
+    assert state.qualified_correct_items == 3
+    assert state.completed_claim_ids
     events = read_answer_events(
         fixture["learner"], fixture["study"].study_session_id, dsn=fixture["dsn"],
     )
@@ -239,10 +263,10 @@ def test_direct_remediation_http_replay_is_scoped_and_get_does_not_create(closed
     assert {route.rsplit("/", 1)[-1] for route in set_routes} == {
         "{set_id}", "submissions", "remediation", "retry", "publish-partial",
     }
-    assert created.json()["schema"] == "assessment-set/v1"
+    assert created.json()["schema"] == "assessment-set/v2"
     for name, version in (
-        ("AssessmentSetView", "assessment-set/v1"),
-        ("LearnerProgressView", "learner-progress/v1"),
+        ("AssessmentSetView", "assessment-set/v2"),
+        ("LearnerProgressView", "learner-progress/v2"),
         ("StudyResumeView", "study-resume/v1"),
     ):
         assert schema["components"]["schemas"][name]["properties"]["schema"]["const"] == version
@@ -279,7 +303,12 @@ def test_partial_initial_and_failed_remediation_never_turn_unavailable_into_pass
     finish(fixture, "retry-remediation")
     answer(fixture, child)
     cycle = read(fixture, root)["cycle"]
-    assert cycle["outcome"] == "incomplete"
+    assert cycle["outcome"] == "needs_review"
+    another = supplement(fixture, root)
+    finish(fixture, "second-correct-remediation")
+    answer(fixture, another)
+    cycle = read(fixture, root)["cycle"]
+    assert cycle["outcome"] == "passed"
     assert cycle["passed_count"] == 2
     assert cycle["unavailable_count"] == 1
     progress = derive_learner_progress(
@@ -310,7 +339,7 @@ def test_material_removal_purges_diagnostic_and_remediation_and_fences_late_resu
         assert session.get(AssessmentSet, child) is None
 
 
-def test_unanswered_is_not_wrong_and_incomplete_can_advance(closed_loop):
+def test_unanswered_is_not_wrong_and_remains_assessable(closed_loop):
     fixture = concept_fixture(closed_loop, 2)
     root = create(fixture)
     finish(fixture)
@@ -318,7 +347,7 @@ def test_unanswered_is_not_wrong_and_incomplete_can_advance(closed_loop):
 
     # 建立「題組已結束、只作答一題」的狀態，驗證未答不算答錯。
     with database_session(fixture["dsn"]) as session:
-        study, _, _ = sets._scope(
+        study, _, _ = assessment_state._scope(
             session, fixture["learner"], fixture["study"].study_session_id, lock=True,
         )
         assessment = session.get(Assessment, answers[0]["assessment_revision"])
@@ -337,6 +366,40 @@ def test_unanswered_is_not_wrong_and_incomplete_can_advance(closed_loop):
     progress = derive_learner_progress(
         fixture["learner"], fixture["study"].study_session_id, dsn=fixture["dsn"],
     )
-    assert progress.next_action.action in ("advance", "complete")
-    with pytest.raises(sets.AssessmentSetError, match="CONFLICT"):
+    assert progress.next_action.action == "assess"
+    with pytest.raises(assessment_state.AssessmentSetError, match="CONFLICT"):
         supplement(fixture, root)
+
+
+def test_preparing_and_provider_failure_are_not_unavailable_but_no_safe_is(closed_loop):
+    fixture = concept_fixture(closed_loop, 1)
+    root = create(fixture)
+    def state():
+        progress = derive_learner_progress(fixture['learner'], fixture['study'].study_session_id, dsn=fixture['dsn'])
+        return next(s for s in progress.concept_states if s.concept_id == fixture['concept']['concept_id']), progress
+    pending, progress = state()
+    assert len(pending.assessable_claim_ids) == 1 and not pending.unavailable_claim_ids
+    assert progress.next_action.action == 'continue_set'
+    finish(fixture, fail={0})
+    failed, progress = state()
+    assert len(failed.assessable_claim_ids) == 1 and not failed.unavailable_claim_ids
+    assert failed.status == 'not_started' and progress.next_action.action == 'assess'
+    with database_session(fixture['dsn']) as db:
+        group = db.get(AssessmentSet, root)
+        assessment_state._items(db, group)[0].failure_reason = 'NO_SAFE_ASSESSMENT'
+    no_safe, progress = state()
+    assert not no_safe.assessable_claim_ids and len(no_safe.unavailable_claim_ids) == 1
+    assert no_safe.status == 'not_started' and not no_safe.weak_claim_ids
+    assert progress.next_action.action == 'advance'
+
+
+def test_verified_new_question_overrides_legacy_no_safe_flag(closed_loop):
+    fixture = concept_fixture(closed_loop, 1)
+    root = create(fixture)
+    with database_session(fixture['dsn']) as db:
+        study, _, _ = assessment_state._scope(db, fixture['learner'], fixture['study'].study_session_id)
+        study.no_safe_claim_ids = [fixture['concept']['claims'][0]['claim_id']]
+    finish(fixture)
+    progress = derive_learner_progress(fixture['learner'], fixture['study'].study_session_id, dsn=fixture['dsn'])
+    state = next(s for s in progress.concept_states if s.concept_id == fixture['concept']['concept_id'])
+    assert len(state.assessable_claim_ids) == 1 and not state.unavailable_claim_ids

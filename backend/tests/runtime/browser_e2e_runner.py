@@ -101,7 +101,7 @@ def main(spec: str = "e2e/mock/knowledge-map-details.spec.ts", *, timeout_second
         else:
             return 1
         completed = subprocess.run(
-            [str(PLAYWRIGHT), "test", spec],
+            [str(PLAYWRIGHT), "test", spec, *(["--output", environment["STUDYDY_E2E_OUTPUT_DIR"]] if environment.get("STUDYDY_E2E_OUTPUT_DIR") else [])],
             cwd=FRONTEND,
             env=environment,
             check=False,

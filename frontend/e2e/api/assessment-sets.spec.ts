@@ -15,7 +15,7 @@ async function login(page: Page) {
   await page.getByLabel("密碼", { exact: true }).fill("Synthetic test password 42");
   await page.getByRole("button", { name: "登入", exact: true }).click();
   await expect(
-    page.getByRole("heading", { name: "歡迎回來！", level: 1, exact: true }),
+    page.getByRole("heading", { name: "歡迎回來！今天想探索哪座島？", level: 1, exact: true }),
   ).toBeVisible();
 }
 
@@ -31,17 +31,17 @@ test("whole paper submits once and restores persisted results after response los
   page.on("pageerror", (error) => errors.push(error.message));
   await login(page);
   await page.goto(studyPath);
-  await page.getByRole("button", { name: "開始本輪 3 題", exact: true }).click();
+  await page.getByRole("button", { name: "開始學習", exact: true }).click();
   await expect(page).toHaveURL(/assessment-sets\/[0-9a-f-]+$/);
   const roundPath = new URL(page.url()).pathname;
   const setId = roundPath.split("/").at(-1)!;
-  await expect(page.getByText("0 / 3 題", { exact: true })).toBeVisible();
+  await expect(page.getByText("已準備 0 / 3 題", { exact: true })).toBeVisible();
   await expect(page.getByRole("heading", { name: "正在準備本輪練習", exact: true })).toBeVisible();
   await expect(page.getByRole("progressbar", { name: "準備進度" })).toBeVisible();
   await page.reload();
-  await expect(page.getByText("0 / 3 題", { exact: true })).toBeVisible();
+  await expect(page.getByText("已準備 0 / 3 題", { exact: true })).toBeVisible();
   await page.request.post("/v1/__test/sets/release", { headers: { Origin: origin } });
-  await expect(page.locator(".assessment-set-item")).toHaveCount(3);
+  await expect(page.locator(".assessment-set-item")).toHaveCount(1);
   const endpoint = `/v1/study-sessions/${data.session}/assessment-sets/${setId}`;
   const snapshot = await (await page.request.get(endpoint)).json();
   expect(snapshot.target_concept_id).toBe(data.concept);
@@ -49,19 +49,20 @@ test("whole paper submits once and restores persisted results after response los
     /"correct_option_id"|"prepared_document"|"private_answer_document"|"generation_provenance"/,
   );
   await expect(page.locator(".feedback-card")).toHaveCount(0);
-  const submit = page.getByRole("button", { name: "交卷並查看結果", exact: true });
-  await expect(submit).toBeDisabled();
+  const submit = page.getByRole("button", { name: "交卷", exact: true });
+  await expect(page.getByRole("button", { name: "下一題", exact: true })).toBeDisabled();
   await card(page, 1)
     .getByRole("radio", { name: /\bcode0\b/ })
     .check();
+  await page.getByRole("button", { name: "下一題", exact: true }).click();
   await card(page, 2)
     .getByRole("radio", { name: /\bcode1\b/ })
     .check();
-  await expect(submit).toBeDisabled();
+  await expect(page.getByRole("button", { name: "下一題", exact: true })).toBeEnabled();
   expect((await (await page.request.get(endpoint)).json()).answered_count).toBe(0);
   await page.reload();
-  await expect(page.locator(".assessment-set-item")).toHaveCount(3);
-  await expect(page.locator(".assessment-paper input:checked")).toHaveCount(0);
+  await expect(page.locator(".assessment-set-item")).toHaveCount(1);
+  await expect(page.locator(".question-paper input:checked")).toHaveCount(0);
   const restored = await (await page.request.get(endpoint)).json();
   expect(restored.items.map((i: { assessment: unknown }) => i.assessment)).toEqual(
     snapshot.items.map((i: { assessment: unknown }) => i.assessment),
@@ -72,9 +73,11 @@ test("whole paper submits once and restores persisted results after response los
   await card(page, 1)
     .getByRole("radio", { name: /\bcode0\b/ })
     .check();
+  await page.getByRole("button", { name: "下一題", exact: true }).click();
   await card(page, 2)
     .getByRole("radio", { name: /\bcode1\b/ })
     .check();
+  await page.getByRole("button", { name: "下一題", exact: true }).click();
   await card(page, 3)
     .getByRole("radio", { name: /wrong2a/ })
     .check();
@@ -110,15 +113,15 @@ test("whole paper submits once and restores persisted results after response los
   });
   await submit.click();
   await expect(page.getByRole("button", { name: "正在交卷…", exact: true })).toBeDisabled();
-  await expect(card(page, 1).getByRole("radio").first()).toBeDisabled();
+  await expect(card(page, 3).getByRole("radio").first()).toBeDisabled();
   await expect(page.locator(".feedback-card")).toHaveCount(0);
   release();
   if (conflict) {
     await expect(
       page.getByText("題組已同步，答案選取已保留。確認後可再次交卷。", { exact: true }),
     ).toBeVisible();
-    await expect(card(page, 1).getByRole("radio", { name: /\bcode0\b/ })).toBeChecked();
-    await expect(card(page, 1).getByRole("radio", { name: /\bcode0\b/ })).toBeEnabled();
+    await expect(card(page, 3).getByRole("radio", { name: /wrong2a/ })).toBeChecked();
+    await expect(card(page, 3).getByRole("radio", { name: /wrong2a/ })).toBeEnabled();
     await page.getByRole("button", { name: "重新交卷", exact: true }).click();
     await expect.poll(() => submissions.length).toBe(2);
     expect(submissions[1].version).toBeGreaterThan(submissions[0].version);
@@ -126,9 +129,8 @@ test("whole paper submits once and restores persisted results after response los
   }
   await page.getByRole("button", { name: "查回交卷結果", exact: true }).click();
   await expect(page.locator(".feedback-card")).toHaveCount(3);
-  await page.locator(".assessment-answer-review > summary").click();
   await expect(page.locator(".feedback-card").first()).toBeVisible();
-  await expect(page.getByRole("button", { name: "交卷並查看結果", exact: true })).toHaveCount(0);
+  await expect(page.getByRole("button", { name: "交卷", exact: true })).toHaveCount(0);
   const done = await (await page.request.get(endpoint)).json();
   expect(done.status).toBe("completed");
   expect(done.answered_count).toBe(3);
@@ -140,7 +142,6 @@ test("whole paper submits once and restores persisted results after response los
   await login(fresh);
   await fresh.goto(roundPath);
   await expect(fresh.locator(".feedback-card")).toHaveCount(3);
-  await fresh.locator(".assessment-answer-review > summary").click();
   await expect(fresh.locator(".feedback-card").first()).toBeVisible();
   expect(
     (await (await fresh.request.get(endpoint)).json()).items.map(
@@ -155,6 +156,6 @@ test("whole paper submits once and restores persisted results after response los
   expect(
     progress.concept_states.find((i: { concept_id: string }) => i.concept_id === data.concept)
       .status,
-  ).not.toBe("mastered");
+  ).toBe("needs_review");
   await context.close();
 });

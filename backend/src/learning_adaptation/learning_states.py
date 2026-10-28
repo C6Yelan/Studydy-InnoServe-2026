@@ -2,7 +2,11 @@ from __future__ import annotations
 
 from pydantic import BaseModel, ConfigDict
 
-from .answer_events import StoredAnswerEvent
+from typing import TYPE_CHECKING
+import unicodedata
+
+if TYPE_CHECKING:
+    from .answer_events import StoredAnswerEvent
 from .map_context import MapContext
 
 
@@ -16,77 +20,145 @@ class ConceptLearningState(BaseModel):
     correct_answers: int
     qualified_correct_items: int
     covered_claim_ids: list[str]
-    mastered_claim_ids: list[str]
+    completed_claim_ids: list[str]
     weak_claim_ids: list[str]
+    unavailable_claim_ids: list[str] = []
+    assessable_claim_ids: list[str] = []
     latest_is_correct: bool | None
 
 
-def derive_learning_states(
-    context: MapContext,
-    events: tuple[StoredAnswerEvent, ...],
-) -> tuple[ConceptLearningState, ...]:
-    """Mastery 只由每個 Claim 的兩筆 distinct qualified correct answers 建立。"""
+def claim_completion(events) -> tuple[bool, int]:
+    """初答正確即完成；答錯後須連續答對兩道不同題，完成後不撤銷。"""
+    correct_questions = set()
+    for index, event in enumerate(events):
+        if not event.is_correct:
+            correct_questions.clear()
+        else:
+            correct_questions.add(event.semantic_identity)
+            if index == 0 or len(correct_questions) >= 2:
+                return True, len(correct_questions)
+    return False, len(correct_questions)
 
+
+def plan_concept_content(concept):
+    targets, excluded, known = [], [], {}
+    for claim in concept.claims:
+        # 上游可能把完整定義／假設標成 heading；出題資格依引用內容，不能只靠版面類型。
+        if not any(item.quote.strip() for item in claim.evidence):
+            excluded.append(
+                {"claim_id": claim.claim_id, "reason": "no_content_evidence"}
+            )
+            continue
+        # 只合併相同來源與文字的重點；保留大小寫、數值與條件，不猜測語意等價。
+        identity = (
+            unicodedata.normalize("NFC", " ".join(claim.text.split())),
+            tuple(sorted(item.evidence_id for item in claim.evidence)),
+        )
+        if identity in known:
+            targets[known[identity]]["covered_claim_ids"].append(claim.claim_id)
+            continue
+        known[identity] = len(targets)
+        targets.append(
+            {
+                "claim_id": claim.claim_id,
+                "covered_claim_ids": [claim.claim_id],
+                "reason": "distinct_grounded_point",
+            }
+        )
+    return {
+        "policy": "single-concept-grounded-points/v1",
+        "concept_id": concept.concept_id,
+        "point_count": len(concept.claims),
+        "targets": targets,
+        "excluded": excluded,
+    }
+
+
+def progress_plan(context: MapContext) -> dict:
+    """發布時計算固定的可檢測重點，日常進度不必再讀文字與全部 Evidence。"""
+    return {
+        "knowledge_structure_revision": context.knowledge_structure_revision,
+        "initial_learning_path": list(context.initial_learning_path),
+        "concepts": [
+            {
+                "concept_id": concept.concept_id,
+                "label": concept.label,
+                "claim_ids": [claim.claim_id for claim in concept.claims],
+                "prerequisite_ids": list(concept.prerequisite_ids),
+                "targets": plan_concept_content(concept)["targets"],
+            }
+            for concept in context.concepts
+        ],
+    }
+
+
+def derive_learning_states(
+    plan: dict,
+    events: tuple[StoredAnswerEvent, ...],
+    *,
+    unavailable_claim_ids: set[str] | None = None,
+    completed_concept_ids: set[str] | None = None,
+) -> tuple[ConceptLearningState, ...]:
+    """主要狀態僅由完成規則投影；系統無法出題不算使用者答錯。"""
+    unavailable = unavailable_claim_ids or set()
     states = []
-    for concept in context.concepts:
-        concept_events = [
-            event for event in events if event.target_concept_id == concept.concept_id
-        ]
-        by_claim = {
-            claim.claim_id: [
-                event for event in concept_events
-                if event.target_claim_id == claim.claim_id
+    by_concept = {}
+    for event in events:
+        by_concept.setdefault(event.target_concept_id, []).append(event)
+    for concept in plan["concepts"]:
+        concept_events = by_concept.get(concept["concept_id"], [])
+        completed, covered, weak, assessable = set(), set(), set(), set()
+        for target in concept["targets"]:
+            ids = set(target["covered_claim_ids"])
+            history = [
+                event for event in concept_events if event.target_claim_id in ids
             ]
-            for claim in concept.claims
-        }
-        # 補強是在複習後作答：可解除本次弱點，但不取代獨立測試的掌握證據。
-        independent = {
-            claim_id: [event for event in claim_events if not event.assisted]
-            for claim_id, claim_events in by_claim.items()
-        }
-        mastered_claims = {
-            claim_id
-            for claim_id, claim_events in independent.items()
-            if len({
-                event.semantic_identity
-                for event in claim_events
-                if event.is_correct and event.mastery_qualified
-            }) >= 2
-            and claim_events[-1].is_correct
-        }
-        covered = [
-            claim_id for claim_id, claim_events in by_claim.items() if claim_events
-        ]
-        weak = [
-            claim_id for claim_id, claim_events in by_claim.items()
-            if claim_events and not claim_events[-1].is_correct
-        ]
-        latest = concept_events[-1].is_correct if concept_events else None
-        if by_claim and mastered_claims == set(by_claim):
-            status = "mastered"
+            done, _ = claim_completion(history)
+            if history:
+                covered.update(ids)
+            if done:
+                completed.update(ids)
+            if not ids.intersection(unavailable):
+                assessable.update(ids)
+                if history and not done:
+                    weak.update(ids)
+        # 曾完成的重點保留完成事實；目前無題的重點不形成補強 gate。
+        if concept["concept_id"] in (completed_concept_ids or set()) or (
+            assessable and assessable <= completed
+        ):
+            status = "completed"
+            weak.clear()
         elif weak:
             status = "needs_review"
         elif concept_events:
-            status = "learning"
+            status = "in_progress"
         else:
             status = "not_started"
-        qualified_identities = {
-            event.semantic_identity
-            for event in concept_events
-            if event.is_correct and event.mastery_qualified and not event.assisted
-        }
-        states.append(ConceptLearningState(
-            concept_id=concept.concept_id,
-            label=concept.label,
-            status=status,
-            attempts=len(concept_events),
-            correct_answers=sum(event.is_correct for event in concept_events),
-            qualified_correct_items=len(qualified_identities),
-            covered_claim_ids=covered,
-            mastered_claim_ids=[
-                claim_id for claim_id in by_claim if claim_id in mastered_claims
-            ],
-            weak_claim_ids=weak,
-            latest_is_correct=latest,
-        ))
+        claims = concept["claim_ids"]
+        states.append(
+            ConceptLearningState(
+                concept_id=concept["concept_id"],
+                label=concept["label"],
+                status=status,
+                attempts=len(concept_events),
+                correct_answers=sum(event.is_correct for event in concept_events),
+                qualified_correct_items=len(
+                    {
+                        event.semantic_identity
+                        for event in concept_events
+                        if event.is_correct and event.mastery_qualified
+                    }
+                ),
+                covered_claim_ids=[claim for claim in claims if claim in covered],
+                completed_claim_ids=[claim for claim in claims if claim in completed],
+                weak_claim_ids=[claim for claim in claims if claim in weak],
+                assessable_claim_ids=[claim for claim in claims if claim in assessable],
+                unavailable_claim_ids=[
+                    claim for claim in claims if claim not in assessable
+                ],
+                latest_is_correct=concept_events[-1].is_correct
+                if concept_events
+                else None,
+            )
+        )
     return tuple(states)

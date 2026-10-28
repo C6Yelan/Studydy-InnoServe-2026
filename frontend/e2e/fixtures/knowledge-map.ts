@@ -1,6 +1,17 @@
+import { emptyCelebrationClaim } from "./learning-activity";
+import { conceptsView, readResponse } from "./knowledge-read-views.mjs";
+import { diagnosisView, difficultyView } from "./learning-diagnosis";
+import { emptyGoal, goalToday } from "./learning-goals";
 // 地圖 browser 測試共用的合成資料與 API 攔截；不呼叫真實後端或模型。
 import { expect, type Page, type Route } from "@playwright/test";
-import type { EvidenceView } from "../../src/api/contracts";
+import type { EvidenceView, VersionMovePreview } from "../../src/api/contracts";
+
+export function emptyVersionMovePreview(id: string, revision: string | null): VersionMovePreview {
+  return { schema: "version-move-preview/v2", material_id: id, to_revision: revision,
+    preview_digest: null, card_sets: [], study: null, kept_podcasts: 0,
+    automatic_safe: revision !== null, blocking_reasons: [], notice_dismissed: false,
+    previous: null, automatic_move: null };
+}
 
 export const browserOrigin = process.env.STUDYDY_E2E_BASE_URL ?? "http://127.0.0.1:4173";
 
@@ -103,6 +114,8 @@ export function structureView(revision = structureRevision) {
 
 export const run = {
   schema: "material-processing-run/v1",
+  auto_retry_count: 0,
+  auto_retry_reason: null,
   cancel_requested_at: null,
   run_id: runId,
   material_id: materialId,
@@ -139,7 +152,8 @@ export function session(status = "active") {
 }
 
 export const progress = {
-  schema: "learner-progress/v1",
+  schema: "learner-progress/v2",
+  learning_path: [firstConcept, secondConcept],
   assessment_cycles: [],
   study_session_id: sessionId,
   knowledge_structure_revision: structureRevision,
@@ -155,7 +169,9 @@ export const progress = {
       correct_answers: 0,
       qualified_correct_items: 0,
       covered_claim_ids: [],
-      mastered_claim_ids: [],
+      completed_claim_ids: [],
+      assessable_claim_ids: [firstClaim],
+      unavailable_claim_ids: [],
       weak_claim_ids: [],
       latest_is_correct: null,
     },
@@ -167,7 +183,9 @@ export const progress = {
       correct_answers: 0,
       qualified_correct_items: 0,
       covered_claim_ids: [],
-      mastered_claim_ids: [],
+      completed_claim_ids: [],
+      assessable_claim_ids: [secondClaim],
+      unavailable_claim_ids: [],
       weak_claim_ids: [],
       latest_is_correct: null,
     },
@@ -184,11 +202,15 @@ export const progress = {
 };
 
 export async function json(route: Route, body: unknown, status = 200) {
-  await route.fulfill({ status, json: body });
+  await route.fulfill({ status, json: readResponse(route.request().url(), body, runId) });
 }
 
 function pathMatches(path: string) {
-  return (url: URL) => decodeURIComponent(url.pathname) === decodeURIComponent(path);
+  return (url: URL) => {
+    const actual = decodeURIComponent(url.pathname);
+    const fixturePath = actual.replace(/\/outline$/, "").replace(/\/workspace$/, "/resume").replace(/\/map-progress$/, "/progress");
+    return actual === decodeURIComponent(path) || fixturePath === decodeURIComponent(path);
+  };
 }
 
 function apiError(route: Route, reasonCode: string, status: number) {
@@ -251,10 +273,13 @@ export async function mockKnowledgeMapApi(
     (url) => /^\/v[12]\//.test(url.pathname),
     (route) => apiError(route, "RESOURCE_NOT_FOUND", 404),
   );
+  await page.route(pathMatches("/v1/learning-activity/celebrations/claim"), (route) =>
+    route.request().method() === "POST" ? json(route, emptyCelebrationClaim) : apiError(route, "METHOD_NOT_ALLOWED", 405));
+  await mockGet(page, "/v1/topics", () => ({topics: []}));
   await mockGet(page, "/v1/source-capabilities", () => ({
-    schema: "source-capabilities/v1",
+    schema: "source-capabilities/v2", max_request_bytes: 104857600, max_images: 50, max_media_seconds: 7200, youtube: false,
     quality_notice: "PDF 優先",
-    formats: [{ extension: ".pdf", media_type: "application/pdf", max_bytes: 104857600 }],
+    formats: [{ extension: ".pdf", media_type: "application/pdf", max_bytes: 104857600, kind: "document" }],
   }));
   await page.route(pathMatches("/v1/session"), (route) => {
     if (route.request().method() === "GET")
@@ -285,8 +310,27 @@ export async function mockKnowledgeMapApi(
     ],
     study_sessions: [],
   }));
+  await mockGet(page, `/v1/materials/${materialId}/version-move`, () => emptyVersionMovePreview(materialId, revision));
   await mockGet(page, `/v1/material-processing-runs/${runId}`, () => boundRun);
   await mockGet(page, mapPath, () => view);
+  await mockGet(page, "/v1/learning-goals", () => ({ schema: "learning-goals/v1", today: goalToday, goals: [] }));
+  await mockGet(page, `/v1/materials/${materialId}/goal`, () => emptyGoal(materialId, revision, runId));
+  await page.route(pathMatches(`/v1/materials/${materialId}/study-start`), route => {
+    const body = route.request().postDataJSON();
+    currentConceptId = body.current_concept_id ?? getProgress().current_concept_id;
+    return json(route, { schema: "study-start/v2", session: { ...session(), knowledge_structure_revision: revision, current_concept_id: currentConceptId }, selected_set_id: null });
+  });
+  await mockGet(page, `${mapPath}/concept-difficulty`, () => difficultyView(materialId, revision));
+  await mockGet(page, `${mapPath}/learning-diagnosis`, () => diagnosisView(materialId, revision));
+  await mockGet(page, `${mapPath}/concepts`, route => {
+    const query = new URL(route.request().url()).searchParams;
+    return conceptsView(view, materialId, (query.get("ids") ?? "").split(","), query.get("neighbors") === "true");
+  });
+  await mockGet(page, `${mapPath}/search`, route => {
+    const query = (new URL(route.request().url()).searchParams.get("q") ?? "").toLocaleLowerCase();
+    return { schema: "knowledge-search/v1", material_id: materialId, knowledge_structure_revision: revision,
+      concept_ids: view.concepts.filter(c => [c.label, ...c.aliases, ...c.claims.map(c => c.text)].some(t => t.toLocaleLowerCase().includes(query))).map(c => c.concept_id) };
+  });
   await page.route(
     (url) => {
       const path = decodeURIComponent(url.pathname);
@@ -364,7 +408,7 @@ export async function mockKnowledgeMapApi(
     return {
       schema: "study-resume/v1",
       assessment_sets: [],
-      selected_set_id: null,
+      selected_set_id: null, selected_set: null,
       session: {
         ...session(),
         knowledge_structure_revision: revision,
@@ -515,13 +559,14 @@ export async function mockLearningMapApi(
       label: concept.label,
       status:
         index < 2
-          ? "mastered"
+          ? "completed"
           : index === 2 || index === 5
-            ? "learning"
+            ? "in_progress"
             : index === 4
               ? "needs_review"
               : "not_started",
-      mastered_claim_ids: index < 2 ? [concept.claims[0].claim_id] : [],
+      assessable_claim_ids: concept.claims.map(claim=>claim.claim_id),
+      completed_claim_ids: index < 2 ? [concept.claims[0].claim_id] : [],
       weak_claim_ids: index === 4 ? [concept.claims[0].claim_id] : [],
     })),
     next_action: {
@@ -559,7 +604,7 @@ export async function mockLearningMapApi(
     () => ({
       schema: "study-resume/v1",
       assessment_sets: [],
-      selected_set_id: null,
+      selected_set_id: null, selected_set: null,
       session: saved,
       run_id: runId,
       source_artifact_id: artifactId,

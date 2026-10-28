@@ -1,24 +1,37 @@
-import { useCallback, useEffect, useRef, useState } from "react";
+import { ProcessingSources } from "./ProcessingSources";
+import { MaterialRunWorkspaceContext } from "../../app/AppShell";
+import { MaterialContentNav } from "./MaterialContentNav";
+import { rememberMaterial } from "./material-memory";
+import { BackLink } from "../../ui/BackLink";
+import { MaterialRunFailure } from "./MaterialRunFailure";
+import { useCallback, useContext, useEffect, useLayoutEffect, useRef, useState } from "react";
 
-import { ApiClientError, errorMessage, type StudydyApiClient } from "../../api/client";
-import type { MaterialProcessingRunView, MaterialLibraryItem } from "../../api/contracts";
+import { ApiClientError, errorMessage, isNotFound, type StudydyApiClient } from "../../api/client";
+import { NotFoundView, materialNotFound } from "../../ui/NotFoundView";
+import type { MaterialProcessingRunView, MaterialLibraryItem, SourceView } from "../../api/contracts";
 import { writeRoute, type AppRoute } from "../../app/routes";
 import { Icon } from "../../ui/Icon";
+import { ProcessingProgress } from "./ProcessingProgress";
+import { ProcessingTimeline } from "./ProcessingTimeline";
 import { StateView } from "../../ui/StateView";
-import { MaterialRunStartControl } from "./MaterialRunStartControl";
 import { MaterialRemoveControl } from "./MaterialRemoveControl";
+import { FlowHeader, LearningSteps, topicSteps, uploadSteps } from "./Flow";
 import {
   automaticPollIntervalMs,
-  materialElapsedLabel,
-  materialFailureMessage,
   materialProgressStageLabel,
+  materialStageCountLabel,
   materialProgressStages,
-  materialCurrentStagePercent,
-  materialOverallProgressPercent,
 } from "./material-flow";
 
 function activeRun(run: MaterialProcessingRunView | null): boolean {
   return run?.status === "pending" || run?.status === "running";
+}
+
+// 步驟列依教材來源決定：上傳的教材與從主題建立的教材流程不同；來源混合或讀不到時不顯示步驟列。
+function flowSteps(sources: SourceView[]): string[] | null {
+  const origins = new Set(sources.map((source) => source.origin ?? "upload"));
+  if (origins.size !== 1) return null;
+  return origins.has("research") ? topicSteps : uploadSteps;
 }
 
 function canRequestDiscard(run: MaterialProcessingRunView | null): boolean {
@@ -26,7 +39,7 @@ function canRequestDiscard(run: MaterialProcessingRunView | null): boolean {
     !!run &&
     activeRun(run) &&
     run.cancel_requested_at === null &&
-    ["queued", "evidence", "semantics"].includes(run.progress_stage)
+    ["queued", "evidence", "semantics", "review", "indexing"].includes(run.progress_stage)
   );
 }
 
@@ -38,7 +51,14 @@ export function RunView({
   route: Extract<AppRoute, { name: "material-run" }>;
 }) {
   const [run, setRun] = useState<MaterialProcessingRunView | null>(null);
+  const reportWorkspace=useContext(MaterialRunWorkspaceContext);
+  useLayoutEffect(()=>{
+    if(!run?.base_revision)return;
+    reportWorkspace?.(run.run_id);
+    return ()=>reportWorkspace?.(null);
+  },[reportWorkspace,run?.run_id,run?.base_revision]);
   const [message, setMessage] = useState<string | null>(null);
+  const [notFound, setNotFound] = useState(false);
   const [reload, setReload] = useState(0);
   const [now, setNow] = useState(() => Date.now());
 
@@ -54,9 +74,14 @@ export function RunView({
   const [cancelBusy, setCancelBusy] = useState(false);
   const [cancelError, setCancelError] = useState<string | null>(null);
   const [cancelNotice, setCancelNotice] = useState<string | null>(null);
+  const [steps, setSteps] = useState<string[] | null>(null);
+  const [materialName,setMaterialName]=useState<string|null>(null);
+  // 新版更新（base_revision）沒有建立流程的步驟列，不需要讀來源。
+  const firstBuild = run ? !run.base_revision : null;
 
   const applyRun = useCallback((next: MaterialProcessingRunView) => {
     const previous = currentRun.current;
+    if (previous && Date.parse(next.updated_at) < Date.parse(previous.updated_at)) return previous;
     // 已保存的取消意圖與結束狀態不可被較舊的 GET/POST 回應撤回。
     if (previous?.cancel_requested_at && next.cancel_requested_at === null) return previous;
     if (previous && !activeRun(previous) && activeRun(next)) return previous;
@@ -111,6 +136,11 @@ export function RunView({
           return;
         }
         if (version === cancelVersion.current) {
+          // 第一次就讀不到：處理紀錄不存在或不屬於此帳號。
+          if (!currentRun.current && (isNotFound(error) || (error instanceof Error && error.message === "RUN_MATERIAL_MISMATCH"))) {
+            setNotFound(true);
+            return;
+          }
           setMessage(errorMessage(error));
           return;
         }
@@ -124,6 +154,18 @@ export function RunView({
       if (timer !== null) window.clearTimeout(timer);
     };
   }, [apiClient, reload, route.materialId, route.runId, applyRun]);
+
+  useEffect(() => {
+    if (!firstBuild) return;
+    let cancelled = false;
+    setSteps(null);
+    void apiClient.getMaterial(route.materialId).then(item=>{if(!cancelled)setMaterialName(item.display_name);},()=>undefined);
+    void apiClient.getSources(route.materialId).then(
+      (list) => { if (!cancelled) setSteps(flowSteps(list.sources)); },
+      () => undefined,
+    );
+    return () => { cancelled = true; };
+  }, [apiClient, route.materialId, firstBuild]);
 
   const sendDiscard = async () => {
     if (cancelInFlight.current || discardAccepted.current || !canRequestDiscard(currentRun.current))
@@ -161,9 +203,14 @@ export function RunView({
     return () => window.clearInterval(timer);
   }, [run?.run_id, run?.status]);
 
+  const backLink = <BackLink label={run?.base_revision || run?.output_binding ? "返回教材" : "回到我的教材"} route={run?.base_revision || run?.output_binding ? { name: "material", materialId: route.materialId } : { name: "materials" }} />;
+  const back = <div className="run-material-return">{backLink}{materialName && <span>{materialName}</span>}</div>;
+
+  if (notFound) return <NotFoundView title="找不到這次處理" description="這筆處理紀錄可能已被刪除，或不屬於目前登入的帳號。" back={materialNotFound.back} />;
   if (message)
     return (
-      <section className="processing-page task-page">
+      <section className="flow-page processing-page task-page">
+        {back}
         <StateView
           action={
             <>
@@ -174,13 +221,6 @@ export function RunView({
               >
                 <Icon name="refresh" />
                 重新讀取
-              </button>
-              <button
-                className="secondary-button"
-                type="button"
-                onClick={() => writeRoute({ name: "materials" })}
-              >
-                返回教材庫
               </button>
             </>
           }
@@ -194,14 +234,8 @@ export function RunView({
 
   if (!run)
     return (
-      <section className="processing-page task-page" aria-live="polite">
-        <header className="processing-hero">
-          <img src="/assets/studydy/processing-laptop.png" alt="" />
-          <div>
-            <p className="eyebrow">教材處理</p>
-            <h1>正在讀取處理狀態</h1>
-          </div>
-        </header>
+      <section className="flow-page processing-page task-page" aria-live="polite">
+        <FlowHeader back={back} title="正在讀取處理狀態" image="/assets/studydy/processing-laptop.png" />
       </section>
     );
 
@@ -221,29 +255,19 @@ export function RunView({
   if (activeRun(run)) {
     const cancellationRequested = removing || run.cancel_requested_at !== null;
     return (
-      <section className="processing-page task-page is-processing">
-        <header className="processing-hero">
-          <div>
-            <p className="eyebrow">教材處理</p>
-            <h1>
-              {cancellationRequested
-                ? "正在取消並刪除教材"
-                : run.status === "pending"
-                  ? "等待開始處理"
-                  : "正在分析教材"}
-            </h1>
-            <p>
-              {cancellationRequested
-                ? "已收到刪除要求，會在目前進行中的步驟完成後安全停止並刪除教材。"
-                : "Studydy 會依序整理教材內容、建立概念關係，並在完成後發布知識地圖。"}
-            </p>
-          </div>
-        </header>
+      <section className="flow-page processing-page task-page is-processing">
+        <FlowHeader back={back}
+          title={cancellationRequested ? "正在取消並刪除教材" : run.status === "pending" ? "等待開始處理" : "正在分析教材"}
+          description={cancellationRequested
+            ? "已收到刪除要求，會在目前進行中的步驟完成後安全停止並刪除教材。"
+            : "Studydy 會依序整理教材內容、建立概念關係，並在完成後發布知識地圖。"}
+        />
+        {steps && <LearningSteps labels={steps} current={steps.length - 1} />}
         <div className="processing-grid">
           <section className="surface processing-card">
             <ProcessingProgress run={run} now={now} />
             {!removing && canRequestDiscard(run) && (
-              <div className="processing-cancel">
+              <div className="run-actions">
                 {confirmingCancel ? (
                   <section
                     aria-labelledby="cancel-confirm-title"
@@ -286,7 +310,7 @@ export function RunView({
                 ) : (
                   <button
                     ref={cancelButton}
-                    className="secondary-button processing-destructive"
+                    className="secondary-button danger-button processing-destructive"
                     type="button"
                     onClick={() => {
                       setCancelError(null);
@@ -306,7 +330,7 @@ export function RunView({
             )}
             {cancelNotice && <p role="status">{cancelNotice}</p>}
           </section>
-          <ProcessingTimeline run={run} />
+          <ProcessingTimeline stages={materialProgressStages.slice(0, -1).map(stage => ({ label: materialProgressStageLabel(stage), icon: stage === "semantics" ? "map" : "process" }))} currentIndex={materialProgressStages.indexOf(run.progress_stage)} />
         </div>
       </section>
     );
@@ -315,7 +339,9 @@ export function RunView({
   // 已受理刪除後，即使發布流程結束，仍須維持刪除狀態。
   if (run.status === "cancelled" || (removing && !activeRun(run)))
     return (
-      <section className="processing-page task-page is-cancelled">
+      <section className="flow-page processing-page task-page is-cancelled">
+        {back}
+        {steps && <LearningSteps labels={steps} current={steps.length - 1} />}
         <StateView
           title={removing ? "正在刪除教材…" : "已取消教材處理"}
           description={
@@ -345,296 +371,59 @@ export function RunView({
         />
         <p className="failure-progress">
           停止於：{materialProgressStageLabel(run.progress_stage)}
-          {run.total_pages !== null && `，已處理 ${run.completed_pages} / ${run.total_pages} 頁`}
+          {materialStageCountLabel(run) && `，${materialStageCountLabel(run)}`}
         </p>
       </section>
     );
 
-  if (run.status === "failed")
-    return (
-      <section className="processing-page task-page terminal-failure">
-        <StateView
-          action={
-            <>
-              <MaterialRunStartControl
-                apiClient={apiClient}
-                materialId={run.material_id}
-                retryRun={{ runId: run.run_id, saved: !!run.analysis_saved }}
-              />
-              <button
-                className="secondary-button"
-                type="button"
-                onClick={() => writeRoute({ name: "materials" })}
-              >
-                返回教材庫
-              </button>
-            </>
-          }
-          description={materialFailureMessage(run.error_code ?? "MATERIAL_ANALYSIS_FAILED")}
-          image="/assets/studydy/failure-confused.png"
-          title="教材處理失敗"
-          tone="failure"
-        />
-        <p className="failure-progress" role="status">
-          最後記錄進度：{materialProgressStageLabel(run.progress_stage)}
-          {run.total_pages === null ? "" : `，${run.completed_pages} / ${run.total_pages} 頁`}
-        </p>
-        {run.analysis_saved && (
-          <p role="status">
-            已完成的分析批次保存在本機。使用相同來源與設定重試，會接續未完成的部分；若只剩地圖組裝，就不再呼叫模型。
-          </p>
-        )}
-        {run.input_source_set_id && !run.analysis_saved && (
-          <p role="status">這次沒有已保存的分析進度；重試將重新分析原來源。</p>
-        )}
-        {run.input_source_set_id && (
-          <button
-            className="text-button"
-            onClick={() => writeRoute({ name: "material-sources", materialId: run.material_id })}
-          >
-            修改來源與重新分析
-          </button>
-        )}
-        {run.error_code && (
-          <details className="processing-technical">
-            <summary>技術資訊</summary>
-            <code>{run.error_code}</code>
-          </details>
-        )}
-      </section>
-    );
+  if (run.status === "failed") return <section className="flow-page processing-page task-page terminal-failure">
+    <FlowHeader back={back} title="教材處理失敗"/>
+    {steps && <LearningSteps labels={steps} current={steps.length - 1}/>}
+    <div className="processing-grid">
+      <MaterialRunFailure apiClient={apiClient} run={run}/>
+      <ProcessingTimeline stages={materialProgressStages.slice(0,-1).map(stage=>({label:materialProgressStageLabel(stage),icon:stage==='semantics'?'map':'process'}))} currentIndex={materialProgressStages.indexOf(run.progress_stage)} activity="失敗"/>
+    </div>
+  </section>;
 
   const binding = run.output_binding!;
-  const partial = run.status === "partial";
   return (
-    <section className="processing-page task-page is-complete">
-      <header className="processing-hero">
+    <section className="flow-page processing-page task-page is-complete">
+      <FlowHeader back={back}
+        title="教材整理完成"
+        description="知識地圖已準備完成，可以查看概念、關係、來源與建議學習順序。"
+      />
+      {steps && <LearningSteps labels={steps} current={steps.length} />}
+      <section className="surface flow-result processing-summary" aria-labelledby="processing-result-title">
         <img src="/assets/studydy/success-jump.png" alt="" />
-        <div>
-          <p className="eyebrow">教材處理</p>
-          <h1>教材整理完成</h1>
-          <p>
-            {partial
-              ? "知識地圖已建立，可先查看已整理的內容；部分內容未完整整理。"
-              : "知識地圖已準備完成，可以查看概念、關係、來源與建議學習順序。"}
-          </p>
-        </div>
-      </header>
-      <div className="processing-grid">
-        <section className="surface processing-card processing-summary">
-          <h2>處理摘要</h2>
-          <div className="processing-summary-material">
-            <span className="file-kind">
-              <Icon name="file" />
-            </span>
-            <div>
-              <h3>教材</h3>
-              <p>共處理 {binding.page_count} 頁</p>
-            </div>
-          </div>
-          <p className={`status-badge ${partial ? "is-partial" : "is-success"}`}>
-            {!partial && <Icon name="check" />}
-            {partial ? "部分結果可用" : "處理完成"}
-          </p>
-          <h3>可查看內容</h3>
-          <ul>
-            <li>
-              <Icon name="check" />
-              可回查的概念與學習重點
-            </li>
-            <li>
-              <Icon name="check" />
-              教材中的概念關係
-            </li>
-            <li>
-              <Icon name="check" />
-              教材建議學習順序
-            </li>
+        <div className="flow-result-body">
+          <p className="status-badge is-success"><Icon name="check"/>處理完成</p>
+          <h2 id="processing-result-title">知識地圖已準備完成</h2>
+          <p>共處理 {binding.page_count} 頁，可以查看概念、關係、來源與建議學習順序。</p>
+          <p className="run-ai-notice">由 AI 整理，每個重點都可點開原文對照。</p>
+          <ul className="flow-result-stats">
+            <li><Icon name="check" size={16} />可回查的概念與學習重點</li>
+            <li><Icon name="check" size={16} />教材中的概念關係</li>
+            <li><Icon name="check" size={16} />教材建議學習順序</li>
           </ul>
-        </section>
-        <section className="surface processing-card">
-          <h2>處理流程</h2>
-          <ol className="status-timeline">
-            {materialProgressStages.slice(0, -1).map((stage) => (
-              <li className="is-complete" key={stage}>
-                <span>
-                  <Icon name="check" />
-                </span>
-                <div>
-                  <strong>{materialProgressStageLabel(stage)}</strong>
-                  <p>此階段已完成。</p>
-                </div>
-              </li>
-            ))}
-          </ol>
-        </section>
-      </div>
-      <div className="surface completion-bar">
-        <span className={`completion-icon${partial ? " is-partial" : ""}`}>
-          <Icon name={partial ? "map" : "check"} />
-        </span>
-        <div>
-          <strong>{partial ? "知識地圖已建立" : "知識地圖已準備完成"}</strong>
-          <p>
-            {partial
-              ? "可以查看已整理的概念、關係與來源。"
-              : "可以查看概念、關係、來源與建議學習順序。"}
-          </p>
-        </div>
-        <button
-          className="primary-button"
-          type="button"
-          onClick={() =>
-            writeRoute({
-              name: "knowledge-map",
-              materialId: run.material_id,
-              runId: run.run_id,
-              structureRevision: binding.knowledge_structure_revision,
-            })
-          }
-        >
-          開啟知識地圖
-          <Icon name="chevron-right" />
-        </button>
-      </div>
-    </section>
-  );
-}
-
-function ProcessingProgress({ run, now }: { run: MaterialProcessingRunView; now: number }) {
-  const currentPercent = materialCurrentStagePercent(run);
-  const overallPercent = materialOverallProgressPercent(run);
-  const stageLabel = materialProgressStageLabel(run.progress_stage);
-  const stageActivity =
-    run.progress_stage === "queued"
-      ? "排隊中"
-      : run.progress_stage === "publishing"
-        ? "發布中"
-        : "處理中";
-  return (
-    <>
-      <div className="processing-status" aria-live="polite">
-        <div className="progress-heading overall-heading">
-          <h2>整體流程進度（估計）</h2>
-          <strong>{overallPercent === null ? "—" : `${overallPercent}%`}</strong>
-        </div>
-        <progress
-          className="processing-progress"
-          max={100}
-          value={overallPercent ?? undefined}
-          aria-label={
-            overallPercent === null
-              ? "整體流程進度（估計），尚無可估計資料"
-              : `整體流程進度（估計） ${overallPercent}%`
-          }
-        />
-        <p className="progress-estimate-note">依處理階段與頁數估算，不代表剩餘時間。</p>
-        <section className="processing-current">
-          <h3>{currentPercent === null ? "目前狀態" : "本階段進度"}</h3>
-          <div className="progress-heading">
-            <strong
-              className={`stage-label${currentPercent === null ? " stage-status-label" : ""}`}
+          <div className="flow-result-actions">
+            <button
+              className="primary-button"
+              type="button"
+              onClick={() =>
+                writeRoute({
+                  name: "knowledge-map",
+                  materialId: run.material_id,
+                  runId: run.run_id,
+                  structureRevision: binding.knowledge_structure_revision,
+                })
+              }
             >
-              {currentPercent === null && (
-                <span className="processing-status-indicator" aria-hidden="true" />
-              )}
-              {stageLabel}
-            </strong>
-            <strong>{currentPercent === null ? stageActivity : `${currentPercent}%`}</strong>
+              開啟知識地圖
+              <Icon name="chevron-right" />
+            </button>
           </div>
-          {currentPercent === null ? (
-            <p>
-              {run.progress_stage === "queued"
-                ? "正在等待本機處理資源，開始後會自動更新進度。"
-                : run.progress_stage === "publishing"
-                  ? "正在整理並發布可開啟的知識地圖。"
-                  : "正在處理教材內容。"}
-            </p>
-          ) : (
-            <progress
-              className="processing-progress"
-              max={100}
-              value={currentPercent}
-              aria-label={`本階段進度 ${currentPercent}%，已完成 ${run.completed_pages} / ${run.total_pages} 頁`}
-            />
-          )}
-          {currentPercent !== null && (
-            <p className="stage-pages">
-              已完成 {run.completed_pages} / {run.total_pages} 頁
-            </p>
-          )}
-        </section>
-      </div>
-      {run.source_names && (
-        <div className="processing-sources">
-          <h2>這次分析的來源（{run.source_names.length} 份）</h2>
-          <ol>
-            {run.source_names.map((name, index) => (
-              <li key={index}>{name}</li>
-            ))}
-          </ol>
         </div>
-      )}
-      <dl className="processing-times">
-        <div>
-          <dt>已耗時</dt>
-          <dd>{materialElapsedLabel(run.created_at, now)}</dd>
-        </div>
-        <div>
-          <dt>最近更新</dt>
-          <dd>
-            <time dateTime={run.updated_at}>
-              {new Date(run.updated_at).toLocaleTimeString("zh-TW")}
-            </time>
-          </dd>
-        </div>
-      </dl>
-      <p className="processing-leave-note">進度會自動保存，可稍後從「我的教材」返回查看。</p>
-    </>
-  );
-}
-
-function ProcessingTimeline({ run }: { run: MaterialProcessingRunView }) {
-  const currentStageIndex = materialProgressStages.indexOf(run.progress_stage);
-  return (
-    <section className="surface processing-card processing-timeline">
-      <header className="processing-timeline-heading">
-        <h2>處理流程</h2>
-        <img src="/assets/studydy/processing-laptop.png" alt="" />
-      </header>
-      <ol className="status-timeline">
-        {materialProgressStages.slice(0, -1).map((stage, index) => (
-          <li
-            aria-current={index === currentStageIndex ? "step" : undefined}
-            className={
-              index < currentStageIndex
-                ? "is-complete"
-                : index === currentStageIndex
-                  ? "is-active"
-                  : undefined
-            }
-            key={stage}
-          >
-            <span>
-              <Icon
-                name={
-                  index < currentStageIndex ? "check" : stage === "semantics" ? "map" : "process"
-                }
-              />
-            </span>
-            <div>
-              <strong>{materialProgressStageLabel(stage)}</strong>
-              <p>
-                {index < currentStageIndex
-                  ? "已完成"
-                  : index === currentStageIndex
-                    ? "進行中"
-                    : "尚未開始"}
-              </p>
-            </div>
-          </li>
-        ))}
-      </ol>
+      </section>
     </section>
   );
 }
@@ -657,7 +446,7 @@ function RevisionRun({
     let cancelled = false;
     void apiClient.getMaterial(run.material_id).then(
       (value) => {
-        if (!cancelled) setMaterial(value);
+        if (!cancelled) {rememberMaterial(apiClient,value);setMaterial(value);}
       },
       (failure) => {
         if (!cancelled) setError(errorMessage(failure));
@@ -671,11 +460,6 @@ function RevisionRun({
     material?.available_structures.find(
       (item) => item.knowledge_structure_revision === material.head_revision,
     ) ?? material?.available_structures[0];
-  const savedSession =
-    currentStructure &&
-    material?.study_sessions.find(
-      (item) => item.knowledge_structure_revision === currentStructure.knowledge_structure_revision,
-    );
   const cancelling = run.cancel_requested_at !== null && activeRun(run);
   const completed = run.status === "succeeded" || run.status === "partial";
   const title =
@@ -700,151 +484,39 @@ function RevisionRun({
       setBusy(false);
     }
   };
-  const publishedActions = (
-    <>
-      {currentStructure && (
-        <button
-          className="primary-button"
-          onClick={() =>
-            writeRoute({
-              name: "knowledge-map",
-              materialId: run.material_id,
-              runId: currentStructure.run_id,
-              structureRevision: currentStructure.knowledge_structure_revision,
-            })
-          }
-        >
-          開啟目前地圖
-        </button>
-      )}
-      {savedSession && (
-        <button
-          className="secondary-button"
-          onClick={() =>
-            writeRoute({
-              name: "study-session",
-              materialId: run.material_id,
-              runId: savedSession.run_id,
-              structureRevision: savedSession.knowledge_structure_revision,
-              studySessionId: savedSession.study_session_id,
-            })
-          }
-        >
-          繼續學習
-        </button>
-      )}
-    </>
-  );
-  const libraryActions = (
-    <>
-      <button
-        className="text-button"
-        onClick={() => writeRoute({ name: "material-sources", materialId: run.material_id })}
-      >
-        查看來源與新增教材
-      </button>
-      <button className="text-button" onClick={() => writeRoute({ name: "materials" })}>
-        返回教材庫
-      </button>
-    </>
-  );
-
-  if (activeRun(run))
-    return (
-      <section className="processing-page task-page is-processing">
-        <header className="processing-hero">
-          <div>
-            <p className="eyebrow">教材更新</p>
-            <h1>{title}</h1>
-            <p>Studydy 正在整理新增內容並更新知識地圖，期間仍可使用目前地圖與學習紀錄。</p>
-          </div>
-        </header>
-        <div className="processing-grid">
-          <section className="surface processing-card">
-            <ProcessingProgress run={run} now={now} />
-            <div className="state-actions">{publishedActions}</div>
-            <div className="processing-cancel">
-              {cancelling ? (
-                <p role="status">
-                  取消意圖已保存，後續結果不會套用。正在進行中的步驟可能需要一些時間結束。
-                </p>
-              ) : (
-                <button className="secondary-button" disabled={busy} onClick={() => void cancel()}>
-                  {busy ? "正在送出取消…" : "取消這次更新"}
-                </button>
-              )}
-              {error && (
-                <p className="form-error" role="alert">
-                  {error}
-                </p>
-              )}
-            </div>
-          </section>
-          <ProcessingTimeline run={run} />
+  const map = completed && run.output_binding
+    ? {name:"knowledge-map" as const,materialId:run.material_id,runId:run.run_id,structureRevision:run.output_binding.knowledge_structure_revision}
+    : currentStructure ? {name:"knowledge-map" as const,materialId:run.material_id,runId:currentStructure.run_id,structureRevision:currentStructure.knowledge_structure_revision} : null;
+  const mapAction = map && <button className="primary-button" onClick={()=>writeRoute(map)}>{completed?"開啟知識地圖":"先使用目前地圖"}</button>;
+  return <section className={`material-content processing-page${activeRun(run)?" is-processing":""}`}>
+    <MaterialContentNav apiClient={apiClient} materialId={run.material_id} materialName={material?.display_name} current="sources" updateCompleted={completed}
+      mapRoute={map} back={{label:material?`返回${material.display_name}`:"返回教材",onClick:()=>writeRoute({name:"material",materialId:run.material_id})}}/>
+    <div className="material-content-body" role="tabpanel" id="material-panel-sources" aria-labelledby="material-tab-sources">
+    <FlowHeader title={title} description={run.status==='failed'?undefined:completed?"教材已更新，可以開啟知識地圖繼續使用。":"Studydy 正在整理新增內容，期間仍可使用目前地圖與學習紀錄。"}/>
+    {error && <p className="form-error" role="alert">{error}</p>}
+    <div className="processing-grid">
+      {run.status==='failed' ? <MaterialRunFailure apiClient={apiClient} run={run}/> : <section className="surface processing-card">
+        {completed ? <>
+          <p className="status-badge is-success">處理完成</p>
+          <p className="run-ai-notice">由 AI 整理，每個重點都可點開原文對照。</p>
+          {run.structure_changes && <section aria-label="這次更新改了什麼">
+            <h2>這次更新改了什麼</h2>
+            <p>{[
+              run.added_sources && `新增 ${run.added_sources.length} 份來源`,
+              `概念 ${run.structure_changes.before.concepts} → ${run.structure_changes.after.concepts} 個`,
+              `關係 ${run.structure_changes.before.relations} → ${run.structure_changes.after.relations} 條`,
+            ].filter(Boolean).join(" · ")}</p>
+          </section>}
+          <ProcessingSources run={run}/>
+        </> : <ProcessingProgress run={run} now={now}/>}
+        <div className="run-actions">
+          {activeRun(run) && (cancelling ? <p role="status">取消意圖已保存，後續結果不會套用。正在進行中的步驟可能需要一些時間結束。</p>
+            : <button className="secondary-button" disabled={busy} onClick={()=>void cancel()}>{busy?"正在送出取消…":"取消這次更新"}</button>)}
+          {mapAction}
         </div>
-        <div className="state-actions">{libraryActions}</div>
-      </section>
-    );
-  return (
-    <section className="processing-page task-page">
-      <header className="processing-hero">
-        <img
-          src={`/assets/studydy/${run.status === "failed" ? "failure-confused" : completed ? "success-jump" : "processing-laptop"}.png`}
-          alt=""
-        />
-        <div>
-          <p className="eyebrow">教材更新</p>
-          <h1>{title}</h1>
-          <p>
-            {completed
-              ? "新版地圖已可使用；未變知識點會依原有作答證據承接進度。"
-              : "目前地圖與學習紀錄仍保留，更新完成後即可使用新版地圖。"}
-          </p>
-        </div>
-      </header>
-      <section className="surface processing-card">
-        {run.status === "partial" && (
-          <p role="status">部分內容建議對照來源確認，不影響使用更新後的地圖。</p>
-        )}
-        {run.source_names && (
-          <>
-            <h2>這次分析的來源</h2>
-            <ul>
-              {run.source_names.map((name, index) => (
-                <li key={index}>{name}</li>
-              ))}
-            </ul>
-          </>
-        )}
-        {run.error_code && (
-          <p className="form-error" role="status">
-            {run.error_code === "SOURCE_UPDATE_NEEDS_REVIEW"
-              ? "先前流程因模型的複核提示而停止，這不代表教材已確認有矛盾。可接續已保存的結果完成更新。"
-              : materialFailureMessage(run.error_code)}
-          </p>
-        )}
-        {run.status === "failed" && run.analysis_saved && (
-          <p role="status">
-            已完成的分析批次保存在本機，使用相同來源與設定重試會接續未完成的部分。
-          </p>
-        )}
-        {error && (
-          <p className="form-error" role="alert">
-            {error}
-          </p>
-        )}
-        <div className="state-actions">
-          {run.status === "failed" && (
-            <MaterialRunStartControl
-              apiClient={apiClient}
-              materialId={run.material_id}
-              retryRun={{ runId: run.run_id, saved: !!run.analysis_saved }}
-            />
-          )}
-          {publishedActions}
-          {libraryActions}
-        </div>
-      </section>
-    </section>
-  );
+      </section>}
+      <ProcessingTimeline stages={materialProgressStages.slice(0,-1).map(stage=>({label:materialProgressStageLabel(stage),icon:stage==='semantics'?'map':'process'}))} currentIndex={materialProgressStages.indexOf(run.progress_stage)} activity={run.status==='failed'?'失敗':run.status==='cancelled'?'已停止':cancelling?'取消中':'進行中'}/>
+    </div>
+    </div>
+  </section>;
 }

@@ -1,10 +1,12 @@
 """Knowledge Structure 的 ID、字面值與關係排序規則。"""
+
 from __future__ import annotations
 
 import re
+from heapq import heapify, heappop, heappush
 from typing import Any
 
-from pdf_evidence.ocr_page_evidence import canonical_sha256
+from content_identity import canonical_sha256
 
 
 STRUCTURE_SCHEMA = "knowledge-structure/v1"
@@ -31,7 +33,14 @@ _TECHNICAL = re.compile(
     r"|(?<!\w)[+-]?(?:\d+(?:\.\d+)?|\.\d+)(?:\s?(?:%|[A-Za-zµμ°][A-Za-z0-9µμ°/^.-]{0,15}))?"
 )
 _CODE_OR_FORMULA = re.compile(r"[;{}]|\[[^\]]*\]|\([^\n()]*\)|\^|(?<![<>=!])=(?!=)")
-_GENERIC_REASONS = {"有關", "內容相似", "同一主題", "一起出現", "related", "similar topic"}
+_GENERIC_REASONS = {
+    "有關",
+    "內容相似",
+    "同一主題",
+    "一起出現",
+    "related",
+    "similar topic",
+}
 
 
 def _id(kind: str, value: Any) -> str:
@@ -47,10 +56,7 @@ def _text(value: Any, *, maximum: int = 4096) -> str:
     return cleaned
 
 
-def _cycle(edges: list[tuple[str, str]], candidate: tuple[str, str]) -> bool:
-    graph: dict[str, set[str]] = {}
-    for source, target in [*edges, candidate]:
-        graph.setdefault(source, set()).add(target)
+def _cycle(graph: dict[str, set[str]], candidate: tuple[str, str]) -> bool:
     pending = [candidate[1]]
     visited: set[str] = set()
     while pending:
@@ -63,35 +69,91 @@ def _cycle(edges: list[tuple[str, str]], candidate: tuple[str, str]) -> bool:
     return False
 
 
-def _path(concepts: list[dict[str, Any]], relations: list[dict[str, Any]]) -> list[dict[str, Any]]:
+def _coalesce_relations(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """合併呼叫端持有的候選關係，保留全部支持；有方向衝突則拒絕。"""
+    relations = {}
+    for row in rows:
+        key = (
+            frozenset((row["source_concept_id"], row["target_concept_id"])),
+            row["type"],
+        )
+        if key not in relations:
+            relations[key] = row
+            continue
+        other = relations[key]
+        if (
+            row["type"] != "contrast"
+            and row["source_concept_id"] != other["source_concept_id"]
+        ):
+            raise ValueError("RELATION_DIRECTION_CONFLICT")
+        other["evidence_refs"] = list(
+            dict.fromkeys(other["evidence_refs"] + row["evidence_refs"])
+        )
+        other["context_refs"] = list(
+            dict.fromkeys(other["context_refs"] + row["context_refs"])
+        )
+        other["confidence"] = min(other["confidence"], row["confidence"])
+        if row["learner_reason"] != other["learner_reason"]:
+            other["learner_reason"] += "；" + row["learner_reason"]
+    result = list(relations.values())
+    for row in result:
+        row["relation_id"] = _id(
+            "relation", {k: v for k, v in row.items() if k != "relation_id"}
+        )
+    result.sort(
+        key=lambda r: (
+            RELATION_PRIORITY[r["type"]],
+            r["source_concept_id"],
+            r["target_concept_id"],
+            r["relation_id"],
+        )
+    )
+    return result
+
+
+def _path(
+    concepts: list[dict[str, Any]], relations: list[dict[str, Any]]
+) -> list[dict[str, Any]]:
     baseline = {concept["concept_id"]: index for index, concept in enumerate(concepts)}
     outgoing = {concept_id: set() for concept_id in baseline}
     incoming = {concept_id: set() for concept_id in baseline}
     for relation in relations:
         if relation["type"] == "prerequisite":
-            source, target = relation["source_concept_id"], relation["target_concept_id"]
+            source, target = (
+                relation["source_concept_id"],
+                relation["target_concept_id"],
+            )
             outgoing[source].add(target)
             incoming[target].add(source)
-    ready = sorted((key for key, values in incoming.items() if not values), key=baseline.get)
+    prerequisites = {target for target, sources in incoming.items() if sources}
+    ready_ids = {key for key, values in incoming.items() if not values}
+    ready = [(baseline[key], key) for key in ready_ids]
+    heapify(ready)
+    completed = set()
     ordered: list[str] = []
     while ready:
-        source = ready.pop(0)
+        _, source = heappop(ready)
+        ready_ids.remove(source)
         ordered.append(source)
+        completed.add(source)
         for target in sorted(outgoing[source], key=baseline.get):
             incoming[target].discard(source)
-            if not incoming[target] and target not in ordered and target not in ready:
-                ready.append(target)
-                ready.sort(key=baseline.get)
+            if (
+                not incoming[target]
+                and target not in completed
+                and target not in ready_ids
+            ):
+                ready_ids.add(target)
+                heappush(ready, (baseline[target], target))
     if len(ordered) != len(concepts):
         raise ValueError("PREREQUISITE_CYCLE")
     return [
         {
             "position": index,
             "concept_id": concept_id,
-            "reason": "prerequisite" if any(
-                relation["type"] == "prerequisite" and relation["target_concept_id"] == concept_id
-                for relation in relations
-            ) else "document_order",
+            "reason": "prerequisite"
+            if concept_id in prerequisites
+            else "document_order",
         }
         for index, concept_id in enumerate(ordered, start=1)
     ]

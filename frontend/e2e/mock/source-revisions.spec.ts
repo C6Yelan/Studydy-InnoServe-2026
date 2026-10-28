@@ -1,3 +1,4 @@
+import { workspaceView } from "../fixtures/knowledge-read-views.mjs";
 import { expect, test, type Page } from "@playwright/test";
 import type {
   MaterialLibraryItem,
@@ -56,7 +57,7 @@ const material: MaterialLibraryItem = {
 
 test.beforeEach(async ({ page }) => {
   await page.clock.install({ time: new Date(timestamp) });
-  await page.clock.pauseAt(new Date(timestamp));
+  // Date 起點固定，讓 React 非同步載入與輪詢計時器仍正常前進。
 });
 
 async function mockMaterial(page: Page, read: () => MaterialLibraryItem) {
@@ -80,10 +81,10 @@ for (const width of [1536, 390]) {
     await page.route("**/v1/source-capabilities", (route) =>
       route.fulfill({
         json: {
-          schema: "source-capabilities/v1",
+          schema: "source-capabilities/v2", max_request_bytes: 104857600, max_images: 50, max_media_seconds: 7200, youtube: false,
           formats: [
-            { extension: ".pdf", media_type: "application/pdf", max_bytes: 104857600 },
-            { extension: ".txt", media_type: "text/plain", max_bytes: 104857600 },
+            { extension: ".pdf", media_type: "application/pdf", max_bytes: 104857600, kind: "document" },
+            { extension: ".txt", media_type: "text/plain", max_bytes: 104857600, kind: "document" },
           ],
         },
       }),
@@ -116,6 +117,8 @@ for (const width of [1536, 390]) {
       source_artifact_id: uuid(60),
       base_revision: revision,
       source_names: ["A.pdf", ...files.map((file) => file.name)],
+      added_sources: files.map((file,index) => ({source_id:uuid(70+index),display_name:file.name})),
+      existing_source_count: 1,
       status: "running",
       progress_stage: "semantics",
       completed_pages: 1,
@@ -187,6 +190,7 @@ for (const width of [1536, 390]) {
       return route.fulfill({ json: run });
     });
     await page.goto(`/materials/${materialId}/sources`);
+    await page.getByRole("button",{name:"新增來源",exact:true}).click();
     await expect(page.getByLabel("選擇新增教材", { exact: true })).toBeEnabled();
     await page.getByLabel("選擇新增教材", { exact: true }).setInputFiles(files);
     await page.getByRole("button", { name: "上傳新增教材", exact: true }).click();
@@ -199,8 +203,7 @@ for (const width of [1536, 390]) {
     await expect(start).toBeEnabled();
     await start.click();
     await expect(page.getByRole("heading", { name: "正在更新教材", exact: true })).toBeVisible();
-    await expect(page.locator(".processing-sources li")).toHaveText(run.source_names!);
-    await expect(page.getByRole("button", { name: "繼續學習", exact: true })).toBeEnabled();
+    await expect(page.locator(".processing-sources")).toHaveText(`本次新增 2 份來源：${files.map(file=>file.name).join("、")}並與既有 1 份來源整合`);
     await expect(page.getByRole("button", { name: "取消並刪除教材", exact: true })).toHaveCount(0);
     expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(
       true,
@@ -209,9 +212,9 @@ for (const width of [1536, 390]) {
     await expect(page.getByRole("heading", { name: "已取消這次更新", exact: true })).toBeVisible();
     await page.reload();
     await expect(page.getByRole("heading", { name: "已取消這次更新", exact: true })).toBeVisible();
-    await page.getByRole("button", { name: "開啟目前地圖", exact: true }).click();
+    await page.getByRole("button", { name: "先使用目前地圖", exact: true }).click();
     await expect(page).toHaveURL(new RegExp(`${mapPath(oldRunId, revision)}$`));
-    await expect(page.getByRole("region", { name: "概念地圖工作區", exact: true })).toBeVisible();
+    await expect(page.getByRole("region", { name: "知識地圖工作區", exact: true })).toBeVisible();
     await page.goto("/materials");
     await page.getByRole("button", { name: "繼續學習", exact: true }).click();
     await expect(page).toHaveURL(
@@ -221,7 +224,7 @@ for (const width of [1536, 390]) {
     expect({ starts, cancels }).toEqual({ starts: 1, cancels: 1 });
   });
 
-  test(`partial update keeps its notice and opens the current head at ${width}px`, async ({
+  test(`partial update uses the source notice and opens the current head at ${width}px`, async ({
     page,
   }) => {
     await page.setViewportSize({ width, height: 844 });
@@ -239,6 +242,8 @@ for (const width of [1536, 390]) {
       source_artifact_id: uuid(60),
       base_revision: revision,
       source_names: ["A.pdf", "B.pdf"],
+      added_sources: [{source_id:uuid(70),display_name:"B.pdf"}],
+      existing_source_count: 1,
       status: "partial",
       completed_pages: 3,
       total_pages: 3,
@@ -270,14 +275,14 @@ for (const width of [1536, 390]) {
       expect(route.request().method()).toBe("GET");
       return route.fulfill({ json: run });
     });
-    // 共用 fixture 的 resume 綁定舊 run；只覆寫本案例的新版綁定。
+    // 共用 fixture 的 workspace 綁定舊 run；只覆寫本案例的新版綁定。
     await page.route(
-      `**/v1/materials/${materialId}/knowledge-structures/${encodeURIComponent(newRevision)}/study-sessions/${sessionId}/resume?*`,
+      `**/v1/materials/${materialId}/knowledge-structures/${encodeURIComponent(newRevision)}/study-sessions/${sessionId}/workspace?*`,
       (route) => {
         expect(route.request().method()).toBe("GET");
         expect(new URL(route.request().url()).searchParams.get("run_id")).toBe(newRunId);
         return route.fulfill({
-          json: {
+          json: workspaceView({
             schema: "study-resume/v1",
             run_id: newRunId,
             source_artifact_id: run.source_artifact_id,
@@ -285,22 +290,22 @@ for (const width of [1536, 390]) {
             session: { ...session(), knowledge_structure_revision: newRevision },
             progress: { ...progress, knowledge_structure_revision: newRevision },
             assessment_sets: [],
-            selected_set_id: null,
-          },
+            selected_set_id: null, selected_set: null,
+          }),
         });
       },
     );
     await page.goto(updatePath);
     await expect(page.getByRole("heading", { name: "教材更新完成", exact: true })).toBeVisible();
-    await expect(page.getByRole("status")).toContainText("部分內容建議對照來源確認");
-    await page.getByRole("button", { name: "開啟目前地圖", exact: true }).click();
+    await expect(page.getByText("由 AI 整理，每個重點都可點開原文對照。",{exact:true})).toBeVisible();
+    await page.getByRole("button", { name: "開啟知識地圖", exact: true }).click();
     await expect(page).toHaveURL(new RegExp(`${mapPath(newRunId, newRevision)}$`));
-    await expect(page.getByRole("region", { name: "概念地圖工作區", exact: true })).toBeVisible();
+    await expect(page.getByRole("region", { name: "知識地圖工作區", exact: true })).toBeVisible();
     await page.goto("/materials");
     const card = page.getByRole("article", { name: item.display_name, exact: true });
     await expect(card).not.toContainText(/partial|needs_review|部分內容待複核/);
     await expect(card.getByRole("button", { name: "繼續學習", exact: true })).toHaveCount(0);
-    await expect(card.getByRole("button", { name: "開啟知識地圖", exact: true })).toHaveClass(
+    await expect(card.getByRole("link", { name: "開啟知識地圖", exact: true })).toHaveClass(
       "primary-button",
     );
     item.study_sessions = [
@@ -314,7 +319,7 @@ for (const width of [1536, 390]) {
     await expect(card.getByRole("button", { name: "繼續學習", exact: true })).toHaveClass(
       "primary-button",
     );
-    await expect(card.getByRole("button", { name: "開啟知識地圖", exact: true })).toHaveClass(
+    await expect(card.getByRole("link", { name: "開啟知識地圖", exact: true })).toHaveClass(
       "secondary-button",
     );
     await card.getByRole("button", { name: "繼續學習", exact: true }).click();
@@ -324,3 +329,47 @@ for (const width of [1536, 390]) {
     await expect(page.locator(".study-session-page")).toBeVisible();
   });
 }
+
+
+test('update processing places cancellation and the current map in one card footer',async({page},testInfo)=>{
+ await mockKnowledgeMapApi(page,structureView());
+ const run:MaterialProcessingRunView={...publishedRun,run_id:newRunId,base_revision:revision,status:'running',progress_stage:'evidence',completed_pages:1,total_pages:2,source_names:['舊教材.pdf','補充教材.pdf'],added_sources:[{source_id:uuid(70),display_name:'補充教材.pdf'}],existing_source_count:1,completed_units:1,total_units:2,created_at:new Date(Date.parse(timestamp)-65000).toISOString(),updated_at:new Date(Date.parse(timestamp)-1000).toISOString(),output_binding:null,completed_at:null};
+ await mockMaterial(page,()=>({...material,latest_attempt:run}));
+ await page.route(`**/v1/material-processing-runs/${newRunId}`,route=>route.fulfill({json:run}));
+ const initialRunId=uuid(9);
+ await page.route(`**/v1/material-processing-runs/${initialRunId}`,route=>route.fulfill({json:{...run,run_id:initialRunId,base_revision:undefined}}));
+ await page.route(`**/v1/materials/${materialId}/sources`,route=>route.fulfill({json:{schema:'material-sources/v1',material_id:materialId,sources:[{source_id:uuid(11),normalization_id:uuid(12),original_artifact_id:artifactId,normalized_artifact_id:artifactId,original_name:'首次教材.pdf',media_type:'application/pdf',status:'ready',page_count:2,error_code:null,included:false}]}}));
+ await page.goto(updatePath);
+ const header=page.locator('header[aria-label="目前教材"]');await expect(header).toBeVisible();
+ await expect(page.locator('.app-header')).not.toBeVisible();await expect(header.getByRole('tab',{name:'教材來源',exact:true})).toHaveAttribute('aria-selected','true');
+ const footer=page.locator('.run-actions');await expect(footer.getByRole('button',{name:'取消這次更新',exact:true})).toBeVisible();
+ await expect(footer.getByRole('button',{name:'先使用目前地圖',exact:true})).toBeVisible();await expect(page.locator('.processing-page .primary-button')).toHaveCount(1);
+ for(const [width,height] of [[1440,900],[1300,900],[1200,900],[1024,768],[390,844]]){
+  await page.setViewportSize({width,height});await page.screenshot({path:testInfo.outputPath(`update-running-${width}.png`),animations:'disabled'});
+  expect(await page.evaluate(()=>document.documentElement.scrollWidth<=innerWidth)).toBe(true);
+  await expect(page.locator('.app-header')).not.toBeVisible();await expect(page.getByRole('navigation',{name:'手機導覽',exact:true})).not.toBeVisible();
+ }
+ await header.getByRole('tab',{name:'知識地圖',exact:true}).click();await expect(page).toHaveURL(new RegExp(`${mapPath(oldRunId,revision)}$`));
+ await expect(page.getByRole('region',{name:'知識地圖工作區',exact:true})).toBeVisible();
+ await page.evaluate(path=>{history.pushState({},'',path);window.dispatchEvent(new PopStateEvent('popstate'));},`/materials/${materialId}/runs/${initialRunId}`);
+ await expect(page.getByRole('button',{name:'取消並刪除教材',exact:true})).toBeVisible();
+ await expect(page.locator('.app-header')).toBeVisible();await expect(page.getByRole('navigation',{name:'手機導覽',exact:true})).toBeVisible();
+});
+
+
+test("library cards show server source totals with known and unknown media duration", async ({page},testInfo) => {
+  await mockKnowledgeMapApi(page);
+  const item={...material,source_count:3,source_totals:{page_count:12,image_count:3,media_seconds:833 as number|null}};
+  await mockMaterial(page,()=>item);
+  await page.goto('/materials');
+  const card=page.getByRole('article',{name:material.display_name,exact:true});
+  await expect(card).toContainText('共 12 頁 · 3 張圖片 · 影音 13 分 53 秒');
+  for(const [width,height] of [[1440,900],[1300,900],[1200,900],[1024,768],[390,844]]){
+    await page.setViewportSize({width,height});
+    await page.screenshot({path:testInfo.outputPath(`library-source-totals-${width}.png`),animations:'disabled'});
+    expect(await page.evaluate(()=>document.documentElement.scrollWidth<=innerWidth)).toBe(true);
+  }
+  item.source_totals.media_seconds=null;
+  await page.reload();
+  await expect(card.locator('.library-metadata').last()).toHaveText('共 12 頁 · 3 張圖片');
+});

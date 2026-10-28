@@ -10,13 +10,15 @@ import psycopg
 import pytest
 from sqlalchemy import select
 from document_normalization.converter import convert,conversion_policy,MIME
-from runtime.source_normalization import create_draft,upload_source,read_sources,normalize_next,SourceError
+from runtime.source_normalization import create_draft, upload_source, read_sources, normalize_next
+from runtime.errors import SourceError
 from runtime.source_revisions import create_revision
 from runtime.source_resolver import bind_structure_input
-from runtime.storage.knowledge_structures import resolve_evidence_source
+from runtime.storage.knowledge_reads import resolve_evidence_source
 from runtime.storage.knowledge_structures import read_knowledge_structure
-from runtime.storage.source_artifacts import open_verified_artifact
-from runtime.storage.tables import MaterialSourceSet,SourceNormalization,Artifact,database_session
+from runtime.storage.artifacts import open_verified_artifact
+from runtime.storage.tables import MaterialSourceSet, SourceNormalization, Artifact
+from runtime.storage.database import database_session
 from runtime.material_processing import claim_next_material_processing_run, _record_progress
 from runtime.material_discard import request_material_discard
 from product_fixtures import publish_fixture_structure, closed_loop
@@ -32,12 +34,12 @@ def test_source_round_trip_freeze_resume_and_owned_delete(closed_loop,tmp_path,m
     assert create_draft(owner,'notes.txt','draft',dsn=dsn)==material
     identity=upload_source(owner,material,TEXT,'notes.txt','text/plain','upload-source',dsn=dsn)
     assert upload_source(owner,material,TEXT,'notes.txt','text/plain','upload-source',dsn=dsn)==identity
-    job=read_sources(owner,material,dsn=dsn)[0]
+    job=read_sources(owner,material,dsn=dsn)["sources"][0]
     with pytest.raises(SourceError,match='SOURCE_NOT_READY'):create_revision(owner,material,[job['normalization_id']],'run',settings,dsn=dsn)
     with pytest.raises(SourceError,match='IDEMPOTENCY_CONFLICT'):upload_source(owner,material,TEXT+b'changed','notes.txt','text/plain','upload-source',dsn=dsn)
     with pytest.raises(SourceError,match='DUPLICATE_SOURCE'):upload_source(owner,material,TEXT,'second.txt','text/plain','another',dsn=dsn)
     assert normalize_next(dsn=dsn)
-    ready=read_sources(owner,material,dsn=dsn)[0]
+    ready=read_sources(owner,material,dsn=dsn)["sources"][0]
     assert ready['status']=='ready' and ready['page_count']==1
     assert not normalize_next(dsn=dsn)
     run=create_revision(owner,material,[job['normalization_id']],'run',settings,dsn=dsn)
@@ -56,7 +58,7 @@ def test_source_round_trip_freeze_resume_and_owned_delete(closed_loop,tmp_path,m
         source_path=tmp_path/'normalized-fixture.pdf';source_path.write_bytes(pdf.file.read());source_sha=pdf.sha256
     def semantics(_client,**request):
         handle=request['request']['sections'][0]['evidence'][0][0]
-        return {'concepts':[{'k':'stack','l':'Stack','a':[],'c':[{'m':None,'s':[handle]}]}],'relations':[]}
+        return {'concepts':[{'l':'堆疊','a':['Stack'],'c':[{'m':'堆疊','s':[handle]}]}],'relations':[]}
     from runtime.source_resolver import _input
     source_request={'media_type':'application/pdf','source_path':str(source_path),'expected_source_sha256':source_sha}
     document=material_pipeline.analyze_material(
@@ -85,9 +87,9 @@ def test_invalid_source_failure_is_durable_and_get_is_read_only(closed_loop):
     material=create_draft(owner,'bad.txt','draft-invalid',dsn=dsn)
     upload_source(owner,material,b'\xff','bad.txt','text/plain','bad',dsn=dsn)
     assert normalize_next(dsn=dsn)
-    before=read_sources(owner,material,dsn=dsn)
+    before=read_sources(owner,material,dsn=dsn)["sources"]
     assert before[0]['status']=='failed' and before[0]['error_code']=='UTF8_REQUIRED'
-    assert read_sources(owner,material,dsn=dsn)==before
+    assert read_sources(owner,material,dsn=dsn)["sources"]==before
     assert not normalize_next(dsn=dsn)
     assert request_material_discard(owner,material,dsn=dsn)=='removed'
 
@@ -120,7 +122,10 @@ def test_source_api_origin_owner_download_and_no_model(closed_loop,monkeypatch):
     client=TestClient(app);client.cookies.set('studydy_session',token)
     capabilities=client.get('/v1/source-capabilities')
     assert capabilities.status_code==200
-    assert {item['extension'] for item in capabilities.json()['formats']}==set(MIME)
+    formats=capabilities.json()['formats']
+    assert {item['extension'] for item in formats if item['kind']=='document'}==set(MIME)
+    assert {item['extension'] for item in formats if item['kind']!='document'}=={'.mp3','.m4a','.wav','.mp4'}
+    assert capabilities.json()['youtube'] is True
     with monkeypatch.context() as missing_tools:
         missing_tools.setattr('document_normalization.converter.shutil.which',lambda _:None)
         unavailable=client.get('/v1/source-capabilities')
@@ -177,14 +182,14 @@ def test_expired_normalization_lease_recovers_and_ready_is_immutable(closed_loop
     owner=closed_loop[0].learner_id;dsn=closed_loop[4]
     material=create_draft(owner,'recover.txt','recover-draft',dsn=dsn)
     upload_source(owner,material,TEXT,'recover.txt','text/plain','recover-upload',dsn=dsn)
-    identity=read_sources(owner,material,dsn=dsn)[0]['normalization_id']
+    identity=read_sources(owner,material,dsn=dsn)["sources"][0]['normalization_id']
     with database_session(dsn) as session:
         job=session.get(SourceNormalization,identity);job.status='running';job.lease_token=uuid4();job.lease_expires_at=datetime.now(UTC)-timedelta(seconds=1)
     assert normalize_next(dsn=dsn)
-    ready=read_sources(owner,material,dsn=dsn)[0];assert ready['status']=='ready'
+    ready=read_sources(owner,material,dsn=dsn)["sources"][0];assert ready['status']=='ready'
     with pytest.raises(DBAPIError,match='IMMUTABLE_SOURCE_BINDING'):
         with database_session(dsn) as session:session.get(SourceNormalization,identity).page_count=99
-    assert read_sources(owner,material,dsn=dsn)[0]==ready
+    assert read_sources(owner,material,dsn=dsn)["sources"][0]==ready
     assert request_material_discard(owner,material,dsn=dsn)=='removed'
     empty=create_draft(owner,'empty.txt','empty-draft',dsn=dsn)
     assert request_material_discard(owner,empty,dsn=dsn)=='removed'
@@ -196,7 +201,7 @@ def test_bundle_tampering_and_cross_owner_normalization_are_rejected(closed_loop
     owner=closed_loop[0].learner_id;settings=closed_loop[2];dsn=closed_loop[4]
     material=create_draft(owner,'tamper.txt','tamper-draft',dsn=dsn)
     upload_source(owner,material,TEXT,'tamper.txt','text/plain','tamper-upload',dsn=dsn);normalize_next(dsn=dsn)
-    identity=read_sources(owner,material,dsn=dsn)[0]['normalization_id']
+    identity=read_sources(owner,material,dsn=dsn)["sources"][0]['normalization_id']
     other=create_draft(owner,'other.txt','other-draft',dsn=dsn)
     with pytest.raises(SourceError,match='SOURCE_NOT_READY'):create_revision(owner,other,[identity],'cross',settings,dsn=dsn)
     run=create_revision(owner,material,[identity],'tamper-run',settings,dsn=dsn)
@@ -210,7 +215,7 @@ def test_replay_does_not_require_converter_or_current_model_config(closed_loop,m
     owner=closed_loop[0].learner_id;settings=closed_loop[2];dsn=closed_loop[4]
     material=create_draft(owner,'replay.txt','replay-draft',dsn=dsn)
     source=upload_source(owner,material,TEXT,'replay.txt','text/plain','replay-upload',dsn=dsn)
-    normalize_next(dsn=dsn);job=read_sources(owner,material,dsn=dsn)[0]
+    normalize_next(dsn=dsn);job=read_sources(owner,material,dsn=dsn)["sources"][0]
     run=create_revision(owner,material,[job['normalization_id']],'replay-run',settings,dsn=dsn)
     def unavailable():
         raise AssertionError('replay must not invoke conversion policy')
@@ -219,12 +224,12 @@ def test_replay_does_not_require_converter_or_current_model_config(closed_loop,m
     assert create_revision(owner,material,[job['normalization_id']],'replay-run',{},dsn=dsn).run_id==run.run_id
 
 
-def test_failed_conversion_retry_reuses_one_job_without_policy_migration(closed_loop):
+def test_failed_conversion_retry_reuses_one_job_with_current_policy(closed_loop):
     from runtime.source_normalization import retry_normalization
     owner=closed_loop[0].learner_id;dsn=closed_loop[4]
     material=create_draft(owner,'policy.txt','policy-draft',dsn=dsn)
     upload_source(owner,material,TEXT,'policy.txt','text/plain','policy-upload',dsn=dsn)
-    old=read_sources(owner,material,dsn=dsn)[0]['normalization_id']
+    old=read_sources(owner,material,dsn=dsn)["sources"][0]['normalization_id']
     with psycopg.connect(dsn) as connection:
         with pytest.raises(psycopg.errors.UniqueViolation):
             with connection.transaction():
@@ -235,15 +240,16 @@ def test_failed_conversion_retry_reuses_one_job_without_policy_migration(closed_
     with database_session(dsn) as session:
         job=session.get(SourceNormalization,old);job.status='failed';job.error_code='NORMALIZATION_FAILED'
         original_policy=deepcopy(job.policy)
+        job.policy={**original_policy,'version':0,'remote_resources':False}
     retry_normalization(owner,material,old,dsn=dsn)
-    latest=read_sources(owner,material,dsn=dsn)[0]
+    latest=read_sources(owner,material,dsn=dsn)["sources"][0]
     assert latest['normalization_id']==old and latest['status']=='pending'
     with database_session(dsn) as session:
         assert session.get(SourceNormalization,old).policy==original_policy
         assert len(session.scalars(select(SourceNormalization.normalization_id).where(
             SourceNormalization.source_id==latest['source_id'])).all())==1
     assert normalize_next(dsn=dsn)
-    assert read_sources(owner,material,dsn=dsn)[0]['status']=='ready'
+    assert read_sources(owner,material,dsn=dsn)["sources"][0]['status']=='ready'
 
 
 
@@ -267,7 +273,7 @@ def test_discard_waits_for_source_lease_then_cleans_all_artifacts(closed_loop):
     owner=closed_loop[0].learner_id;dsn=closed_loop[4]
     material=create_draft(owner,'discard.txt','discard-source-draft',dsn=dsn)
     upload_source(owner,material,TEXT,'discard.txt','text/plain','discard-source-upload',dsn=dsn)
-    job_id=read_sources(owner,material,dsn=dsn)[0]['normalization_id']
+    job_id=read_sources(owner,material,dsn=dsn)["sources"][0]['normalization_id']
     with database_session(dsn) as session:
         job=session.get(SourceNormalization,job_id);job.status='running';job.lease_token=uuid4();job.lease_expires_at=datetime.now(UTC)+timedelta(seconds=120)
     assert request_material_discard(owner,material,dsn=dsn)=='removing'
@@ -284,7 +290,7 @@ def test_legacy_office_source_is_saved_and_converted(closed_loop,extension,expec
     data=(ROOT/'backend/tests/fixtures'/('sample'+extension)).read_bytes()
     upload_source(owner,material,data,'sample'+extension,MIME[extension],'legacy-upload'+extension,dsn=dsn)
     assert normalize_next(dsn=dsn)
-    source=read_sources(owner,material,dsn=dsn)[0]
+    source=read_sources(owner,material,dsn=dsn)["sources"][0]
     assert source['status']=='ready' and source['page_count']==expected_pages
     with open_verified_artifact(owner,source['original_artifact_id'],dsn=dsn) as original:assert original.file.read()==data
     assert request_material_discard(owner,material,dsn=dsn)=='removed'

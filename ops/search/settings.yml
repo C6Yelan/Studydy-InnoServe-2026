@@ -1,0 +1,35 @@
+# 僅供後端使用的免費搜尋入口；依這台主機的公開主題測試選擇可用引擎。
+use_default_settings:
+  engines:
+    keep_only: [yahoo, wikipedia, wikibooks]
+general:
+  debug: false
+  enable_metrics: false
+search:
+  formats: [json]
+  autocomplete: ""
+  max_page: 0
+  suspended_times:
+    SearxEngineAccessDenied: 86400
+    SearxEngineCaptcha: 86400
+    SearxEngineTooManyRequests: 3600
+server:
+  limiter: false
+  image_proxy: false
+outgoing:
+  request_timeout: 8
+  max_request_timeout: 12
+  pool_connections: 6
+  retries: 0
+engines:
+  - name: yahoo
+    disabled: false
+  - name: wikipedia
+    # 預設 wikipedia 引擎只接受完整頁名；研究查詢需要 MediaWiki 全文搜尋。
+    engine: mediawiki
+    language_support: true
+    base_url: https://{language}.wikipedia.org/
+    search_type: text
+    disabled: false
+  - name: wikibooks
+    disabled: false

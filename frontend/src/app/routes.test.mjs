@@ -15,7 +15,16 @@ test("routes use expected paths and round trip", () => {
   for (const [route, path] of [
     [{ name: "home" }, "/"],
     [{ name: "materials" }, "/materials"],
+    [{ name: "concept-cards" }, "/concept-cards"],
+    [{ name: "card-set", cardSetId: materialId }, `/concept-cards/${materialId}`],
+    [{ name: "card-set-edit", cardSetId: materialId }, `/concept-cards/${materialId}/edit`],
+    [{ name: "card-review" }, "/concept-cards/review"],
+    [{ name: "card-review", cardSetId: materialId }, `/concept-cards/${materialId}/review`],
+    [{ name: "card-review", materialId }, `/materials/${materialId}/concept-cards/review`],
+    [{ name: "card-set-create", materialId, runId, structureRevision }, `${mapPath}/create-cards`],
     [{ name: "upload" }, "/upload"],
+    [{ name: "profile" }, "/profile"],
+    [{ name: "achievements" }, "/achievements"],
     [{ name: "material-run", materialId, runId }, materialRunPath],
     [{ name: "knowledge-map", materialId, runId, structureRevision }, mapPath],
     [{ name: "study-session", materialId, runId, structureRevision, studySessionId }, studyPath],
@@ -28,10 +37,51 @@ test("routes use expected paths and round trip", () => {
 test("unknown paths, malformed IDs and extra segments are not canonical routes", () => {
   for (const path of [
     "/unknown",
+    "/concept-cards/not-an-id",
+    `/concept-cards/${materialId}/extra`,
+    `/materials/${materialId}/concept-cards/review/extra`,
     `/materials/not-an-id/runs/${runId}`,
-    `/materials/${materialId}`,
+    `/materials/${materialId}/research/not-an-id`,
+    `/materials/${materialId}/research/${runId}/extra`,
     `${studyPath}/extra`,
   ]) {
-    assert.deepEqual(readRoute(path), { route: { name: "home" }, isCanonical: false });
+    // 對不到頁面時保留原網址，由「找不到」頁顯示，不導回首頁。
+    assert.deepEqual(readRoute(path), { route: { name: "not-found", path }, isCanonical: false });
+    assert.equal(routePath(readRoute(path).route), path);
+  }
+});
+
+test("material root and old aliases resolve to real pages", () => {
+  assert.deepEqual(readRoute(`/materials/${materialId}`), { route: { name: "material", materialId }, isCanonical: true });
+  for (const path of [`/materials/${materialId}/map`, `/materials/${materialId}/knowledge-map`, `/materials/${materialId}/`])
+    assert.deepEqual(readRoute(path), { route: { name: "material", materialId }, isCanonical: false });
+  assert.deepEqual(readRoute("/cards"), { route: { name: "concept-cards" }, isCanonical: false });
+  assert.deepEqual(readRoute("/materials/"), { route: { name: "materials" }, isCanonical: false });
+  assert.deepEqual(readRoute("/foo-bar/"), { route: { name: "not-found", path: "/foo-bar" }, isCanonical: false });
+});
+
+
+test("creation starts on its own page before a material is selected", () => {
+  for (const [name, path] of [["podcast-new", "/podcasts/new"], ["card-set-new", "/concept-cards/new"]]) {
+    assert.equal(routePath({ name }), path);
+    assert.deepEqual(readRoute(path), { route: { name }, isCanonical: true });
+  }
+});
+
+test("material collections and saved content preserve their scoped URLs", () => {
+  for (const route of [
+    { name: "material-content", materialId, kind: "podcasts" },
+    { name: "material-content", materialId, kind: "concept-cards" },
+    { name: "material-content", materialId, kind: "research" },
+    { name: "material-content", materialId, kind: "notes" },
+    { name: "research", materialId, researchId: studySessionId },
+    { name: "podcast", materialId, podcastId: studySessionId },
+    { name: "card-set", materialId, cardSetId: studySessionId },
+    { name: "card-set-edit", materialId, cardSetId: studySessionId },
+    { name: "card-review", materialId, cardSetId: studySessionId },
+    // 教材內的需要加強只看這份教材的卡組。
+    { name: "card-review", materialId },
+  ]) {
+    assert.deepEqual(readRoute(routePath(route)), { route, isCanonical: true });
   }
 });

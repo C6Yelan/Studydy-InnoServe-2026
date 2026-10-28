@@ -1,4 +1,7 @@
 export type IconName =
+  | "microphone"
+  | "search"
+  | "headphones"
   | "user"
   | "eye"
   | "eye-off"
@@ -6,6 +9,7 @@ export type IconName =
   | "clock"
   | "arrow-left"
   | "book"
+  | "cards"
   | "check"
   | "chevron-right"
   | "file"
@@ -16,9 +20,36 @@ export type IconName =
   | "process"
   | "refresh"
   | "upload"
-  | "warning";
+  | "warning"
+  | "sparkle"
+  | "plus"
+  | "minus"
+  | "fit"
+  | "quiz"
+  | "chat"
+  | "close"
+  | "route"
+  | "logout"
+  | "compass"
+  | "send"
+  | "flame"
+  | "edit"
+  | "trash"
+  | "play"
+  | "monitor"
+  | "phone"
+  | "chevron-left";
 
 const paths: Record<IconName, React.ReactNode> = {
+  microphone: <><rect x="9" y="2" width="6" height="12" rx="3" /><path d="M5 10v2a7 7 0 0 0 14 0v-2M12 19v3M8 22h8" /></>,
+  search: <><circle cx="10.5" cy="10.5" r="7.5" /><path d="m16 16 5 5" /></>,
+  headphones: <><path d="M4 14v-3a8 8 0 0 1 16 0v3" /><rect x="3" y="12" width="4" height="9" rx="2" /><rect x="17" y="12" width="4" height="9" rx="2" /></>,
+  cards: (
+    <>
+      <rect x="6" y="7" width="15" height="14" rx="2" />
+      <path d="M17 4H5a2 2 0 0 0-2 2v11M10 12h7M10 16h4" />
+    </>
+  ),
   user: (
     <>
       <circle cx="12" cy="8" r="4" />
@@ -117,6 +148,61 @@ const paths: Record<IconName, React.ReactNode> = {
     <>
       <path d="M10.3 3.5 2.4 18a2 2 0 0 0 1.8 3h15.6a2 2 0 0 0 1.8-3L13.7 3.5a2 2 0 0 0-3.4 0Z" />
       <path d="M12 9v4M12 17h.01" />
+    </>
+  ),
+  sparkle: (
+    <>
+      <path d="M12 3c.6 4.2 2.8 6.4 7 7-4.2.6-6.4 2.8-7 7-.6-4.2-2.8-6.4-7-7 4.2-.6 6.4-2.8 7-7Z" />
+      <path d="M19 16.5c.2 1.3.9 2 2.2 2.2-1.3.2-2 .9-2.2 2.2-.2-1.3-.9-2-2.2-2.2 1.3-.2 2-.9 2.2-2.2Z" />
+    </>
+  ),
+  plus: <path d="M12 5v14M5 12h14" />,
+  minus: <path d="M5 12h14" />,
+  fit: <path d="M4 9V4h5M20 9V4h-5M4 15v5h5M20 15v5h-5" />,
+  quiz: (
+    <>
+      <rect x="5" y="4" width="14" height="17" rx="2.5" />
+      <path d="M9 4V2.8h6V4" />
+      <path d="m8.5 12 2 2 4-4" />
+    </>
+  ),
+  chat: (
+    <>
+      <path d="M4 5.5A2.5 2.5 0 0 1 6.5 3h11A2.5 2.5 0 0 1 20 5.5v8a2.5 2.5 0 0 1-2.5 2.5H10l-4.5 4v-4A1.5 1.5 0 0 1 4 14.5Z" />
+      <path d="M8.5 8.5h7M8.5 11.5h4" />
+    </>
+  ),
+  close: <path d="M6 6l12 12M18 6 6 18" />,
+  route: (
+    <>
+      <circle cx="6" cy="18" r="2.5" />
+      <circle cx="18" cy="6" r="2.5" />
+      <path d="M8.5 18H16a3 3 0 0 0 0-6H8a3 3 0 0 1 0-6h7.5" />
+    </>
+  ),
+  logout: (
+    <>
+      <path d="M15 4h3a2 2 0 0 1 2 2v12a2 2 0 0 1-2 2h-3" />
+      <path d="M10 17l-5-5 5-5M5 12h11" />
+    </>
+  ),
+  compass: (
+    <>
+      <circle cx="12" cy="12" r="9" />
+      <path d="m15.5 8.5-2 5-5 2 2-5Z" />
+    </>
+  ),
+  flame: <path d="M12 3c.8 3.6-3.5 5.6-3.5 9.5a3.5 3.5 0 0 0 7 0c0-1.1-.4-2-1-2.8 2.3.7 4.5 3 4.5 6a7 7 0 0 1-14 0C5 10 10.6 8 12 3Z" />,
+  edit: <><path d="M4 20h4L19 9a2.8 2.8 0 0 0-4-4L4 16Z" /><path d="m13.5 6.5 4 4" /></>,
+  trash: <><path d="M4 7h16M9 7V4h6v3M6 7l1 13h10l1-13" /><path d="M10 11v6M14 11v6" /></>,
+  play: <path d="M7 4.5v15l12-7.5Z" />,
+  monitor: <><rect x="3" y="4" width="18" height="12" rx="2" /><path d="M8 20h8M12 16v4" /></>,
+  phone: <><rect x="7" y="2.5" width="10" height="19" rx="2.5" /><path d="M11 18h2" /></>,
+  "chevron-left": <path d="m15 18-6-6 6-6" />,
+  send: (
+    <>
+      <path d="M4 12 20 4l-6 16-3-7Z" />
+      <path d="m11 13 9-9" />
     </>
   ),
 };

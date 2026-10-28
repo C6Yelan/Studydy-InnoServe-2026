@@ -11,7 +11,7 @@ from urllib.parse import urlsplit
 
 import httpx
 
-from pdf_evidence.ocr_page_evidence import canonical_bytes
+from content_identity import canonical_bytes
 
 
 API_KEY_ENV = "VLLM_API_KEY"
@@ -23,9 +23,14 @@ MAX_RESPONSE_BYTES = 1024 * 1024
 INFERENCE_TIMEOUT = httpx.Timeout(None, connect=PREFLIGHT_TIMEOUT_SECONDS)
 _CANCELLATION_POLL_SECONDS = 0.1
 MIN_OUTPUT_TOKENS = {
-    "material_semantics": 8192, "material_review": 8192,
-    "assessment": 16384, "assessment_check": 16384,
+    "material_semantics": 8192,
+    "material_review": 8192,
+    "assessment": 16384,
+    "assessment_check": 16384,
+    "concept_card": 4096,
 }
+# 候選目錄最多占 8K tokens；原始來源與最低輸出空間仍各自檢查。
+MAX_MATERIAL_CATALOG_TOKENS = 8192
 
 
 class SemanticServiceError(RuntimeError):
@@ -46,7 +51,11 @@ def _output_budget(task: str, ceiling: int, input_tokens: int, context: int) -> 
 
 
 def _origin(value: Any) -> str:
-    if not isinstance(value, str) or not value or any(ord(char) <= 32 or ord(char) == 127 for char in value):
+    if (
+        not isinstance(value, str)
+        or not value
+        or any(ord(char) <= 32 or ord(char) == 127 for char in value)
+    ):
         raise SemanticServiceError("SEMANTIC_SERVICE_CONFIG_INVALID")
     try:
         parsed = urlsplit(value)
@@ -71,7 +80,11 @@ def _headers(environment: Mapping[str, str] | None = None) -> dict[str, str]:
     value = (os.environ if environment is None else environment).get(API_KEY_ENV)
     if value is None or value == "":
         return {}
-    if not value or len(value) > 4096 or any(character in value for character in "\x00\r\n"):
+    if (
+        not value
+        or len(value) > 4096
+        or any(character in value for character in "\x00\r\n")
+    ):
         raise SemanticServiceError("SEMANTIC_SERVICE_CONFIG_INVALID")
     return {"Authorization": f"Bearer {value}"}
 
@@ -103,7 +116,10 @@ def _post(client, url, *, json, cancellation_check=None):
                 pass
 
     def trace(event, info):
-        if event in {"connection.connect_tcp.complete", "connection.start_tls.complete"}:
+        if event in {
+            "connection.connect_tcp.complete",
+            "connection.start_tls.complete",
+        }:
             connection = info["return_value"].get_extra_info("socket")
             with lock:
                 if connection is not None:
@@ -126,7 +142,9 @@ def _post(client, url, *, json, cancellation_check=None):
     watcher.start()
     try:
         # 每個 inference HTTP request 都結束其連線，下一次不會重用未經 trace 的 socket。
-        response = client.post(url, json=json, headers={"Connection": "close"}, extensions={"trace": trace})
+        response = client.post(
+            url, json=json, headers={"Connection": "close"}, extensions={"trace": trace}
+        )
         cancellation_check()
         return response
     finally:
@@ -142,10 +160,12 @@ def _service(lock: Any) -> dict[str, Any]:
         origin = _origin(service["base_url"])
         if (
             lock["python"] != "3.12"
-            or not isinstance(service["model_id"], str) or not service["model_id"].strip()
-            or not isinstance(service["revision"], str) or not service["revision"].strip()
+            or not isinstance(service["model_id"], str)
+            or not service["model_id"].strip()
+            or not isinstance(service["revision"], str)
+            or not service["revision"].strip()
             or origin != "http://127.0.0.1:18000"
-            or service["max_model_len"] != 32768
+            or service["max_model_len"] not in (32768, 65536)
             or service["max_num_seqs"] != 1
             or service["authentication"] != "environment-bearer:VLLM_API_KEY"
             or service["server"]["python"] != "3.12"
@@ -161,7 +181,7 @@ def _service(lock: Any) -> dict[str, Any]:
 def preflight_semantic_service(
     runtime_lock: dict[str, Any], *, client: httpx.Client | None = None
 ) -> None:
-    """核對 vLLM 版本、模型及 32K tokenizer 契約。"""
+    """核對 vLLM 版本、模型及 runtime lock 的 tokenizer 容量。"""
 
     service = _service(runtime_lock)
     owned = client is None
@@ -252,7 +272,8 @@ def _token_count(
     chat_template_kwargs: dict[str, Any] | None = None,
     cancellation_check: Callable[[], None] | None = None,
 ) -> int:
-    response = _post(client,
+    response = _post(
+        client,
         f"{service['base_url']}{TOKENIZE_PATH}",
         json={
             "model": service["model_id"],
@@ -260,7 +281,11 @@ def _token_count(
             "add_generation_prompt": True,
             "add_special_tokens": False,
             "chat_template_kwargs": {"enable_thinking": True},
-            **({"chat_template_kwargs": chat_template_kwargs} if chat_template_kwargs is not None else {}),
+            **(
+                {"chat_template_kwargs": chat_template_kwargs}
+                if chat_template_kwargs is not None
+                else {}
+            ),
         },
         cancellation_check=cancellation_check,
     )
@@ -284,6 +309,9 @@ def request_semantics(
     request: dict[str, Any],
     response_schema: dict[str, Any],
     cancellation_check: Callable[[], None] | None = None,
+    usage: dict[str, int] | None = None,
+    before_request: Callable[[], None] | None = None,
+    tags: dict | None = None,
 ) -> dict[str, Any]:
     """透過共用 HTTP 邊界請求語意結果。"""
 
@@ -294,7 +322,7 @@ def request_semantics(
         prompt = task_lock[prefix + "prompt"]
         max_tokens = task_lock[prefix + "max_tokens"]
         if (
-            task not in {"material_semantics", "material_review", "assessment", "assessment_check"}
+            task not in MIN_OUTPUT_TOKENS
             or not isinstance(prompt, str)
             or not prompt
             or type(max_tokens) is not int
@@ -305,9 +333,20 @@ def request_semantics(
             raise SemanticServiceError("SEMANTIC_SERVICE_CONFIG_INVALID")
         messages = _messages(prompt, request)
         generation = deepcopy(task_lock[prefix + "generation"])
-        input_tokens = _token_count(client, service, messages, generation.get("chat_template_kwargs"), cancellation_check)
-        max_tokens = _output_budget(task, max_tokens, input_tokens, service["max_model_len"])
-        response = _post(client,
+        input_tokens = _token_count(
+            client,
+            service,
+            messages,
+            generation.get("chat_template_kwargs"),
+            cancellation_check,
+        )
+        max_tokens = _output_budget(
+            task, max_tokens, input_tokens, service["max_model_len"]
+        )
+        if before_request is not None:
+            before_request()
+        response = _post(
+            client,
             f"{service['base_url']}{CHAT_PATH}",
             json={
                 **generation,
@@ -340,6 +379,15 @@ def request_semantics(
             object_pairs_hook=_unique_object,
             parse_constant=_reject_constant,
         )
+        if usage is not None and isinstance(api_body.get("usage"), dict):
+            usage.update(
+                {
+                    key: api_body["usage"][key]
+                    for key in ("prompt_tokens", "completion_tokens", "total_tokens")
+                    if type(api_body["usage"].get(key)) is int
+                    and api_body["usage"][key] >= 0
+                }
+            )
         choice = api_body["choices"][0]
         if choice.get("finish_reason") != "stop":
             error = SemanticServiceError("SEMANTIC_OUTPUT_TRUNCATED")
@@ -348,16 +396,29 @@ def request_semantics(
                 "task": task,
                 "input_tokens": input_tokens,
                 "max_tokens": max_tokens,
-                "finish_reason": finish_reason if finish_reason in (
-                    "length", "content_filter", "tool_calls", "function_call",
-                ) else "other",
+                "finish_reason": finish_reason
+                if finish_reason
+                in (
+                    "length",
+                    "content_filter",
+                    "tool_calls",
+                    "function_call",
+                )
+                else "other",
             }
             usage = api_body.get("usage")
             if isinstance(usage, dict):
-                error.request_metadata.update({
-                    key: usage[key] for key in ("prompt_tokens", "completion_tokens", "total_tokens")
-                    if type(usage.get(key)) is int and usage[key] >= 0
-                })
+                error.request_metadata.update(
+                    {
+                        key: usage[key]
+                        for key in (
+                            "prompt_tokens",
+                            "completion_tokens",
+                            "total_tokens",
+                        )
+                        if type(usage.get(key)) is int and usage[key] >= 0
+                    }
+                )
             raise error
         content = choice["message"]["content"]
         result = json.loads(
@@ -375,28 +436,113 @@ def request_semantics(
 
 
 def material_request_fits(
-    client: httpx.Client, runtime_lock: dict[str, Any], request: dict[str, Any],
-    *, cancellation_check: Callable[[], None] | None = None,
+    client: httpx.Client,
+    runtime_lock: dict[str, Any],
+    request: dict[str, Any],
+    *,
+    cancellation_check: Callable[[], None] | None = None,
 ) -> bool:
     """以模型服務 tokenizer 計算分批容量；不截斷單一來源區塊。"""
 
+    task = runtime_lock["material_semantics"]
+    if task["bundle_policy"] == "independent-evidence-blocks/v1":
+        from knowledge_map.independent_blocks import request_view
+
+        request = request_view(request)
+        fixed = {**request, "sections": [], "source_pages": []}
+        if cancellation_check:
+            cancellation_check()
+        service = _service(runtime_lock)
+        try:
+            count = _token_count(
+                client,
+                service,
+                _messages(task["prompt"], request),
+                task["generation"]["chat_template_kwargs"],
+                cancellation_check,
+            )
+            base_count = _token_count(
+                client,
+                service,
+                _messages(task["prompt"], fixed),
+                task["generation"]["chat_template_kwargs"],
+                cancellation_check,
+            )
+        except httpx.TimeoutException:
+            raise SemanticServiceError("SEMANTIC_SERVICE_TIMEOUT") from None
+        except (httpx.HTTPError, UnicodeError, ValueError):
+            raise SemanticServiceError("SEMANTIC_SERVICE_UNAVAILABLE") from None
+        context_limit = service["max_model_len"]
+        single = sum(len(section["evidence"]) for section in request["sections"]) == 1
+        # 不截斷單一 Evidence；保留完整輸出預算及包裝餘裕。
+        reserve = min(
+            task["max_tokens"], context_limit - MIN_OUTPUT_TOKENS["material_semantics"]
+        )
+        return (
+            single or count - base_count <= task["max_new_input_tokens"]
+        ) and count + reserve + 4096 <= context_limit
     service = _service(runtime_lock)
     task = runtime_lock["material_semantics"]
     try:
-        count = _token_count(client, service, _messages(task["prompt"], request), task["generation"]["chat_template_kwargs"], cancellation_check)
+        count = _token_count(
+            client,
+            service,
+            _messages(task["prompt"], request),
+            task["generation"]["chat_template_kwargs"],
+            cancellation_check,
+        )
         try:
-            _output_budget("material_semantics", task["max_tokens"], count, service["max_model_len"])
+            _output_budget(
+                "material_semantics",
+                task["max_tokens"],
+                count,
+                service["max_model_len"],
+            )
         except SemanticServiceError:
             return False
-        # 原始 block 不截斷；多個 block 分批，避免新教材擠爆固定輸出預算。
-        if sum(len(section["evidence"]) for section in request["sections"]) == 1:
-            return True
         new_count = count
         if request.get("existing_concepts"):
             fresh_request = {**request, "existing_concepts": []}
-            new_count = _token_count(client, service, _messages(task["prompt"], fresh_request), task["generation"]["chat_template_kwargs"], cancellation_check)
+            new_count = _token_count(
+                client,
+                service,
+                _messages(task["prompt"], fresh_request),
+                task["generation"]["chat_template_kwargs"],
+                cancellation_check,
+            )
+            if count - new_count > MAX_MATERIAL_CATALOG_TOKENS:
+                return False
+        # 原始 block 不截斷；單一區塊仍必須符合總容量與目錄預算。
+        if sum(len(section["evidence"]) for section in request["sections"]) == 1:
+            return True
     except httpx.TimeoutException as error:
         raise SemanticServiceError("SEMANTIC_SERVICE_TIMEOUT") from error
     except (httpx.HTTPError, UnicodeError, ValueError) as error:
         raise SemanticServiceError("SEMANTIC_SERVICE_UNAVAILABLE") from error
     return new_count <= task["max_new_input_tokens"]
+
+
+def generate(prompt, schema, *, request=None, cancellation_check=None, cancelled=None):
+    """共用具來源核對的文字任務，沿用模型設定、輸出預算與取消邊界。"""
+    from .local_ai_config import configured_lock
+    from . import model_calls, podcast_process
+    from .provider_http import _cancellation
+
+    lock = deepcopy(configured_lock())
+    lock["material_review"] = {**lock["material_review"], "prompt": prompt}
+
+    active = _cancellation.get()
+
+    def check():
+        if active is not None:
+            active.check()
+        podcast_process.check(cancelled)
+        if cancellation_check is not None:
+            cancellation_check()
+
+    with semantic_client() as client:
+        result = request_semantics(
+            client, runtime_lock=lock, task="material_review",
+            request=request or {}, response_schema=schema, cancellation_check=check,
+        )
+    return model_calls.capture(result)

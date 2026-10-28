@@ -8,7 +8,7 @@ test('remove failed initial source, refresh, upload a replacement and publish', 
   await page.getByLabel('Email', { exact: true }).fill('learner_test@example.com');
   await page.getByLabel('密碼', { exact: true }).fill('Synthetic test password 42');
   await page.getByRole('button', { name: '登入', exact: true }).click();
-  await expect(page.getByRole('heading', { name: '歡迎回來！', level: 1, exact: true })).toBeVisible();
+  await expect(page.getByRole('heading', { name: '歡迎回來！今天想探索哪座島？', level: 1, exact: true })).toBeVisible();
   const material = process.env.STUDYDY_E2E_REMOVAL_MATERIAL!;
   await page.goto(`/materials/${material}/sources`);
   const before = await (await page.request.get(`/v1/materials/${material}`)).json();
@@ -19,6 +19,7 @@ test('remove failed initial source, refresh, upload a replacement and publish', 
   await expect(page.locator('.source-row')).toHaveCount(0);
   await page.reload();
   await expect(page.locator('.source-row')).toHaveCount(0);
+  await page.getByRole('button',{name:'新增來源',exact:true}).click();
   const picker = page.getByLabel('選擇新增教材', { exact: true });
   await expect(picker).toBeEnabled();
   await picker.setInputFiles({

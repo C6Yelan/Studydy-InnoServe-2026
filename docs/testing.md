@@ -22,7 +22,7 @@ docker compose -p studydy-unit-tests -f compose.test.yaml run --build --rm unit
 
 容器不掛載產品資料，不需要 GPU 或模型。前端映像建置包含 Node tests、TypeScript 與 production build。
 
-後端使用 CPython 3.12.15；LibreOffice／Bubblewrap 保留原驗證快照，CA、XML／網路／文件解析相關系統庫由獨立安全快照定版安裝，版本見 `ops/docker/backend.Dockerfile`。競賽版沒有 OCR 或 lxml 依賴，不加入其建置階段；後端信任庫依官方修補範圍確認 emSign G3 已移除。前端採官方 nginx 1.30.6 映像，Alpine 3.24.3 等官方重建後再更新 digest，不自行 apk upgrade。
+後端使用 CPython 3.12.15；LibreOffice／Bubblewrap 保留原驗證快照，CA、XML／網路／文件解析相關系統庫由獨立安全快照定版安裝，版本見 `ops/docker/backend.Dockerfile`。lxml 依鎖定版本自建 wheel 並連結系統 XML 函式庫；後端信任庫依官方修補範圍確認 emSign G3 已移除。前端採官方 nginx 1.30.6 映像，Alpine 3.24.3 等官方重建後再更新 digest，不自行 apk upgrade。
 
 ## 身分與檔案權限驗證
 
@@ -34,11 +34,13 @@ Backend／test 映像預設使用20002:1000；Compose由 `STUDYDY_BACKEND_UID` �
 
 ## 原始碼測試
 
-需先準備 backend/.venv、frontend/node_modules；真轉檔還需要部署相同的 LibreOffice、字型及 Bubblewrap。依賴版本以 lock files 為準，不重建其他 checkout 共用的環境。
+需先準備獨立臨時 Python 環境與 frontend/node_modules；真轉檔還需要部署相同的 LibreOffice、字型及 Bubblewrap。依賴版本以 lock files 為準，不重建其他 checkout 共用的環境。
 
 ~~~bash
-PYTHONPATH=backend/src:backend/tests \
-  backend/.venv/bin/pytest -q backend/tests/test_*.py
+test_root=$(mktemp -d)
+UV_CACHE_DIR="$test_root/cache" UV_PROJECT_ENVIRONMENT="$test_root/venv" uv sync --project backend --extra test
+PYTHONPATH=backend/src:backend/tests:backend/tests/runtime/materials:backend/tests/runtime/study:backend/tests/runtime/sources \
+  "$test_root/venv/bin/python" -m pytest -q backend/tests/test_*.py
 npm --prefix frontend test
 npm --prefix frontend run typecheck
 ~~~
@@ -59,8 +61,8 @@ export STUDYDY_E2E_FRONTEND_PORT=4183 STUDYDY_E2E_API_PORT=8002
 npm --prefix frontend run build -- --outDir "$STUDYDY_E2E_FRONTEND_DIST" --emptyOutDir
 
 env -u STUDYDY_TEST_POSTGRES_DSN -u STUDYDY_DATABASE_DSN \
-  PYTHONPATH=backend/src:backend/tests \
-  backend/.venv/bin/pytest -q backend/tests --durations=10
+  PYTHONPATH=backend/src:backend/tests:backend/tests/runtime/materials:backend/tests/runtime/study:backend/tests/runtime/sources \
+  "$test_root/venv/bin/python" -m pytest -q backend/tests --durations=10
 ~~~
 
 - frontend/e2e/mock 攔截 API，驗證公開契約、互動及代表性桌機／手機版面。
@@ -70,7 +72,7 @@ env -u STUDYDY_TEST_POSTGRES_DSN -u STUDYDY_DATABASE_DSN \
 執行 mock browser，沿用上述 build 與 ports：
 
 ~~~bash
-PYTHONPATH=backend/tests/runtime backend/.venv/bin/python - <<'PYTEST'
+PYTHONPATH=backend/tests/runtime "$test_root/venv/bin/python" - <<'PYTEST'
 from browser_e2e_runner import main
 raise SystemExit(main("e2e/mock/", timeout_seconds=600))
 PYTEST

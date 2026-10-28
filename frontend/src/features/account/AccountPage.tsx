@@ -1,34 +1,33 @@
 import { useRef, useState } from "react";
 import { ApiClientError, errorMessage } from "../../api/client";
 import { Icon } from "../../ui/Icon";
+import { IslandArt } from "../../ui/art/Island";
 import "./styles.css";
 
 type Mode = "login" | "register";
 
+/** 頁面沿用全站的天空底色與品牌膠囊；左側是首頁群島地圖的海面、島嶼與吉祥物。 */
 function AccountFrame({ mode, children }: { mode: Mode; children: React.ReactNode }) {
   const isRegister = mode === "register";
   return (
     <main className="auth-page">
+      <div className="auth-brand">
+        <img src="/assets/studydy/brand-idle.png" alt="" />
+        <span>Studydy</span>
+      </div>
       <section
         className={`auth-card is-${mode}`}
         aria-label={isRegister ? "註冊 Studydy" : "登入 Studydy"}
       >
         <aside className="auth-illustration" aria-label="Studydy 學習夥伴">
-          <div className="auth-brand">
-            <img src="/assets/studydy/brand-idle.png" alt="" />
-            <span>Studydy</span>
-          </div>
           <h2>{isRegister ? "開始你的學習之旅" : "歡迎回來！"}</h2>
-          <p>{isRegister ? "建立帳戶以使用 Studydy 的所有功能" : "登入以繼續您的學習旅程"}</p>
-          <div className="auth-study-tile tile-chart" aria-hidden="true">
-            <Icon name="chart" size={22} />
-          </div>
-          <div className="auth-study-tile tile-clock" aria-hidden="true">
-            <Icon name="clock" size={22} />
-          </div>
-          <div className="auth-study-tile tile-book" aria-hidden="true">
-            <Icon name="book" size={22} />
-          </div>
+          <p>{isRegister ? "每份教材都會長成一座知識島" : "你的學習群島還在等你"}</p>
+          <ul className="auth-features">
+            <li><span><Icon name="map" size={16} /></span>上傳教材，自動整理成知識地圖</li>
+            <li><span><Icon name="quiz" size={16} /></span>逐一學習概念，交卷後立即回饋</li>
+            <li><span><Icon name="headphones" size={16} /></span>概念卡與 Podcast，隨時複習</li>
+          </ul>
+          <span className="auth-island" aria-hidden="true"><IslandArt palette="meadow" landmarks /></span>
           <img
             className="auth-mascot"
             alt={isRegister ? "Studydy 歡迎你開始學習" : "Studydy 正在閱讀書本"}
@@ -38,27 +37,6 @@ function AccountFrame({ mode, children }: { mode: Mode; children: React.ReactNod
                 : "/assets/Studydy_角色素材/鼓勵/小於60_/LT60.png"
             }
           />
-          <svg className="auth-plant" viewBox="0 0 80 110" aria-hidden="true">
-            <path
-              d="M40 105V25M40 65L17 43M40 85L65 62"
-              fill="none"
-              stroke="#6995ef"
-              strokeWidth="4"
-            />
-            <ellipse cx="15" cy="36" rx="15" ry="18" fill="#80a8fa" />
-            <ellipse cx="64" cy="56" rx="14" ry="17" fill="#a6c2ff" />
-            <ellipse cx="38" cy="22" rx="12" ry="20" fill="#c4d7ff" />
-          </svg>
-          <svg
-            className="auth-waves"
-            viewBox="0 0 322 108"
-            preserveAspectRatio="none"
-            aria-hidden="true"
-          >
-            <path d="M0 26L62 8L123 33L185 13L258 28L322 8V108H0Z" fill="#e2ebff" />
-            <path d="M0 54L62 36L123 57L185 39L258 53L322 35V108H0Z" fill="#d5e3ff" />
-            <path d="M0 78L62 62L123 79L185 63L258 77L322 58V108H0Z" fill="#c8daff" />
-          </svg>
         </aside>
         <div className="auth-form-panel">{children}</div>
       </section>
@@ -213,6 +191,7 @@ export function AccountPage({
   return (
     <AccountFrame mode={mode}>
       <h1>{isRegister ? "建立新帳戶" : "登入您的帳戶"}</h1>
+      <p className="auth-lead">{isRegister ? "建立帳戶後，就能上傳第一份教材。" : "用註冊時的 Email 與密碼登入。"}</p>
       {sessionNotice}
       <form
         className="auth-form"
@@ -274,10 +253,14 @@ export function AccountPage({
           {busy ? "處理中…" : isRegister ? "註冊" : "登入"}
         </button>
       </form>
-      <p className="auth-switch">
-        {isRegister ? "已經有帳戶？" : "還沒有帳戶？"}{" "}
-        <a href={isRegister ? "/login" : "/register"}>{isRegister ? "立即登入" : "立即註冊"}</a>
-      </p>
+      <div className="auth-footer">
+        <p className="auth-switch">
+          {isRegister ? "已經有帳戶？" : "還沒有帳戶？"}{" "}
+          <a href={isRegister ? "/login" : "/register"}>{isRegister ? "立即登入" : "立即註冊"}</a>
+        </p>
+        {/* 目前沒有寄信服務，無法自助重設密碼。 */}
+        {!isRegister && <p className="auth-forgot">忘記密碼？目前無法自行重設，請聯絡管理者協助。</p>}
+      </div>
     </AccountFrame>
   );
 }

@@ -1,0 +1,870 @@
+"""固定畫布、字型與圖形白名單的 CPU 影片繪製器；原音訊是唯一時間基準。"""
+
+from hashlib import sha256
+import json
+import math
+import os
+from pathlib import Path
+import shutil
+import subprocess
+import sys
+import tempfile
+import time
+import traceback
+
+from .podcast_video_text import font, line_step, lines
+from .podcast_video_plan import (
+    page_windows,
+    term_at,
+    validate_plan,
+    timeline_for_video,
+    validate_visual_timing,
+    visual_window,
+)
+
+PALETTE = {
+    "ink": "#26354a",
+    "teal": "#168c86",
+    "blue": "#2973be",
+    "orange": "#bf651f",
+    "muted": "#74818c",
+}
+BACKGROUND = "#fafbf9"
+# 聚焦頁左側章節列：尚未講到／已講完的節點用中性灰，正在講的用卡片主色。
+RAIL_TODO = "#a3adb7"
+RAIL_DONE = "#5d6b79"
+RAIL_LINE = "#c3ccd4"
+MAX_VIDEO_BYTES = 100 * 1024 * 1024
+
+
+def ensure_space(directory):
+    floor = int(os.environ.get("STUDYDY_VIDEO_MIN_FREE_BYTES", str(2 * 1024**3)))
+    paths = [Path(directory)]
+    if os.environ.get("STUDYDY_VIDEO_HOST_FREE_PATH"):
+        paths.append(Path(os.environ["STUDYDY_VIDEO_HOST_FREE_PATH"]))
+    if any(not p.exists() or shutil.disk_usage(p).free < floor for p in paths):
+        raise ValueError("VIDEO_DISK_SPACE_LOW")
+
+
+def layouts(plan):
+    """超出文字區或互相覆蓋就拒絕，不以縮小字體掩蓋分鏡問題。"""
+    spacious = plan.get("schema") == "podcast-storyboard/v4"
+    result = []
+    errors = []
+    for page_index, page in enumerate(plan["pages"]):
+        items = []
+        bounds = []
+        # 聚焦頁的卡片共用同一區域、依時間輪替，不同步驟之間不算互相覆蓋。
+        owner = {
+            j: k
+            for k, step in enumerate(page.get("spotlight", {}).get("steps", []))
+            for j in step["card"]
+        }
+        for index, e in enumerate(page["elements"]):
+            if not e["text"]:
+                items.append([])
+                continue
+            padding = 16 if e["kind"] in ("box", "circle") else 0
+            width = e["w"] - 2 * padding
+            if width <= 0:
+                errors.append(
+                    f"page={page_index},element={index},width must exceed {2 * padding}"
+                )
+                items.append([])
+                continue
+            text_lines = lines(e["text"], e["size"], width)
+            if any(font(e["size"]).getlength(line) > width for line in text_lines):
+                errors.append(
+                    f"page={page_index},element={index},text exceeds available width={width}"
+                )
+                items.append([])
+                continue
+            step = line_step(e["size"], spacious)
+            height = len(text_lines) * step
+            if height > e["h"] - 2 * padding:
+                errors.append(
+                    f"page={page_index},element={index},height={e['h']}; {len(text_lines)} wrapped lines at size={e['size']} require height>={height + 2 * padding}; move or shorten text if canvas space is insufficient"
+                )
+                items.append([])
+                continue
+            y = (
+                e["y"] + (e["h"] - height) / 2
+                if e["kind"] in ("box", "circle")
+                else e["y"]
+            )
+            rendered = []
+            for text in text_lines:
+                length = font(e["size"]).getlength(text)
+                x = (
+                    e["x"] + (e["w"] - length) / 2
+                    if e["kind"] in ("box", "circle")
+                    else e["x"]
+                )
+                rendered.append((x, y, text))
+                bounds.append((index, x, y, x + length, y + e["size"] + 5))
+                y += step
+            items.append(rendered)
+        for i, a in enumerate(bounds):
+            for b in bounds[i + 1 :]:
+                rotating = (
+                    a[0] in owner and b[0] in owner and owner[a[0]] != owner[b[0]]
+                )
+                if (
+                    a[0] != b[0]
+                    and not rotating
+                    and max(a[1], b[1]) < min(a[3], b[3])
+                    and max(a[2], b[2]) < min(a[4], b[4])
+                ):
+                    errors.append(
+                        f"page={page_index},elements={a[0]},{b[0]},text overlap; rendered bounds={tuple(round(v, 1) for v in a[1:])} and {tuple(round(v, 1) for v in b[1:])}; separate or shorten these labels; revealed elements remain visible until the page ends"
+                    )
+        result.append(items)
+    if errors:
+        raise ValueError("VIDEO_LAYOUT_INVALID:" + "; ".join(dict.fromkeys(errors)))
+    return result
+
+
+def emphasis_layouts(plan, text_layouts):
+    result = []
+    errors = []
+    for page_index, page in enumerate(plan["pages"]):
+        bounds = []
+        for mark_index, mark in enumerate(page.get("emphasis", [])):
+            e = page["elements"][mark["element_index"]]
+            if mark["kind"] == "highlight":
+                bounds.append(
+                    highlight_segments(
+                        text_layouts[page_index][mark["element_index"]],
+                        e["text"],
+                        mark["quote"],
+                    )
+                )
+                continue
+            if mark["kind"] == "trace":
+                bounds.append((e["x"], e["y"], e["x"] + e["w"], e["y"] + e["h"]))
+                continue
+            if not mark["quote"] and e["kind"] in ("box", "circle"):
+                bounds.append((e["x"], e["y"], e["x"] + e["w"], e["y"] + e["h"]))
+                continue
+            boxes = []
+            for x, y, text in text_layouts[page_index][mark["element_index"]]:
+                quote = mark["quote"]
+                if quote and quote not in text:
+                    continue
+                if quote:
+                    x += font(e["size"]).getlength(text[: text.index(quote)])
+                box = font(e["size"]).getbbox(quote or text)
+                boxes.append((x + box[0], y + box[1], x + box[2], y + box[3]))
+            if not boxes:
+                errors.append(
+                    f"page={page_index},emphasis={mark_index}, quote must fit within one rendered line; choose a shorter exact phrase"
+                )
+                bounds.append(None)
+                continue
+            bounds.append(
+                (
+                    min(b[0] for b in boxes),
+                    min(b[1] for b in boxes),
+                    max(b[2] for b in boxes),
+                    max(b[3] for b in boxes),
+                )
+            )
+        result.append(bounds)
+    if errors:
+        raise ValueError("VIDEO_LAYOUT_INVALID:" + "; ".join(errors))
+    return result
+
+
+def highlight_segments(rows, text, quote):
+    """重點詞第一個合格位置（見 term_at）對到已排好的行；可跨行，不改字級或斷行。"""
+    start = term_at(text, quote)
+    stop = start + len(quote)
+    segments = []
+    offset = 0
+    for row, (_, _, line) in enumerate(rows):
+        a, b = max(start, offset), min(stop, offset + len(line))
+        if a < b:
+            segments.append((row, a - offset, b - offset))
+        offset += len(line)
+    return segments
+
+
+def mix(a, b, amount):
+    return tuple(round(x + (y - x) * amount) for x, y in zip(a, b))
+
+
+def draw_rows(draw, rows, size, rgb, marks=(), dx=0, dy=0):
+    """逐行繪字；重點詞同字級同位置，只改成卡片主色並加淡色底。"""
+    f = font(size)
+    for row, (x, y, text) in enumerate(rows):
+        x, y = x - dx, y - dy
+        spans = [
+            (a, b, color, alpha)
+            for segments, color, alpha in marks
+            for r, a, b in segments
+            if r == row and alpha > 0
+        ]
+        if not spans:
+            draw.text((x, y), text, font=f, fill=rgb)
+            continue
+        for a, b, color, alpha in spans:
+            draw.rounded_rectangle(
+                (
+                    x + f.getlength(text[:a]) - 4,
+                    y + size * 0.12,
+                    x + f.getlength(text[:b]) + 4,
+                    y + size * 1.28,
+                ),
+                radius=8,
+                fill=(*color, round(34 * alpha)),
+            )
+        cuts = sorted({0, len(text), *(v for a, b, _, _ in spans for v in (a, b))})
+        for a, b in zip(cuts, cuts[1:]):
+            hit = next(((c, al) for s, e, c, al in spans if s <= a and b <= e), None)
+            draw.text(
+                (x + f.getlength(text[:a]), y),
+                text[a:b],
+                font=f,
+                fill=mix(rgb[:3], hit[0], hit[1]) if hit else rgb,
+            )
+
+
+def page_highlights(t, timeline, page, marks, page_end):
+    """重點詞在所屬卡片被講到時淡入，之後維持到換頁；往回 seek 即消失。"""
+    from .podcast_video_motion import ease
+
+    result = {}
+    for mark, segments in zip(page.get("emphasis", []), marks):
+        if mark["kind"] != "highlight":
+            continue
+        start = visual_window(
+            timeline, mark["start_cue"], mark["end_cue"], mark.get("caption_index")
+        )[0]
+        end = min(page_end, timeline["segments"][mark["end_cue"]]["end"])
+        alpha = ease((t - start) / 0.3) if start <= t < end else 0.0
+        result.setdefault(mark["element_index"], []).append(
+            (segments, palette_rgb(mark["color"]), alpha)
+        )
+    return result
+
+
+def palette_rgb(color):
+    from PIL import ImageColor
+
+    return ImageColor.getrgb(PALETTE[color])
+
+
+def emphasis_opacity(t, start, end):
+    """只以實測 cue 時間控制出現／退場；seek 後也不留下前一個標記。"""
+    if not start <= t < end:
+        return 0
+    fade = min(0.25, (end - start) / 3)
+    value = min(1, (t - start) / fade, (end - t) / fade)
+    return value * value * (3 - 2 * value)
+
+
+def trace_path(draw, points, progress, color, width):
+    lengths = [math.dist(a, b) for a, b in zip(points, points[1:])]
+    remaining = sum(lengths) * progress
+    visible = [points[0]]
+    for a, b, length in zip(points, points[1:], lengths):
+        if remaining >= length:
+            visible.append(b)
+            remaining -= length
+        else:
+            fraction = remaining / length if length else 0
+            visible.append(
+                (a[0] + (b[0] - a[0]) * fraction, a[1] + (b[1] - a[1]) * fraction)
+            )
+            break
+    if len(visible) > 1:
+        draw.line(visible, fill=color, width=width, joint="curve")
+
+
+def draw_emphasis(draw, t, timeline, page, bounds, element_states=None):
+    for mark, box in zip(page.get("emphasis", []), bounds):
+        if mark["kind"] == "highlight":
+            continue
+        start, end = visual_window(
+            timeline, mark["start_cue"], mark["end_cue"], mark.get("caption_index")
+        )
+        opacity = emphasis_opacity(t, start, end)
+        if element_states is not None:
+            state = element_states[mark["element_index"]]
+            # v3 的 relation 已由同一時鐘 draw-on／推進，不能再疊第二顆 trace 指示。
+            if mark["kind"] == "trace":
+                continue
+            opacity *= state["entrance"] * state["focus"]
+        if not opacity:
+            continue
+        elapsed = t - start
+        progress = min(1, elapsed / min(0.45, (end - start) / 2))
+        color = (218, 115, 31, round(255 * opacity))
+        x0, y0, x1, y1 = box
+        if mark["kind"] == "underline":
+            draw.line(
+                (x0, y1 + 6, x0 + (x1 - x0) * progress, y1 + 6), fill=color, width=5
+            )
+        elif mark["kind"] == "outline":
+            x0 -= 7
+            y0 -= 7
+            x1 += 7
+            y1 += 7
+            target = page["elements"][mark["element_index"]]
+            if target["kind"] == "circle" and not mark["quote"]:
+                cx = (x0 + x1) / 2
+                cy = (y0 + y1) / 2
+                points = [
+                    (
+                        cx + (x1 - x0) / 2 * math.cos(i * math.tau / 48),
+                        cy + (y1 - y0) / 2 * math.sin(i * math.tau / 48),
+                    )
+                    for i in range(49)
+                ]
+            else:
+                points = [(x0, y0), (x1, y0), (x1, y1), (x0, y1), (x0, y0)]
+            trace_path(draw, points, progress, color, 5)
+        else:
+            progress = min(1, elapsed / min(0.9, (end - start) / 2))
+            x = x0 + (x1 - x0) * progress
+            y = y0 + (y1 - y0) * progress
+            draw.line((x0, y0, x, y), fill=color, width=5)
+            if progress < 1:
+                draw.ellipse(
+                    (x - 7, y - 7, x + 7, y + 7),
+                    fill=color,
+                    outline=(255, 255, 255, round(255 * opacity)),
+                    width=2,
+                )
+
+
+def draw_rail(draw, page, spot):
+    """左側章節列：todo 灰、now 主色淡底、done 打勾；回傳卡片不透明度與章節文字顏色。"""
+    from PIL import ImageColor
+
+    elements = page["elements"]
+    rows = [
+        (j, state)
+        for step, state in zip(page["spotlight"]["steps"], spot)
+        for j in step["rails"]
+    ]
+    centers = [elements[j]["y"] + elements[j]["h"] / 2 for j, _ in rows]
+    if page["spotlight"]["layout"] == "flow":
+        for a, b in zip(centers, centers[1:]):
+            draw.line((132, a + 30, 132, b - 30), fill=RAIL_LINE, width=3)
+    opacity = {
+        j: state["now"]
+        for step, state in zip(page["spotlight"]["steps"], spot)
+        for j in step["card"]
+    }
+    colors = {}
+    for number, ((j, state), cy) in enumerate(zip(rows, centers), 1):
+        e = elements[j]
+        own = ImageColor.getrgb(PALETTE[e["color"]])
+        now = state["now"]
+        color = mix(
+            ImageColor.getrgb(RAIL_DONE if state["done"] else RAIL_TODO), own, now
+        )
+        colors[j] = color
+        if now > 0:
+            draw.rounded_rectangle(
+                (96, e["y"] - 14, 630, e["y"] + e["h"] + 14),
+                radius=20,
+                fill=(*own, round(28 * now)),
+            )
+        draw.ellipse(
+            (110, cy - 22, 154, cy + 22),
+            fill=(*own, round(255 * now)),
+            outline=color,
+            width=3,
+        )
+        draw.text(
+            (132, cy),
+            "✓" if state["done"] else str(number),
+            font=font(26),
+            fill=mix(color, (255, 255, 255), now),
+            anchor="mm",
+        )
+    return opacity, colors
+
+
+def draw_scene(
+    t,
+    timeline,
+    plan,
+    page_index,
+    text_layouts,
+    mark_layouts,
+    scene_cache=None,
+    bounds=None,
+):
+    from PIL import Image, ImageDraw, ImageColor
+
+    page = plan["pages"][page_index]
+    if bounds is None:
+        bounds = page_windows(timeline, plan)[page_index]
+    spacious = plan.get("schema") == "podcast-storyboard/v4"
+    states = None
+    if "motion" in page:
+        from .podcast_video_motion import scene_state
+
+        groups = scene_state(t, timeline, page, bounds)
+        states = {
+            j: state
+            for group, state in zip(page["motion"]["groups"], groups)
+            for j in group["elements"]
+        }
+    spot = None
+    if "spotlight" in page:
+        from .podcast_video_motion import spotlight_state
+
+        spot = spotlight_state(t, timeline, page, bounds)
+    visible = tuple(
+        not any(
+            index in group["elements"]
+            and t
+            < visual_window(
+                timeline,
+                group["start_cue"],
+                group["start_cue"],
+                group.get("caption_index"),
+            )[0]
+            for group in page.get("reveal", [])
+        )
+        for index in range(len(page["elements"]))
+    )
+    if page.get("emphasis") and mark_layouts is None:
+        mark_layouts = emphasis_layouts(plan, text_layouts)
+    highlights = (
+        page_highlights(t, timeline, page, mark_layouts[page_index], bounds[1])
+        if page.get("emphasis")
+        else {}
+    )
+    # 只重用視覺狀態完全相同的頁面；逐幀進度條在副本上畫，不能污染快取。
+    # 舊版 emphasis 仍走原繪製路徑，避免漏掉以時間推進的描線或淡出。
+    cache_key = None
+    if scene_cache is not None and all(
+        m["kind"] == "highlight" for m in page.get("emphasis", [])
+    ):
+        cache_key = (
+            visible,
+            tuple(
+                tuple(
+                    state[k] for k in ("opacity", "entrance", "focus", "draw", "token")
+                )
+                for state in groups
+            )
+            if states is not None
+            else (),
+            tuple((s["now"], s["done"]) for s in spot) if spot else (),
+            tuple(
+                (j, tuple(alpha for _, _, alpha in marks))
+                for j, marks in sorted(highlights.items())
+            ),
+        )
+        previous = scene_cache.get(page_index)
+        if previous is not None and previous[0] == cache_key:
+            return previous[1].copy()
+    image = Image.new("RGB", (1920, 1080), BACKGROUND)
+    d = ImageDraw.Draw(image, "RGBA")
+    d.text((100, 48), page["title"], font=font(54), fill=PALETTE["ink"])
+    d.text(
+        (1690, 66),
+        f"{page_index + 1:02} / {len(plan['pages']):02}",
+        font=font(30),
+        fill=PALETTE["muted"],
+    )
+    d.line((100, 140, 1820, 140), fill="#d7e0e4", width=2)
+    cards, rail_colors = draw_rail(d, page, spot) if spot else ({}, {})
+    for index, e in enumerate(page["elements"]):
+        # Reveal 完全由時間推導；往回 seek 不留下未到時機的元素。
+        if not visible[index]:
+            continue
+        state = states[index] if states is not None else None
+        opacity = state["opacity"] if state else cards.get(index, 1)
+        if opacity <= 0:
+            continue
+        rgb = rail_colors.get(index) or ImageColor.getrgb(PALETTE[e["color"]])
+        rgba = (*rgb, round(255 * opacity))
+        area = (e["x"], e["y"], e["x"] + e["w"], e["y"] + e["h"])
+        if state and e["kind"] == "text":
+            rows = text_layouts[page_index][index]
+            if rows:
+                area_text = (
+                    e["x"],
+                    rows[0][1],
+                    max(x + font(e["size"]).getlength(text) for x, y, text in rows),
+                    rows[-1][1] + line_step(e["size"], spacious),
+                )
+                d.rectangle(
+                    area_text,
+                    fill=(*rgb, round(18 * state["focus"] * state["entrance"])),
+                )
+        if index in cards and e["kind"] == "box":
+            # 聚焦卡：白底、主色細框與左側色條，隨講述時間交叉淡化。
+            d.rectangle(
+                area, fill=(255, 255, 255, round(255 * opacity)), outline=rgba, width=2
+            )
+            d.rectangle((e["x"], e["y"], e["x"] + 10, e["y"] + e["h"]), fill=rgba)
+        elif e["kind"] in ("box", "circle"):
+            draw = d.rectangle if e["kind"] == "box" else d.ellipse
+            fill = (
+                (*rgb, round(opacity * (32 if e["filled"] else 18 * state["focus"])))
+                if state
+                else ((*rgb, 32) if e["filled"] else None)
+            )
+            draw(area, outline=rgba, fill=fill, width=2)
+        elif e["kind"] in ("line", "arrow"):
+            draw_progress = state["draw"] if state else 1
+            if draw_progress <= 0:
+                continue
+            d.line(
+                (
+                    e["x"],
+                    e["y"],
+                    e["x"] + e["w"] * draw_progress,
+                    e["y"] + e["h"] * draw_progress,
+                ),
+                fill=rgba,
+                width=3,
+            )
+            if e["kind"] == "arrow" and draw_progress == 1:
+                angle = math.atan2(e["h"], e["w"])
+                x, y = area[2:]
+                d.polygon(
+                    [
+                        (x, y),
+                        (
+                            x - 18 * math.cos(angle - 0.5),
+                            y - 18 * math.sin(angle - 0.5),
+                        ),
+                        (
+                            x - 18 * math.cos(angle + 0.5),
+                            y - 18 * math.sin(angle + 0.5),
+                        ),
+                    ],
+                    fill=rgba,
+                )
+            if state and e["kind"] == "arrow" and state["token"] is not None:
+                phase = state["token"]
+                x = e["x"] + e["w"] * phase
+                y = e["y"] + e["h"] * phase
+                token_alpha = round(
+                    255 * state["entrance"] * min(1, phase * 8, (1 - phase) * 8)
+                )
+                d.ellipse(
+                    (x - 7, y - 7, x + 7, y + 7),
+                    fill=(*ImageColor.getrgb(PALETTE["teal"]), token_alpha),
+                )
+        rows = text_layouts[page_index][index]
+        marks = highlights.get(index, ())
+        if rows and opacity < 1:
+            # Pillow 的 RGB draw.text 不混合 fill alpha；在文字區明確合成，字體不縮放。
+            base = image.crop(area)
+            paint = base.copy()
+            draw_rows(
+                ImageDraw.Draw(paint, "RGBA" if marks else None),
+                rows,
+                e["size"],
+                rgb,
+                marks,
+                e["x"],
+                e["y"],
+            )
+            image.paste(Image.blend(base, paint, opacity), (e["x"], e["y"]))
+        else:
+            draw_rows(d, rows, e["size"], rgba, marks)
+    if any(m["kind"] != "highlight" for m in page.get("emphasis", [])):
+        draw_emphasis(d, t, timeline, page, mark_layouts[page_index], states)
+    if cache_key is not None:
+        if page_index not in scene_cache and len(scene_cache) >= 2:
+            scene_cache.pop(next(iter(scene_cache)))
+        scene_cache[page_index] = (cache_key, image.copy())
+    return image
+
+
+def draw_frame(t, timeline, plan, text_layouts, mark_layouts=None, *, scene_cache=None):
+    from PIL import Image, ImageDraw
+
+    # 頁面依實測起點選取；v4 子頁可從段內字幕開始，未拆頁時與依 cue 選頁相同。
+    windows = page_windows(timeline, plan)
+    page_index = max([0] + [i for i, (start, _) in enumerate(windows) if start <= t])
+    page = plan["pages"][page_index]
+    image = draw_scene(
+        t,
+        timeline,
+        plan,
+        page_index,
+        text_layouts,
+        mark_layouts,
+        scene_cache,
+        windows[page_index],
+    )
+    if (
+        plan.get("schema") in ("podcast-storyboard/v3", "podcast-storyboard/v4")
+        and page_index
+    ):
+        from .podcast_video_motion import transition
+
+        blend = transition(t, timeline, page, windows[page_index])
+        if blend < 1:
+            boundary = windows[page_index][0]
+            previous = draw_scene(
+                math.nextafter(boundary, -math.inf),
+                timeline,
+                plan,
+                page_index - 1,
+                text_layouts,
+                mark_layouts,
+                scene_cache,
+                windows[page_index - 1],
+            )
+            image = Image.blend(previous, image, blend)
+    d = ImageDraw.Draw(image, "RGBA")
+    d.rectangle(
+        (0, 1068, round(1920 * min(t / timeline["duration"], 1)), 1079),
+        fill=PALETTE["teal"],
+    )
+    return image
+
+
+def ffmpeg_executable():
+    import imageio_ffmpeg
+
+    return os.environ.get("STUDYDY_VIDEO_FFMPEG") or imageio_ffmpeg.get_ffmpeg_exe()
+
+
+def encoder_arguments(encoder):
+    if encoder == "libx264":
+        return ["-c:v", "libx264", "-preset", "fast", "-crf", "18", "-threads", "4"]
+    if encoder == "h264_nvenc":
+        return [
+            "-c:v",
+            "h264_nvenc",
+            "-preset",
+            "p5",
+            "-tune",
+            "hq",
+            "-rc",
+            "vbr",
+            "-cq",
+            "18",
+            "-b:v",
+            "0",
+        ]
+    raise ValueError("VIDEO_PROVIDER_UNAVAILABLE")
+
+
+def measure_encoded_audio(path):
+    """AAC 解碼後再量測，避免 WAV 達標但壓縮成品過峰。"""
+    result = subprocess.run(
+        [
+            ffmpeg_executable(),
+            "-hide_banner",
+            "-nostdin",
+            "-i",
+            str(path),
+            "-vn",
+            "-af",
+            "loudnorm=I=-19:TP=-2:LRA=11:print_format=json",
+            "-f",
+            "null",
+            "-",
+        ],
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.PIPE,
+        text=True,
+    )
+    try:
+        if result.returncode:
+            raise ValueError()
+        value = json.JSONDecoder().raw_decode(
+            result.stderr[result.stderr.rindex("{") :]
+        )[0]
+        loudness, peak = float(value["input_i"]), float(value["input_tp"])
+        if not math.isfinite(loudness) or not math.isfinite(peak):
+            raise ValueError()
+        return {"integrated_lufs": loudness, "true_peak_dbtp": peak}
+    except (KeyError, ValueError):
+        raise ValueError("VIDEO_AUDIO_INVALID") from None
+
+
+def render(request, audio_path, destination):
+    episode = request["episode"]
+    if sha256(audio_path.read_bytes()).hexdigest() != episode["audio"]["sha256"]:
+        raise ValueError("VIDEO_SOURCE_CHANGED")
+    plan = validate_plan(request["plan"], request["cues"])
+    timeline = timeline_for_video(
+        request["podcast_id"],
+        request["episode_index"],
+        episode,
+        request["cues"],
+        request["alignment"],
+        request["source_resolver"],
+    )
+    validate_visual_timing(plan, timeline)
+    text_layouts = layouts(plan)
+    mark_layouts = emphasis_layouts(plan, text_layouts)
+    ensure_space(destination.parent)
+    fps = request.get("benchmark_fps", 60)
+    if type(fps) is not int or fps not in (30, 60):
+        raise ValueError("VIDEO_RESULT_INVALID")
+    encoder = os.environ.get("STUDYDY_VIDEO_ENCODER", "libx264")
+    scene_cache = {}
+    started = time.monotonic()
+    command = [
+        ffmpeg_executable(),
+        "-filter_threads",
+        "1",
+        "-hide_banner",
+        "-loglevel",
+        "error",
+        "-n",
+        "-f",
+        "rawvideo",
+        "-pix_fmt",
+        "rgb24",
+        "-s",
+        "1920x1080",
+        "-r",
+        str(fps),
+        "-i",
+        "pipe:0",
+        "-i",
+        str(audio_path),
+        "-map",
+        "0:v:0",
+        "-map",
+        "1:a:0",
+        "-t",
+        str(timeline["duration"]),
+        *encoder_arguments(encoder),
+        "-pix_fmt",
+        "yuv420p",
+        "-c:a",
+        "aac",
+        "-b:a",
+        "192k",
+        "-movflags",
+        "+faststart",
+        str(destination),
+    ]
+    # 1080p RGB 每幀約 6 MiB；加大 Linux pipe，減少大量小寫入的切換成本。
+    with (
+        destination.with_suffix(".ffmpeg.log").open("wb") as errors,
+        subprocess.Popen(
+            command,
+            stdin=subprocess.PIPE,
+            stdout=subprocess.DEVNULL,
+            stderr=errors,
+            pipesize=1024 * 1024,
+        ) as process,
+    ):
+        try:
+            for n in range(math.ceil(timeline["duration"] * fps)):
+                if n % 600 == 0:
+                    ensure_space(destination.parent)
+                    if (
+                        destination.exists()
+                        and destination.stat().st_size > MAX_VIDEO_BYTES
+                    ):
+                        raise ValueError("VIDEO_TOO_LARGE")
+                process.stdin.write(
+                    draw_frame(
+                        n / fps,
+                        timeline,
+                        plan,
+                        text_layouts,
+                        mark_layouts,
+                        scene_cache=scene_cache,
+                    ).tobytes()
+                )
+            process.stdin.close()
+            if process.wait() != 0:
+                raise ValueError("VIDEO_RENDER_FAILED")
+        except BaseException as error:
+            if process.poll() is None:
+                process.kill()
+            process.wait()
+            destination.with_suffix(".failure.json").write_text(
+                json.dumps(
+                    {
+                        "exception_type": type(error).__name__,
+                        "frame": n,
+                        "total_frames": math.ceil(timeline["duration"] * fps),
+                        "encoder": encoder,
+                        "returncode": process.returncode,
+                    }
+                )
+            )
+            raise
+    if destination.stat().st_size > MAX_VIDEO_BYTES:
+        raise ValueError("VIDEO_TOO_LARGE")
+    encoded = (
+        measure_encoded_audio(destination)
+        if episode["audio"].get("mastering")
+        else None
+    )
+    return {
+        **({"encoded_audio": encoded} if encoded else {}),
+        "width": 1920,
+        "height": 1080,
+        "fps": fps,
+        "duration": timeline["duration"],
+        "sha256": sha256(destination.read_bytes()).hexdigest(),
+        "render_seconds": time.monotonic() - started,
+        "video_encoder": encoder,
+    }
+
+
+if __name__ == "__main__":
+    request_path, audio_path, result_path = map(Path, sys.argv[1:4])
+    try:
+        request = json.loads(request_path.read_text())
+        if "--validate" in sys.argv[4:]:
+            if "semantic_plan" in request:
+                from .podcast_video_layout import compile_layout
+
+                timeline = timeline_for_video(
+                    request["podcast_id"],
+                    request["episode_index"],
+                    request["episode"],
+                    request["cues"],
+                    request["alignment"],
+                    request["source_resolver"],
+                )
+                request["plan"] = compile_layout(
+                    request["semantic_plan"], request["cues"], timeline
+                )
+            validate_plan(request["plan"], request["cues"])
+            text_layouts = layouts(request["plan"])
+            emphasis_layouts(request["plan"], text_layouts)
+            result = {"valid": True, "plan": request["plan"]}
+        else:
+            result = render(request, audio_path, result_path.with_suffix(".mp4"))
+        result_path.write_text(json.dumps(result))
+    except Exception as error:
+        code = (
+            str(error)
+            if isinstance(error, ValueError) and str(error).startswith("VIDEO_")
+            else "VIDEO_RENDER_FAILED"
+        )
+        result_path.write_text(json.dumps({"error": code}))
+        # 僅保存失敗渲染的本機輸入與診斷，讓重現不必再呼叫模型；不寫一般服務 log。
+        if "--validate" not in sys.argv[4:]:
+            failures = request_path.parent.parent / "failures"
+            failures.mkdir(mode=0o700, exist_ok=True)
+            saved = Path(tempfile.mkdtemp(prefix="render-", dir=failures))
+            for source in (
+                request_path,
+                audio_path,
+                result_path,
+                result_path.with_suffix(".ffmpeg.log"),
+                result_path.with_suffix(".failure.json"),
+            ):
+                if source.is_file():
+                    target = saved / source.name
+                    shutil.copyfile(source, target)
+                    target.chmod(0o600)
+            (saved / "traceback.txt").write_text(traceback.format_exc())
+        raise SystemExit(1)

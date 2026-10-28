@@ -1,13 +1,16 @@
+import { useStudyStart } from "../study-session/useStudyStart";
+import { rememberMaterial, rememberedMaterial } from "../material-flow/material-memory";
 import { useEffect, useRef, useState } from "react";
 
-import { errorMessage, type StudydyApiClient } from "../../api/client";
+import { errorMessage, isNotFound, type StudydyApiClient } from "../../api/client";
+import { NotFoundView, materialNotFound } from "../../ui/NotFoundView";
 import type {
-  KnowledgeStructureView,
-  LearnerProgressView,
+  KnowledgeOutlineView,
+  MapProgressView,
   MaterialLibraryItem,
   StudySessionView,
 } from "../../api/contracts";
-import { routePath, writeRoute, type AppRoute } from "../../app/routes";
+import { writeRoute, type AppRoute } from "../../app/routes";
 import { StateView } from "../../ui/StateView";
 import { KnowledgeMapWorkspace } from "./KnowledgeMapWorkspace";
 import "./styles.css";
@@ -25,7 +28,8 @@ export default function KnowledgeMap({
   apiClient: StudydyApiClient;
   route: Extract<AppRoute, { name: "knowledge-map" }>;
 }) {
-  const [progress, setProgress] = useState<LearnerProgressView | null>(null);
+  const [materialName,setMaterialName] = useState(()=>rememberedMaterial(apiClient,route.materialId)?.display_name??"" );
+  const [progress, setProgress] = useState<MapProgressView | null>(null);
   const [savedSession, setSavedSession] = useState<Pick<
     StudySessionView,
     "study_session_id" | "status"
@@ -33,24 +37,10 @@ export default function KnowledgeMap({
   const [isLoadingProgress, setIsLoadingProgress] = useState(true);
   const [progressMessage, setProgressMessage] = useState<string | null>(null);
   const [reload, setReload] = useState(0);
-  const [view, setView] = useState<KnowledgeStructureView | null>(null);
+  const [view, setView] = useState<KnowledgeOutlineView | null>(null);
   const [message, setMessage] = useState<string | null>(null);
-  const [startMessage, setStartMessage] = useState<string | null>(null);
-  const [isStartingStudy, setIsStartingStudy] = useState(false);
-  const startIntent = useRef<{ conceptId: string; key: string } | null>(null);
-  const activePage = useRef(false);
-  const pageVersion = useRef(0);
-
-  useEffect(() => {
-    activePage.current = true;
-    pageVersion.current += 1;
-    startIntent.current = null;
-    setIsStartingStudy(false);
-    setStartMessage(null);
-    return () => {
-      activePage.current = false;
-    };
-  }, [apiClient, route.materialId, route.runId, route.structureRevision]);
+  const [notFound, setNotFound] = useState<"material" | "version" | null>(null);
+  const launch = useStudyStart(apiClient, `${route.materialId}:${route.structureRevision}`);
 
   const loadedRouteKey = useRef("");
   useEffect(() => {
@@ -82,7 +72,7 @@ export default function KnowledgeMap({
     const load = async () => {
       // 教材索引與固定版本地圖並行讀取；複習只讀進度，不重取完整學習紀錄。
       const materialTask = apiClient.getMaterial(route.materialId).then(
-        (material) => ({ material, error: null }),
+        (material) => { if (!cancelled) { rememberMaterial(apiClient, material); setMaterialName(material.display_name); } return { material, error: null }; },
         (error: unknown) => ({ material: null, error }),
       );
       const progressTask = materialTask
@@ -99,7 +89,7 @@ export default function KnowledgeMap({
           return saved
             ? {
                 saved,
-                progress: await apiClient.readProgress(
+                progress: await apiClient.readMapProgress(
                   saved.study_session_id,
                   route.structureRevision,
                 ),
@@ -113,7 +103,7 @@ export default function KnowledgeMap({
       try {
         const [mapResult, run] = await Promise.all([
           apiClient
-            .getKnowledgeStructure({
+            .getKnowledgeOutline({
               materialId: route.materialId,
               structureRevision: route.structureRevision,
             })
@@ -143,7 +133,16 @@ export default function KnowledgeMap({
           setSavedSession(progressResult.value?.saved ?? null);
         }
       } catch (error) {
-        if (!cancelled) setMessage(errorMessage(error));
+        if (cancelled) return;
+        // 網址中的教材、處理紀錄或地圖版本不存在：教材也不存在時顯示找不到教材，否則提供開啟目前版本。
+        // 處理紀錄與版本對不上屬於資料不一致，維持讀取失敗畫面。
+        if (isNotFound(error)) {
+          const { material } = await materialTask;
+          if (cancelled) return;
+          setNotFound(material ? "version" : "material");
+          return;
+        }
+        setMessage(errorMessage(error));
       } finally {
         if (!cancelled) setIsLoadingProgress(false);
       }
@@ -154,6 +153,14 @@ export default function KnowledgeMap({
     };
   }, [apiClient, route.materialId, route.runId, route.structureRevision, reload]);
 
+  const startStudy = (conceptId: string) => {
+    if (!isLoadingProgress) void launch.start({ ...route, conceptId });
+  };
+
+  if (notFound === "material") return <NotFoundView {...materialNotFound} />;
+  if (notFound === "version")
+    return <NotFoundView title="找不到這個版本的知識地圖" description="網址中的地圖版本已不存在，可以開啟這份教材目前的知識地圖。"
+      back={{ label: "開啟目前的知識地圖", route: { name: "material", materialId: route.materialId } }} />;
   if (message)
     return (
       <StateView
@@ -171,7 +178,7 @@ export default function KnowledgeMap({
               type="button"
               onClick={() => writeRoute({ name: "materials" })}
             >
-              返回教材庫
+              返回我的教材
             </button>
           </div>
         }
@@ -186,62 +193,11 @@ export default function KnowledgeMap({
       <StateView
         description="正在載入教材概念與學習順序。"
         live
+        skeleton="map"
         title="正在讀取知識地圖"
         tone="loading"
       />
     );
-  const openStudySession = (studySessionId: string) =>
-    writeRoute({
-      ...route,
-      name: "study-session",
-      studySessionId,
-    });
-
-  const startStudy = async (conceptId: string) => {
-    if (isStartingStudy || isLoadingProgress) return;
-    const version = pageVersion.current;
-    // 路由可能已寫入但 React 尚未卸載舊頁；兩者都有效才接受 mutation 回應。
-    const isCurrentPage = () =>
-      activePage.current &&
-      pageVersion.current === version &&
-      window.location.pathname === routePath(route);
-    if (
-      savedSession &&
-      (savedSession.status === "completed" || progress?.current_concept_id === conceptId)
-    ) {
-      openStudySession(savedSession.study_session_id);
-      return;
-    }
-    if (startIntent.current?.conceptId !== conceptId) {
-      startIntent.current = { conceptId, key: crypto.randomUUID() };
-    }
-    setIsStartingStudy(true);
-    setStartMessage(null);
-    try {
-      let session = savedSession
-        ? await apiClient.focusStudySession(savedSession.study_session_id, conceptId)
-        : await apiClient.createStudySession(
-            {
-              schema: "study-session-create/v1",
-              material_id: route.materialId,
-              knowledge_structure_revision: route.structureRevision,
-              current_concept_id: conceptId,
-            },
-            startIntent.current.key,
-          );
-      if (!isCurrentPage()) return;
-      // 並行建立可能取得其他觀念的既有紀錄；未結束的紀錄仍需對齊選定觀念。
-      if (session.status !== "completed" && session.current_concept_id !== conceptId) {
-        session = await apiClient.focusStudySession(session.study_session_id, conceptId);
-        if (!isCurrentPage()) return;
-      }
-      openStudySession(session.study_session_id);
-    } catch (error) {
-      if (!isCurrentPage()) return;
-      setStartMessage(errorMessage(error));
-      setIsStartingStudy(false);
-    }
-  };
   return (
     <KnowledgeMapWorkspace
       key={view.knowledge_structure_revision}
@@ -250,14 +206,15 @@ export default function KnowledgeMap({
       learningStateStatus={savedSession?.status ?? null}
       progressMessage={progressMessage}
       onReloadProgress={() => setReload((value) => value + 1)}
-      isStartingStudy={isStartingStudy || isLoadingProgress}
+      isStartingStudy={launch.busy || isLoadingProgress}
       isLoadingProgress={isLoadingProgress}
       onReturnToRun={() =>
         writeRoute({ name: "material-run", materialId: route.materialId, runId: route.runId })
       }
-      onAddSources={() => writeRoute({ name: "material-sources", materialId: route.materialId })}
+      mapRoute={route}
+      materialName={materialName}
       onStartStudy={startStudy}
-      startMessage={startMessage}
+      startMessage={launch.error}
       view={view}
     />
   );

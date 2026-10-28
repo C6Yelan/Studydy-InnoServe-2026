@@ -1,8 +1,10 @@
 from __future__ import annotations
 
+
 from contextlib import asynccontextmanager
 from copy import deepcopy
 from dataclasses import dataclass, field
+import hashlib
 import ipaddress
 import json
 from typing import Any, Callable, Iterator
@@ -19,55 +21,142 @@ from starlette.exceptions import HTTPException as StarletteHttpException
 from starlette.routing import Match
 
 from document_normalization.converter import (
-    MAX_FILE_BYTES, MIME, NormalizationError, normalizer_available,
+    AUDIO_MIME,
+    IMAGE_MIME,
+    IMAGE_SET_MIME,
+    MAX_AUDIO_BYTES,
+    MAX_FILE_BYTES,
+    MAX_IMAGES,
+    MAX_MEDIA_SECONDS,
+    MAX_VIDEO_BYTES,
+    MIME,
+    VIDEO_MIME,
+    YOUTUBE_MIME,
+    NormalizationError,
+    media_available,
+    normalizer_available,
 )
-from learning_adaptation import assessment_sets
-from learning_adaptation.learner_progress import (
-    apply_guidance, derive_learner_progress, progress_snapshot,
-)
-from learning_adaptation.study_sessions import (
-    create_study_session, set_current_study_concept,
-)
+from learning_adaptation import assessment_state
+from .. import card_sets, learner_profile
+from .research_routes import install as install_research
+from .topic_routes import install as install_topics
+from .note_routes import install as install_notes
+from .export_routes import install as install_exports
+from .scene_routes import install as install_scenes
+from .video_routes import install as install_videos
+from .voice_routes import install as install_voice
 from ..learner_session import (
-    IDLE_LIFETIME, SessionError, TrustedLearner, login_account,
-    refresh_session, register_account, resolve_session, revoke_session,
+    IDLE_LIFETIME,
+    PasswordAttemptLimiter,
+    SessionError,
+    change_password,
+    device_label,
+    list_active_sessions,
+    login_account,
+    revoke_other_sessions,
+    refresh_session,
+    register_account,
+    revoke_own_session,
+    revoke_session,
 )
 from ..material_discard import MaterialDiscardError, request_material_discard
 from ..material_processing import (
-    MaterialProcessingError, read_material_processing_run,
+    MaterialProcessingError,
+    read_material_processing_run,
 )
 from ..material_runtime import MaterialRuntimeError, runtime_binding
+from ..media_sources import (
+    add_youtube_source,
+    accept_reference,
+    accept_upload,
+    upload_intent,
+    receive_chunk,
+    store_upload_bytes,
+)
 from ..source_normalization import (
-    SourceError, create_draft, read_sources, remove_staged_source,
-    retry_normalization, upload_source,
+    create_draft,
+    read_sources,
+    remove_staged_source,
+    retry_normalization,
+    upload_source,
 )
+from ..errors import PodcastError, SourceError
+from ..storage_usage import (
+    StorageBusyError,
+    StorageQuotaError,
+    account_usage,
+    release_upload,
+)
+from . import request_context
+from .media import artifact_response
+from .study_routes import install as install_study_routes
+from .card_routes import install as install_card_routes
+from .podcast_routes import install as install_podcast_routes
 from ..source_revisions import create_revision
-from ..storage.artifacts import open_verified_source_pdf
-from ..storage.knowledge_structures import read_knowledge_structure, resolve_evidence_source
-from ..storage.materials import MaterialLibraryError, read_material_library, rename_material
-from ..storage.source_artifacts import open_verified_artifact
-from ..storage.tables import Artifact, Material, MaterialSource, database_session
-from ..workers import start_runtime_workers
+from ..storage.artifacts import (
+    open_verified_artifact,
+)
+from ..storage.knowledge_reads import resolve_evidence_source
+from ..storage.materials import (
+    MaterialLibraryError,
+    read_material_library,
+    rename_material,
+)
+from ..storage.tables import Artifact, MaterialSource
+from ..storage.database import database_ready, database_session
+from ..workers import run_workers
 from .models import (
-    AccountCredentials, ApiErrorView, AssessmentPlanView, AssessmentSetAction,
-    AssessmentSetCreate, AssessmentSetListView, AssessmentSetSubmission,
-    AssessmentSetView, EvidenceSourceView, GuidanceApply, KnowledgeStructureView,
-    LearnerIdentityView, LearnerProgressView, MaterialDiscardView,
-    MaterialDraftCreate, MaterialDraftView, MaterialLibraryItem,
-    MaterialLibraryView, MaterialProcessingRunView, MaterialRename,
-    MaterialReviewCreate, RevisionCancel, RevisionCreate, SourceCapabilities,
-    SourceListView, StudyResumeView, StudySessionCreate, StudySessionFocus,
-    StudySessionView, project_learner_progress, project_material_run,
-    project_knowledge_structure, project_study_session,
+    AccountCredentials,
+    AccountStorageView,
+    ApiErrorView,
+    EvidenceSourceView,
+    LearnerIdentityView,
+    LearnerProfileUpdate,
+    LearnerProfileView,
+    PasswordChange,
+    AccountSessionView,
+    AccountSessionsView,
+    MaterialDiscardView,
+    MaterialDraftCreate,
+    MaterialDraftView,
+    MaterialLibraryItem,
+    MaterialLibraryView,
+    MaterialProcessingRunView,
+    MaterialRename,
+    RevisionCancel,
+    RevisionCreate,
+    SourceCapabilities,
+    SourceListView,
+    SourceUploadProgress,
+    SourceTranscriptView,
+    YoutubeSourceCreate,
+    VersionMoveCreate,
+    VersionMoveNotice,
+    VersionMoveReturn,
+    VersionMoveReturnView,
+    VersionMovePreviewView,
+    VersionMoveView,
+    project_material_run,
 )
 
 
-_COOKIE_NAME = "studydy_session"
 _ERROR_MESSAGE = "Request could not be completed."
 _ERROR_STATUS = {
-    'LEARNER_GUIDANCE_STALE': (409, True),
-    'ASSESSMENT_SET_CONFLICT': (409, False),
-    'ASSESSMENT_SET_ACTIVE': (409, False),
+    "STORAGE_QUOTA_EXCEEDED": (409, False),
+    "STORAGE_BUSY": (503, True),
+    "PODCAST_CONFLICT": (409, False),
+    "PODCAST_SOURCE_INSUFFICIENT": (422, False),
+    "PODCAST_SOURCE_TOO_LARGE": (422, False),
+    "CARD_SET_CONFLICT": (409, False),
+    "CARD_REVIEW_CONFLICT": (409, False),
+    "VERSION_MOVE_STALE": (409, False),
+    "VERSION_MOVE_PREVIEW_STALE": (409, False),
+    "VERSION_MOVE_PREVIOUS_UNAVAILABLE": (409, False),
+    "LEARNER_GUIDANCE_STALE": (409, True),
+    "ASSESSMENT_SET_CONFLICT": (409, False),
+    "ASSESSMENT_SET_ACTIVE": (409, False),
+    "LEARNING_GOAL_STALE": (409, True),
+    "LEARNING_GOAL_PUBLISHED": (409, False),
     "DUPLICATE_SOURCE": (409, False),
     "REVISION_CONFLICT": (409, False),
     "REVISION_IN_PROGRESS": (409, True),
@@ -78,6 +167,8 @@ _ERROR_STATUS = {
     "REQUEST_INVALID": (400, False),
     "INVALID_EMAIL": (400, False),
     "INVALID_CREDENTIALS": (401, False),
+    "CURRENT_PASSWORD_INVALID": (400, False),
+    "TOO_MANY_ATTEMPTS": (429, True),
     "ACCOUNT_UNAVAILABLE": (409, False),
     "SESSION_REQUIRED": (401, False),
     "ORIGIN_NOT_ALLOWED": (403, False),
@@ -86,6 +177,17 @@ _ERROR_STATUS = {
     "MATERIAL_NOT_DISCARDABLE": (409, False),
     "MATERIAL_TOO_LARGE": (413, False),
     "UNSUPPORTED_MEDIA_TYPE": (415, False),
+    "UPLOAD_OFFSET_MISMATCH": (409, True),
+    "MEDIA_TOO_LONG": (422, False),
+    "MEDIA_UNREADABLE": (422, False),
+    "MEDIA_NO_AUDIO": (422, False),
+    "YOUTUBE_URL_INVALID": (400, False),
+    "YOUTUBE_PLAYLIST_REJECTED": (422, False),
+    "YOUTUBE_LIVE": (422, False),
+    "YOUTUBE_MEMBERS_ONLY": (422, False),
+    "YOUTUBE_PRIVATE": (422, False),
+    "YOUTUBE_AGE_RESTRICTED": (422, False),
+    "YOUTUBE_UNAVAILABLE": (422, True),
     "STORAGE_UNAVAILABLE": (503, True),
     "INTERNAL_ERROR": (500, False),
 }
@@ -106,6 +208,7 @@ _INTERNAL_ERRORS = {
     "MATERIAL_RUN_NOT_FOUND": "RESOURCE_NOT_FOUND",
     "MATERIAL_RUN_UNAVAILABLE": "RESOURCE_NOT_FOUND",
     "KNOWLEDGE_STRUCTURE_UNAVAILABLE": "RESOURCE_NOT_FOUND",
+    "MATERIAL_FORMAT_UNSUPPORTED": "MATERIAL_FORMAT_UNSUPPORTED",
     "ARTIFACT_NOT_AVAILABLE": "RESOURCE_NOT_FOUND",
     "STUDY_SESSION_UNAVAILABLE": "RESOURCE_NOT_FOUND",
     "STUDY_SESSION_MAP_UNAVAILABLE": "RESOURCE_NOT_FOUND",
@@ -128,18 +231,10 @@ _INTERNAL_ERRORS = {
 }
 
 
-class _ApiFailure(Exception):
-    def __init__(self, reason_code: str) -> None:
-        super().__init__("API_REQUEST_FAILED")
-        self.reason_code = reason_code
-
-
 class ApiSettingsError(ValueError):
     """只保留可安全診斷的 fixed runtime stage。"""
 
-    def __init__(
-        self, component: str | None = None, reason: str | None = None
-    ) -> None:
+    def __init__(self, component: str | None = None, reason: str | None = None) -> None:
         super().__init__("API_SETTINGS_INVALID")
         self.component = component
         self.reason = reason
@@ -157,9 +252,15 @@ class ApiSettings:
     upload_max_bytes: int = MAX_FILE_BYTES
 
     def __post_init__(self) -> None:
-        if self.profile not in {"local", "test"} or type(self.secure_cookie) is not bool:
+        if (
+            self.profile not in {"local", "test"}
+            or type(self.secure_cookie) is not bool
+        ):
             raise ValueError("API_SETTINGS_INVALID")
-        if type(self.upload_max_bytes) is not int or not 1 <= self.upload_max_bytes <= MAX_FILE_BYTES:
+        if (
+            type(self.upload_max_bytes) is not int
+            or not 1 <= self.upload_max_bytes <= MAX_FILE_BYTES
+        ):
             raise ValueError("API_SETTINGS_INVALID")
         origin = _normalized_origin(self.public_origin)
         if origin is None or origin != self.public_origin:
@@ -222,7 +323,52 @@ def _normalized_origin(value: Any) -> str | None:
     return normalized + (f":{port}" if port is not None else "")
 
 
-def _error_response(reason_code: str, *, status_code: int | None = None) -> JSONResponse:
+_ERROR_STATUS.update(
+    {
+        "EXPORT_SIZE_LIMIT": (413, False),
+        "EXPORT_ACTIVE_LIMIT": (409, True),
+        "EXPORT_IN_PROGRESS": (409, True),
+        "EXPORT_PAGE_LIMIT": (413, False),
+        "VIDEO_CONFLICT": (409, True),
+        "VIDEO_SOURCE_CHANGED": (409, False),
+        "SCENE_CONFLICT": (409, True),
+        "SCENE_ALIGNMENT_INVALID": (422, True),
+        "SCENE_ALIGNMENT_FAILED": (422, True),
+        "SCENE_SOURCE_CHANGED": (409, False),
+        "PODCAST_TIMELINE_NOT_READY": (409, True),
+        "PODCAST_TIMELINE_UNAVAILABLE": (409, False),
+        "PODCAST_TIMELINE_SOURCE_MISMATCH": (409, False),
+        "TOPIC_CONFLICT": (409, True),
+        "TOPIC_PROVIDER_FAILED": (502, True),
+        "RESEARCH_SCOPE_REQUIRED": (409, False),
+        "RESEARCH_SNAPSHOT_UNAVAILABLE": (409, False),
+        "RESEARCH_URL_REJECTED": (422, False),
+        "RESEARCH_LICENSE_UNCONFIRMED": (422, False),
+        "RESEARCH_SEARCH_FAILED": (502, True),
+        "RESEARCH_DOWNLOAD_FAILED": (502, True),
+        "ASSESSMENT_IN_PROGRESS": (409, False),
+        "VOICE_AUDIO_NOT_READY": (409, True),
+        "VOICE_TURN_IN_PROGRESS": (409, True),
+        "VOICE_PROVIDER_UNAVAILABLE": (503, True),
+        "VOICE_PROVIDER_FAILED": (502, True),
+        "VOICE_TRANSCRIPT_INVALID": (422, False),
+        "VOICE_ANSWER_INVALID": (422, True),
+        "VOICE_PODCAST_CONTEXT_INVALID": (409, False),
+        "VOICE_CONTEXT_TOO_LARGE": (422, False),
+        "RETRIEVAL_INDEX_REQUIRED": (409, False),
+        "RETRIEVAL_INDEX_INVALID": (409, False),
+        "MATERIAL_FORMAT_UNSUPPORTED": (409, False),
+        "SOURCE_SCOPE_EMPTY": (422, False),
+        "SOURCE_SCOPE_INVALID": (422, False),
+        "SOURCE_SCOPE_UNRESOLVED": (422, False),
+        "RESEARCH_CONTEXT_TOO_LARGE": (422, True),
+    }
+)
+
+
+def _error_response(
+    reason_code: str, *, status_code: int | None = None, storage: dict | None = None
+) -> JSONResponse:
     default_status, retryable = _ERROR_STATUS[reason_code]
     body = ApiErrorView.model_validate(
         {
@@ -231,10 +377,11 @@ def _error_response(reason_code: str, *, status_code: int | None = None) -> JSON
             "reason_code": reason_code,
             "retryable": retryable,
             "message": _ERROR_MESSAGE,
+            **({"storage": storage} if storage is not None else {}),
         }
     )
     return JSONResponse(
-        body.model_dump(mode="json", by_alias=True),
+        body.model_dump(mode="json", by_alias=True, exclude_none=True),
         status_code=default_status if status_code is None else status_code,
     )
 
@@ -242,15 +389,27 @@ def _error_response(reason_code: str, *, status_code: int | None = None) -> JSON
 def _fixed_exception(error: Exception) -> str:
     """只把已知內部原因碼轉成固定的公開 API 原因碼。"""
     reason = str(error)
-    if isinstance(error, assessment_sets.AssessmentSetError):
+    if isinstance(error, assessment_state.AssessmentSetError):
         return _ASSESSMENT_SET_ERRORS.get(reason, "INTERNAL_ERROR")
     if (
-        isinstance(error, (SourceError, NormalizationError, MaterialProcessingError, SessionError))
+        isinstance(
+            error,
+            (
+                SourceError,
+                NormalizationError,
+                MaterialProcessingError,
+                SessionError,
+                card_sets.CardSetError,
+                PodcastError,
+            ),
+        )
         and reason in _ERROR_STATUS
     ):
         return reason
     if isinstance(error, MaterialLibraryError) and reason in {
-        "REQUEST_INVALID", "RESOURCE_NOT_FOUND", "MATERIAL_NOT_DISCARDABLE",
+        "REQUEST_INVALID",
+        "RESOURCE_NOT_FOUND",
+        "MATERIAL_NOT_DISCARDABLE",
     }:
         return reason
     if isinstance(error, MaterialDiscardError) and reason == "RESOURCE_NOT_FOUND":
@@ -258,46 +417,9 @@ def _fixed_exception(error: Exception) -> str:
     return _INTERNAL_ERRORS.get(reason, "INTERNAL_ERROR")
 
 
-def _require_query(request: Request, allowed: set[str]) -> None:
-    names = [key for key, _ in request.query_params.multi_items()]
-    if set(names) - allowed or len(names) != len(set(names)):
-        raise _ApiFailure("REQUEST_INVALID")
-
-
-def _idempotency_key(request: Request) -> str:
-    values = request.headers.getlist("idempotency-key")
-    if len(values) != 1:
-        raise _ApiFailure("REQUEST_INVALID")
-    value = values[0]
-    try:
-        encoded = value.encode("utf-8")
-    except UnicodeError:
-        raise _ApiFailure("REQUEST_INVALID") from None
-    if not 1 <= len(encoded) <= 256 or any(
-        ord(character) < 32 or ord(character) == 127 for character in value
-    ):
-        raise _ApiFailure("REQUEST_INVALID")
-    return value
-
-
-def _trusted_learner(request: Request, settings: ApiSettings) -> TrustedLearner:
-    try:
-        learner = resolve_session(request.cookies.get(_COOKIE_NAME), dsn=settings.dsn)
-    except SessionError:
-        raise _ApiFailure("STORAGE_UNAVAILABLE") from None
-    if learner is None:
-        raise _ApiFailure("SESSION_REQUIRED")
-    return learner
-
-
-async def _require_empty_body(request: Request) -> None:
-    if await request.body() != b"":
-        raise _ApiFailure("REQUEST_INVALID")
-
-
 def _set_session_cookie(response: Response, token: str, settings: ApiSettings) -> None:
     response.set_cookie(
-        _COOKIE_NAME,
+        request_context.SESSION_COOKIE,
         token,
         httponly=True,
         secure=settings.secure_cookie,
@@ -319,9 +441,16 @@ def _install_openapi(app: FastAPI) -> None:
     """補上來源上傳、原檔下載、PDF 預覽與 cookie/header 的固定契約。"""
 
     idempotent_paths = {
-        "/v1/materials", "/v1/materials/{material_id}/sources", "/v1/materials/{material_id}/revisions",
+        "/v1/materials/{material_id}/podcasts",
+        "/v1/materials/{material_id}/card-sets",
+        "/v1/materials",
+        "/v1/materials/{material_id}/sources",
+        "/v1/materials/{material_id}/source-parts",
+        "/v1/materials/{material_id}/youtube-sources",
+        "/v1/materials/{material_id}/revisions",
         "/v1/material-processing-runs/{run_id}/retry",
-        "/v1/materials/{material_id}/review",
+        "/v1/card-sets/{card_set_id}/reviews",
+        "/v1/materials/{material_id}/version-move",
         "/v1/study-sessions",
         "/v1/study-sessions/{study_session_id}/assessment-sets",
         "/v1/study-sessions/{study_session_id}/assessment-sets/{set_id}/retry",
@@ -341,15 +470,21 @@ def _install_openapi(app: FastAPI) -> None:
             routes=app.routes,
         )
         components = schema.setdefault("components", {})
-        components.setdefault("schemas", {})["ApiErrorView"] = ApiErrorView.model_json_schema(by_alias=True)
+        components.setdefault("schemas", {})["ApiErrorView"] = (
+            ApiErrorView.model_json_schema(by_alias=True)
+        )
         components.setdefault("securitySchemes", {})["CookieSession"] = {
             "type": "apiKey",
             "in": "cookie",
-            "name": _COOKIE_NAME,
+            "name": request_context.SESSION_COOKIE,
         }
         error_response = {
             "description": "Fixed safe API error",
-            "content": {"application/json": {"schema": {"$ref": "#/components/schemas/ApiErrorView"}}},
+            "content": {
+                "application/json": {
+                    "schema": {"$ref": "#/components/schemas/ApiErrorView"}
+                }
+            },
         }
         for path, path_item in schema["paths"].items():
             for method, operation in path_item.items():
@@ -358,7 +493,12 @@ def _install_openapi(app: FastAPI) -> None:
                 operation.get("responses", {}).pop("422", None)
                 if method in {"post", "delete"}:
                     operation.setdefault("parameters", []).append(
-                        {"name": "Origin", "in": "header", "required": True, "schema": {"type": "string"}}
+                        {
+                            "name": "Origin",
+                            "in": "header",
+                            "required": True,
+                            "schema": {"type": "string"},
+                        }
                     )
                 if path in idempotent_paths and method == "post":
                     operation.setdefault("parameters", []).append(
@@ -366,24 +506,58 @@ def _install_openapi(app: FastAPI) -> None:
                             "name": "Idempotency-Key",
                             "in": "header",
                             "required": True,
-                            "schema": {"type": "string", "minLength": 1, "maxLength": 256},
+                            "schema": {
+                                "type": "string",
+                                "minLength": 1,
+                                "maxLength": 256,
+                            },
                         }
                     )
                 if path == "/v1/materials/{material_id}/sources" and method == "post":
-                    operation.setdefault("parameters", []).append({
-                        "name": "X-Material-Name", "in": "header", "required": True,
-                        "description": (
-                            "URI-encoded UTF-8 filename, 1–200 decoded characters; "
-                            "first upload owns the name."
-                        ),
-                        "schema": {"type": "string", "maxLength": 2400},
-                    })
+                    operation.setdefault("parameters", []).append(
+                        {
+                            "name": "X-Material-Name",
+                            "in": "header",
+                            "required": True,
+                            "description": (
+                                "URI-encoded UTF-8 filename, 1–200 decoded characters; "
+                                "first upload owns the name."
+                            ),
+                            "schema": {"type": "string", "maxLength": 2400},
+                        }
+                    )
                     operation["requestBody"] = {
                         "required": True,
                         "content": {
                             media: {"schema": {"type": "string", "format": "binary"}}
                             for media in MIME.values()
                         },
+                    }
+                if (
+                    path == "/v1/podcasts/{podcast_id}/episodes/{episode_index}/audio"
+                    and method == "get"
+                ):
+                    operation.setdefault("parameters", []).append(
+                        {
+                            "name": "Range",
+                            "in": "header",
+                            "required": False,
+                            "schema": {"type": "string"},
+                            "description": "Single byte range, including suffix ranges",
+                        }
+                    )
+                    for code in ("200", "206"):
+                        operation["responses"][code] = {
+                            "description": "Owner-authorized verified Podcast audio",
+                            "content": {
+                                media: {
+                                    "schema": {"type": "string", "format": "binary"}
+                                }
+                                for media in ("audio/flac", "audio/wav")
+                            },
+                        }
+                    operation["responses"]["416"] = {
+                        "description": "Invalid or unsatisfiable byte range"
                     }
                 if path == "/v1/artifacts/{artifact_id}" and method == "get":
                     operation["responses"]["200"] = {
@@ -415,7 +589,13 @@ def _install_openapi(app: FastAPI) -> None:
                     response_codes.add(409)
                 if path == "/v1/session/login":
                     response_codes.add(401)
-                if path.endswith("/resume"):
+                if path == "/v1/account/password":
+                    response_codes.add(429)
+                if path.endswith("/resume") or path in {
+                    "/v1/card-sets/{card_set_id}/update",
+                    "/v1/card-sets/{card_set_id}/count",
+                    "/v1/podcasts/{podcast_id}/actions",
+                }:
                     response_codes.add(409)
                 if path == "/v1/materials/{material_id}" and method == "delete":
                     response_codes.add(409)
@@ -427,11 +607,18 @@ def _install_openapi(app: FastAPI) -> None:
                     response_codes.add(404)
                 if path in idempotent_paths and method == "post":
                     response_codes.add(409)
-                if path == "/v1/materials/{material_id}/sources" and method == "post":
-                    response_codes.update({413, 415})
+                if path in (
+                    "/v1/materials/{material_id}/sources",
+                    "/v1/materials/{material_id}/source-parts",
+                ) and method == "post":
+                    response_codes.update({413, 415, 422})
+                if path == "/v1/materials/{material_id}/youtube-sources":
+                    response_codes.add(422)
                 response_codes.add(503)
                 for code in sorted(response_codes):
-                    operation.setdefault("responses", {})[str(code)] = deepcopy(error_response)
+                    operation.setdefault("responses", {})[str(code)] = deepcopy(
+                        error_response
+                    )
         components["schemas"].pop("HTTPValidationError", None)
         components["schemas"].pop("ValidationError", None)
         app.openapi_schema = schema
@@ -445,15 +632,18 @@ def create_app(settings: ApiSettings) -> FastAPI:
 
     if not isinstance(settings, ApiSettings):
         raise ValueError("API_SETTINGS_INVALID")
+
+    workers_ready = lambda: False
+
     @asynccontextmanager
     async def lifespan(_: FastAPI):
-        workers = start_runtime_workers(
-            dsn=settings.dsn, local_config=settings.local_config
-        )
-        try:
-            yield
-        finally:
-            workers.stop()
+        nonlocal workers_ready
+        with run_workers(settings.dsn, settings.local_config) as ready:
+            workers_ready = ready
+            try:
+                yield
+            finally:
+                workers_ready = lambda: False
 
     app = FastAPI(
         title="Studydy API",
@@ -464,9 +654,18 @@ def create_app(settings: ApiSettings) -> FastAPI:
         redoc_url=None,
         lifespan=lifespan,
     )
+
     @app.get("/v1/openapi.json", include_in_schema=False)
     async def openapi_document() -> Response:
         return Response(canonical_openapi_bytes(app), media_type="application/json")
+
+    @app.get("/internal/ready", include_in_schema=False)
+    def readiness() -> Response:
+        ready = workers_ready() and database_ready(settings.dsn)
+        return JSONResponse(
+            {"status": "ready" if ready else "unavailable"},
+            status_code=200 if ready else 503,
+        )
 
     @app.middleware("http")
     async def enforce_transport_boundary(request: Request, call_next: Callable):
@@ -479,18 +678,29 @@ def create_app(settings: ApiSettings) -> FastAPI:
         else:
             return (
                 _error_response("REQUEST_INVALID", status_code=405)
-                if partial_match else _error_response("RESOURCE_NOT_FOUND")
+                if partial_match
+                else _error_response("RESOURCE_NOT_FOUND")
             )
         if request.headers.getlist("x-learner-id"):
             return _error_response("REQUEST_INVALID")
-        if request.method in {"POST", "DELETE"}:
+        if request.method in {"POST", "PUT", "DELETE"}:
             origins = request.headers.getlist("origin")
             if len(origins) != 1 or origins[0] != settings.public_origin:
                 return _error_response("ORIGIN_NOT_ALLOWED")
         try:
             return await call_next(request)
-        except _ApiFailure as error:
+        except request_context.ApiFailure as error:
             return _error_response(error.reason_code)
+        except StorageBusyError:
+            return _error_response("STORAGE_BUSY")
+        except StorageQuotaError as error:
+            return _error_response(
+                "STORAGE_QUOTA_EXCEEDED",
+                storage={
+                    "used_bytes": error.used_bytes,
+                    "limit_bytes": error.limit_bytes,
+                },
+            )
         except Exception as error:
             return _error_response(_fixed_exception(error))
 
@@ -518,238 +728,586 @@ def create_app(settings: ApiSettings) -> FastAPI:
         return _error_response("INTERNAL_ERROR")
 
     @app.post(
-        "/v1/accounts", status_code=201, response_model=LearnerIdentityView,
-        operation_id="registerAccount", tags=["session"],
+        "/v1/accounts",
+        status_code=201,
+        response_model=LearnerIdentityView,
+        operation_id="registerAccount",
+        tags=["session"],
     )
     def register_account_route(
         request: Request, response: Response, body: AccountCredentials
     ) -> LearnerIdentityView:
-        _require_query(request, set())
-        created = register_account(body.email, body.password, dsn=settings.dsn)
+        request_context.require_query(request, set())
+        created = register_account(
+            body.email,
+            body.password,
+            dsn=settings.dsn,
+            label=device_label(request.headers.get("user-agent")),
+        )
         _set_session_cookie(response, created.raw_token, settings)
         return LearnerIdentityView(learner_id=created.learner_id)
 
     @app.post(
-        "/v1/session/login", response_model=LearnerIdentityView,
-        operation_id="loginAccount", tags=["session"],
+        "/v1/session/login",
+        response_model=LearnerIdentityView,
+        operation_id="loginAccount",
+        tags=["session"],
     )
     def login_account_route(
         request: Request, response: Response, body: AccountCredentials
     ) -> LearnerIdentityView:
-        _require_query(request, set())
-        created = login_account(body.email, body.password, dsn=settings.dsn)
+        request_context.require_query(request, set())
+        created = login_account(
+            body.email,
+            body.password,
+            dsn=settings.dsn,
+            label=device_label(request.headers.get("user-agent")),
+        )
         _set_session_cookie(response, created.raw_token, settings)
         return LearnerIdentityView(learner_id=created.learner_id)
 
-    @app.get("/v1/session", response_model=LearnerIdentityView,
-             operation_id="readIdentity", tags=["session"])
+    @app.get(
+        "/v1/session",
+        response_model=LearnerIdentityView,
+        operation_id="readIdentity",
+        tags=["session"],
+    )
     def read_identity_route(request: Request) -> LearnerIdentityView:
-        _require_query(request, set())
-        return LearnerIdentityView(learner_id=_trusted_learner(request, settings).learner_id)
+        request_context.require_query(request, set())
+        return LearnerIdentityView(
+            learner_id=request_context.trusted_learner(request, settings).learner_id
+        )
+
+    @app.get(
+        "/v1/profile",
+        response_model=LearnerProfileView,
+        operation_id="readProfile",
+        tags=["session"],
+    )
+    def read_profile_route(request: Request):
+        request_context.require_query(request, set())
+        learner = request_context.trusted_learner(request, settings)
+        return learner_profile.read_profile(learner.learner_id, dsn=settings.dsn)
+
+    @app.get(
+        "/v1/account/storage",
+        response_model=AccountStorageView,
+        operation_id="readAccountStorage",
+        tags=["session"],
+    )
+    def read_account_storage_route(request: Request):
+        request_context.require_query(request, set())
+        learner = request_context.trusted_learner(request, settings)
+        return account_usage(learner.learner_id, dsn=settings.dsn)
 
     @app.post(
-        "/v1/session/refresh", response_model=LearnerIdentityView,
-        operation_id="refreshSession", tags=["session"],
-        dependencies=[Depends(_require_empty_body)],
+        "/v1/profile",
+        response_model=LearnerProfileView,
+        operation_id="updateProfile",
+        tags=["session"],
     )
-    def refresh_session_route(request: Request, response: Response) -> LearnerIdentityView:
-        _require_query(request, set())
-        raw_token = request.cookies.get(_COOKIE_NAME)
+    def update_profile_route(request: Request, body: LearnerProfileUpdate):
+        request_context.require_query(request, set())
+        learner = request_context.trusted_learner(request, settings)
+        return learner_profile.update_profile(
+            learner.learner_id, body.display_name, dsn=settings.dsn
+        )
+
+    password_attempts = PasswordAttemptLimiter()
+
+    def sessions_view(sessions) -> AccountSessionsView:
+        return AccountSessionsView(
+            sessions=[AccountSessionView(**vars(item)) for item in sessions]
+        )
+
+    @app.get(
+        "/v1/account/sessions",
+        response_model=AccountSessionsView,
+        operation_id="readAccountSessions",
+        tags=["session"],
+    )
+    def read_account_sessions_route(request: Request) -> AccountSessionsView:
+        request_context.require_query(request, set())
+        request_context.trusted_learner(request, settings)
+        return sessions_view(
+            list_active_sessions(
+                request.cookies.get(request_context.SESSION_COOKIE), dsn=settings.dsn
+            )
+        )
+
+    @app.delete(
+        "/v1/account/sessions/others",
+        response_model=AccountSessionsView,
+        operation_id="revokeOtherSessions",
+        tags=["session"],
+        dependencies=[Depends(request_context.require_empty_body)],
+    )
+    def revoke_other_sessions_route(request: Request) -> AccountSessionsView:
+        request_context.require_query(request, set())
+        request_context.trusted_learner(request, settings)
+        return sessions_view(
+            revoke_other_sessions(
+                request.cookies.get(request_context.SESSION_COOKIE), dsn=settings.dsn
+            )
+        )
+
+    @app.delete(
+        "/v1/account/sessions/{session_id}",
+        response_model=AccountSessionsView,
+        operation_id="revokeAccountSession",
+        tags=["session"],
+        dependencies=[Depends(request_context.require_empty_body)],
+    )
+    def revoke_account_session_route(
+        request: Request, session_id: UUID
+    ) -> AccountSessionsView:
+        # 只能撤銷本人另一個登入；目前這個用 DELETE /v1/session 登出。
+        request_context.require_query(request, set())
+        request_context.trusted_learner(request, settings)
+        return sessions_view(
+            revoke_own_session(
+                request.cookies.get(request_context.SESSION_COOKIE),
+                session_id,
+                dsn=settings.dsn,
+            )
+        )
+
+    @app.post(
+        "/v1/account/password",
+        response_model=AccountSessionsView,
+        operation_id="changePassword",
+        tags=["session"],
+    )
+    def change_password_route(
+        request: Request, body: PasswordChange
+    ) -> AccountSessionsView:
+        request_context.require_query(request, set())
+        learner = request_context.trusted_learner(request, settings)
+        # 節流在核對前檢查，暫停期間不再計算雜湊。
+        if password_attempts.blocked(learner.learner_id):
+            raise request_context.ApiFailure("TOO_MANY_ATTEMPTS")
+        try:
+            active = change_password(
+                request.cookies.get(request_context.SESSION_COOKIE),
+                body.current_password,
+                body.new_password,
+                dsn=settings.dsn,
+            )
+        except SessionError as error:
+            if str(error) == "CURRENT_PASSWORD_INVALID":
+                password_attempts.record_failure(learner.learner_id)
+            raise
+        password_attempts.reset(learner.learner_id)
+        return sessions_view(active)
+
+    @app.post(
+        "/v1/session/refresh",
+        response_model=LearnerIdentityView,
+        operation_id="refreshSession",
+        tags=["session"],
+        dependencies=[Depends(request_context.require_empty_body)],
+    )
+    def refresh_session_route(
+        request: Request, response: Response
+    ) -> LearnerIdentityView:
+        request_context.require_query(request, set())
+        raw_token = request.cookies.get(request_context.SESSION_COOKIE)
         learner = refresh_session(raw_token, dsn=settings.dsn)
         if learner is None:
-            raise _ApiFailure("SESSION_REQUIRED")
+            raise request_context.ApiFailure("SESSION_REQUIRED")
         _set_session_cookie(response, raw_token or "", settings)
         return LearnerIdentityView(learner_id=learner.learner_id)
 
-    @app.delete("/v1/session", status_code=204, operation_id="deleteSession", tags=["session"], dependencies=[Depends(_require_empty_body)])
+    @app.delete(
+        "/v1/session",
+        status_code=204,
+        operation_id="deleteSession",
+        tags=["session"],
+        dependencies=[Depends(request_context.require_empty_body)],
+    )
     def delete_session_route(request: Request, response: Response) -> None:
-        _require_query(request, set())
-        revoke_session(request.cookies.get(_COOKIE_NAME), dsn=settings.dsn)
+        request_context.require_query(request, set())
+        revoke_session(
+            request.cookies.get(request_context.SESSION_COOKIE), dsn=settings.dsn
+        )
         response.delete_cookie(
-            _COOKIE_NAME, path="/", secure=settings.secure_cookie,
-            httponly=True, samesite="strict",
+            request_context.SESSION_COOKIE,
+            path="/",
+            secure=settings.secure_cookie,
+            httponly=True,
+            samesite="strict",
         )
 
-    @app.get("/v1/materials", response_model=MaterialLibraryView,
-             operation_id="listMaterials", tags=["materials"])
+    @app.get(
+        "/v1/materials",
+        response_model=MaterialLibraryView,
+        operation_id="listMaterials",
+        tags=["materials"],
+    )
     def list_materials_route(request: Request) -> MaterialLibraryView:
-        _require_query(request, set())
-        learner = _trusted_learner(request, settings)
-        return MaterialLibraryView(materials=read_material_library(learner.learner_id, dsn=settings.dsn))
+        request_context.require_query(request, set())
+        learner = request_context.trusted_learner(request, settings)
+        return MaterialLibraryView(
+            materials=read_material_library(learner.learner_id, dsn=settings.dsn)
+        )
 
-    @app.get("/v1/materials/{material_id}", response_model=MaterialLibraryItem,
-             operation_id="getMaterial", tags=["materials"])
+    @app.get(
+        "/v1/materials/{material_id}",
+        response_model=MaterialLibraryItem,
+        operation_id="getMaterial",
+        tags=["materials"],
+    )
     def read_material_route(request: Request, material_id: UUID) -> MaterialLibraryItem:
-        _require_query(request, set())
-        learner = _trusted_learner(request, settings)
-        materials = read_material_library(learner.learner_id, material_id=material_id, dsn=settings.dsn)
+        request_context.require_query(request, set())
+        learner = request_context.trusted_learner(request, settings)
+        materials = read_material_library(
+            learner.learner_id, material_id=material_id, dsn=settings.dsn
+        )
         if not materials:
-            raise _ApiFailure("RESOURCE_NOT_FOUND")
+            raise request_context.ApiFailure("RESOURCE_NOT_FOUND")
         return MaterialLibraryItem.model_validate(materials[0])
 
     @app.post(
-        "/v1/materials/{material_id}/rename", response_model=MaterialLibraryItem,
-        operation_id="renameMaterial", tags=["materials"],
+        "/v1/materials/{material_id}/rename",
+        response_model=MaterialLibraryItem,
+        operation_id="renameMaterial",
+        tags=["materials"],
     )
     def rename_material_route(
         request: Request, material_id: UUID, body: MaterialRename
     ) -> MaterialLibraryItem:
-        _require_query(request, set())
-        learner = _trusted_learner(request, settings)
-        return MaterialLibraryItem.model_validate(rename_material(
-            learner.learner_id, material_id, body.display_name, dsn=settings.dsn,
-        ))
-
-
-    def source_listing(owner, material_id):
-        sources = read_sources(owner, material_id, dsn=settings.dsn)
-        with database_session(settings.dsn) as session:
-            material = session.scalar(select(Material).where(
-                Material.learner_id == owner,
-                Material.material_id == material_id,
-            ))
-            if material is None:
-                raise SourceError("RESOURCE_NOT_FOUND")
-            discarding = material.discard_requested_at is not None
-        return SourceListView(
-            material_id=material_id, sources=sources, discard_requested=discarding,
+        request_context.require_query(request, set())
+        learner = request_context.trusted_learner(request, settings)
+        return MaterialLibraryItem.model_validate(
+            rename_material(
+                learner.learner_id,
+                material_id,
+                body.display_name,
+                dsn=settings.dsn,
+            )
         )
 
     @app.get("/v1/source-capabilities", response_model=SourceCapabilities)
     def source_capabilities(request: Request):
-        _require_query(request, set())
-        _trusted_learner(request, settings)
-        enabled = normalizer_available()
+        request_context.require_query(request, set())
+        request_context.trusted_learner(request, settings)
+        documents = normalizer_available()
+        media = media_available()
+        # 單次請求受部署上限限制；超過時由瀏覽器分段上傳，總大小仍依各格式上限。
+        formats = [
+            {
+                "extension": ext,
+                "media_type": mime,
+                "max_bytes": MAX_FILE_BYTES,
+                "kind": "document",
+            }
+            for ext, mime in MIME.items()
+            if ext == ".pdf" or documents
+        ]
+        if media:
+            formats += [
+                {"extension": ext, "media_type": mime, "max_bytes": MAX_AUDIO_BYTES, "kind": "audio"}
+                for ext, mime in AUDIO_MIME.items()
+            ] + [
+                {"extension": ext, "media_type": mime, "max_bytes": MAX_VIDEO_BYTES, "kind": "video"}
+                for ext, mime in VIDEO_MIME.items()
+            ]
         return SourceCapabilities(
-            formats=[
-                {"extension": ext, "media_type": media, "max_bytes": settings.upload_max_bytes}
-                for ext, media in MIME.items() if ext == ".pdf" or enabled
-            ],
+            formats=formats,
+            max_request_bytes=settings.upload_max_bytes,
+            max_images=MAX_IMAGES,
+            max_media_seconds=MAX_MEDIA_SECONDS,
+            youtube=media,
         )
 
     @app.post("/v1/materials", status_code=201, response_model=MaterialDraftView)
     def create_material_draft(request: Request, body: MaterialDraftCreate):
-        _require_query(request, set())
-        owner = _trusted_learner(request, settings).learner_id
-        return MaterialDraftView(material_id=create_draft(
-            owner, body.display_name, _idempotency_key(request), dsn=settings.dsn,
-        ))
+        request_context.require_query(request, set())
+        owner = request_context.trusted_learner(request, settings).learner_id
+        return MaterialDraftView(
+            material_id=create_draft(
+                owner,
+                body.display_name,
+                request_context.idempotency_key(request),
+                dsn=settings.dsn,
+            )
+        )
 
     @app.post(
-        "/v1/materials/{material_id}/sources", status_code=202,
+        "/v1/materials/{material_id}/sources",
+        status_code=202,
         response_model=SourceListView,
     )
     async def upload_material_source(request: Request, material_id: UUID):
-        _require_query(request, set())
-        owner = (await run_in_threadpool(_trusted_learner, request, settings)).learner_id
-        key = _idempotency_key(request)
+        request_context.require_query(request, set())
+        owner = (
+            await run_in_threadpool(request_context.trusted_learner, request, settings)
+        ).learner_id
+        key = request_context.idempotency_key(request)
         names = request.headers.getlist("x-material-name")
         if len(names) != 1 or len(names[0]) > 2400:
-            raise _ApiFailure("REQUEST_INVALID")
+            raise request_context.ApiFailure("REQUEST_INVALID")
         try:
             name = unquote(names[0], encoding="utf-8", errors="strict")
         except UnicodeError:
-            raise _ApiFailure("REQUEST_INVALID") from None
+            raise request_context.ApiFailure("REQUEST_INVALID") from None
         data = bytearray()
         async for chunk in request.stream():
             if len(data) + len(chunk) > settings.upload_max_bytes:
-                raise _ApiFailure("MATERIAL_TOO_LARGE")
+                raise request_context.ApiFailure("MATERIAL_TOO_LARGE")
             data.extend(chunk)
-        await run_in_threadpool(
-            upload_source, owner, material_id, bytes(data), name,
-            request.headers.get("content-type"), key, dsn=settings.dsn,
+        media = request.headers.get("content-type")
+        if media == YOUTUBE_MIME:
+            raise request_context.ApiFailure("UNSUPPORTED_MEDIA_TYPE")
+        store = (
+            store_upload_bytes
+            if media in (*AUDIO_MIME.values(), *VIDEO_MIME.values())
+            else upload_source
         )
-        return await run_in_threadpool(source_listing, owner, material_id)
+
+        def save():
+            arguments = (owner, material_id, bytes(data), name, media, key)
+            # 短交易內驗證教材、辨識重送、核對並保留額度；本請求是該意圖唯一的寫入者，
+            # 落盤在帳號鎖外，寫入來源的同一交易刪除保留。
+            reservation = accept_upload(
+                "sources", owner, material_id, key, len(data),
+                upload_intent("sources", name, media, len(data), hashlib.sha256(data).hexdigest()),
+                dsn=settings.dsn,
+            )
+            try:
+                return store(*arguments, dsn=settings.dsn, upload_lease=reservation)
+            except Exception:
+                if reservation is not None:
+                    release_upload(reservation, dsn=settings.dsn)
+                raise
+
+        await run_in_threadpool(save)
+        return await run_in_threadpool(read_sources, owner, material_id, dsn=settings.dsn)
+
+    @app.post(
+        "/v1/materials/{material_id}/source-parts",
+        status_code=202,
+        response_model=SourceUploadProgress,
+    )
+    async def upload_material_source_part(request: Request, material_id: UUID):
+        """超過單次請求上限的檔案依序分段上傳；最後一段收齊後才建立來源。"""
+        request_context.require_query(request, set())
+        owner = (
+            await run_in_threadpool(request_context.trusted_learner, request, settings)
+        ).learner_id
+        key = request_context.idempotency_key(request)
+        names = request.headers.getlist("x-material-name")
+        offsets = request.headers.getlist("x-upload-offset")
+        totals = request.headers.getlist("x-upload-total")
+        if (
+            len(names) != 1
+            or len(names[0]) > 2400
+            or len(offsets) != 1
+            or len(totals) != 1
+            or not offsets[0].isdigit()
+            or not totals[0].isdigit()
+            or len(offsets[0]) > 12
+            or len(totals[0]) > 12
+        ):
+            raise request_context.ApiFailure("REQUEST_INVALID")
+        try:
+            name = unquote(names[0], encoding="utf-8", errors="strict")
+        except UnicodeError:
+            raise request_context.ApiFailure("REQUEST_INVALID") from None
+        media = request.headers.get("content-type")
+        data = bytearray()
+        async for chunk in request.stream():
+            if len(data) + len(chunk) > settings.upload_max_bytes:
+                raise request_context.ApiFailure("MATERIAL_TOO_LARGE")
+            data.extend(chunk)
+        progress = await run_in_threadpool(
+            receive_chunk,
+            owner,
+            material_id,
+            key,
+            name,
+            media,
+            int(totals[0]),
+            int(offsets[0]),
+            bytes(data),
+            dsn=settings.dsn,
+        )
+        return SourceUploadProgress(**progress)
+
+    @app.post(
+        "/v1/materials/{material_id}/youtube-sources",
+        status_code=202,
+        response_model=SourceListView,
+    )
+    def add_material_youtube_source(
+        request: Request, material_id: UUID, body: YoutubeSourceCreate
+    ):
+        """只核對影片可用性與限制；字幕或語音辨識在背景轉換工作中進行。"""
+        request_context.require_query(request, set())
+        owner = request_context.trusted_learner(request, settings).learner_id
+        if not media_available():
+            raise request_context.ApiFailure("NORMALIZER_UNAVAILABLE")
+        key = request_context.idempotency_key(request)
+        # 參照本身很小：重送直接交給冪等判斷，新增則在空間已滿時拒絕，不另保留。
+        accept_reference(owner, material_id, key, dsn=settings.dsn)
+        add_youtube_source(owner, material_id, body.url, key, dsn=settings.dsn)
+        return read_sources(owner, material_id, dsn=settings.dsn)
+
+    @app.get(
+        "/v1/materials/{material_id}/sources/{normalization_id}/transcript",
+        response_model=SourceTranscriptView,
+    )
+    def get_source_transcript(request: Request, material_id: UUID, normalization_id: UUID):
+        from ..source_transcript import read_transcript
+
+        request_context.require_query(request, set())
+        owner = request_context.trusted_learner(request, settings).learner_id
+        return read_transcript(owner, material_id, normalization_id, dsn=settings.dsn)
 
     @app.get("/v1/materials/{material_id}/sources", response_model=SourceListView)
     def get_material_sources(request: Request, material_id: UUID):
-        _require_query(request, set())
-        owner = _trusted_learner(request, settings).learner_id
-        return source_listing(owner, material_id)
+        request_context.require_query(request, set())
+        owner = request_context.trusted_learner(request, settings).learner_id
+        return read_sources(owner, material_id, dsn=settings.dsn)
 
     @app.post(
         "/v1/materials/{material_id}/sources/{normalization_id}/retry",
         response_model=SourceListView,
-        dependencies=[Depends(_require_empty_body)],
+        dependencies=[Depends(request_context.require_empty_body)],
     )
     def retry_material_source(
         request: Request, material_id: UUID, normalization_id: UUID
     ):
-        _require_query(request, set())
-        owner = _trusted_learner(request, settings).learner_id
+        request_context.require_query(request, set())
+        owner = request_context.trusted_learner(request, settings).learner_id
         retry_normalization(owner, material_id, normalization_id, dsn=settings.dsn)
-        return source_listing(owner, material_id)
+        return read_sources(owner, material_id, dsn=settings.dsn)
 
     @app.post(
-        "/v1/materials/{material_id}/revisions", status_code=202,
+        "/v1/materials/{material_id}/revisions",
+        status_code=202,
         response_model=MaterialProcessingRunView,
     )
     def create_material_revision(
         request: Request, material_id: UUID, body: RevisionCreate
     ):
-        _require_query(request, set())
-        owner = _trusted_learner(request, settings).learner_id
-        return project_material_run(create_revision(
-            owner, material_id, body.normalization_ids, _idempotency_key(request),
-            deepcopy(settings.local_config), base_revision=body.base_revision,
-            dsn=settings.dsn,
-        ))
+        request_context.require_query(request, set())
+        owner = request_context.trusted_learner(request, settings).learner_id
+        return project_material_run(
+            create_revision(
+                owner,
+                material_id,
+                body.normalization_ids,
+                request_context.idempotency_key(request),
+                deepcopy(settings.local_config),
+                base_revision=body.base_revision,
+                dsn=settings.dsn,
+            )
+        )
 
     @app.post(
         "/v1/material-processing-runs/{run_id}/cancel",
         response_model=MaterialProcessingRunView,
     )
-    def cancel_material_revision(
-        request: Request, run_id: UUID, body: RevisionCancel
-    ):
+    def cancel_material_revision(request: Request, run_id: UUID, body: RevisionCancel):
         from ..material_processing import request_material_processing_cancellation
 
-        _require_query(request, set())
-        owner = _trusted_learner(request, settings).learner_id
+        request_context.require_query(request, set())
+        owner = request_context.trusted_learner(request, settings).learner_id
         run = read_material_processing_run(owner, run_id, dsn=settings.dsn)
         if run.base_revision != body.base_revision:
-            raise _ApiFailure("REQUEST_INVALID")
-        return project_material_run(request_material_processing_cancellation(
-            owner, run_id, update_only=True, dsn=settings.dsn,
-        ))
+            raise request_context.ApiFailure("REQUEST_INVALID")
+        return project_material_run(
+            request_material_processing_cancellation(
+                owner,
+                run_id,
+                update_only=True,
+                dsn=settings.dsn,
+            )
+        )
 
-    @app.post("/v1/materials/{material_id}/review", status_code=202, response_model=MaterialProcessingRunView)
-    def review_material_revision(request: Request, material_id: UUID, body: MaterialReviewCreate):
-        _require_query(request, set())
-        owner = _trusted_learner(request, settings).learner_id
-        return project_material_run(create_revision(
-            owner, material_id, [], _idempotency_key(request),
-            deepcopy(settings.local_config), base_revision=body.base_revision,
-            dsn=settings.dsn,
-        ))
+    @app.get(
+        "/v1/materials/{material_id}/version-move",
+        response_model=VersionMovePreviewView,
+        response_model_by_alias=True,
+        operation_id="previewVersionMove",
+        tags=["materials"],
+    )
+    def preview_version_move_route(request: Request, material_id: UUID):
+        from ..version_moves import preview_version_move
+
+        request_context.require_query(request, set())
+        learner = request_context.trusted_learner(request, settings)
+        return preview_version_move(learner, material_id, dsn=settings.dsn)
+
+    @app.put("/v1/materials/{material_id}/version-move/notice", response_model=VersionMoveNotice)
+    def version_move_notice(request: Request, material_id: UUID, body: VersionMoveNotice):
+        from ..version_moves import set_notice
+        request_context.require_query(request, set())
+        return set_notice(request_context.trusted_learner(request, settings), material_id, body.dismissed, dsn=settings.dsn)
+
+    @app.post("/v1/materials/{material_id}/version-move/return", response_model=VersionMoveReturnView)
+    def version_move_return(request: Request, material_id: UUID, body: VersionMoveReturn):
+        from ..version_moves import return_previous
+        request_context.require_query(request, set())
+        return return_previous(request_context.trusted_learner(request, settings), material_id, body.expected_move_id, dsn=settings.dsn)
 
     @app.post(
-        "/v1/material-processing-runs/{run_id}/retry", status_code=202,
+        "/v1/materials/{material_id}/version-move",
+        response_model=VersionMoveView,
+        response_model_by_alias=True,
+        operation_id="executeVersionMove",
+        tags=["materials"],
+    )
+    def execute_version_move_route(
+        request: Request, material_id: UUID, body: VersionMoveCreate
+    ):
+        from ..version_moves import execute_version_move
+
+        request_context.require_query(request, set())
+        learner = request_context.trusted_learner(request, settings)
+        return execute_version_move(
+            learner,
+            material_id,
+            body.to_revision,
+            body.card_set_ids,
+            body.include_study,
+            body.preview_digest,
+            request_context.idempotency_key(request),
+            dsn=settings.dsn,
+        )
+
+    @app.post(
+        "/v1/material-processing-runs/{run_id}/retry",
+        status_code=202,
         response_model=MaterialProcessingRunView,
-        dependencies=[Depends(_require_empty_body)],
+        dependencies=[Depends(request_context.require_empty_body)],
     )
     def retry_material_revision(request: Request, run_id: UUID):
         from ..source_revisions import retry_revision
 
-        _require_query(request, set())
-        owner = _trusted_learner(request, settings).learner_id
-        return project_material_run(retry_revision(
-            owner, run_id, _idempotency_key(request),
-            deepcopy(settings.local_config), dsn=settings.dsn,
-        ))
+        request_context.require_query(request, set())
+        owner = request_context.trusted_learner(request, settings).learner_id
+        return project_material_run(
+            retry_revision(
+                owner,
+                run_id,
+                request_context.idempotency_key(request),
+                deepcopy(settings.local_config),
+                dsn=settings.dsn,
+            )
+        )
 
     @app.delete(
         "/v1/materials/{material_id}/sources/{source_id}",
         response_model=SourceListView,
-        dependencies=[Depends(_require_empty_body)],
+        dependencies=[Depends(request_context.require_empty_body)],
     )
-    def remove_material_source(
-        request: Request, material_id: UUID, source_id: UUID
-    ):
-        _require_query(request, set())
-        owner = _trusted_learner(request, settings).learner_id
+    def remove_material_source(request: Request, material_id: UUID, source_id: UUID):
+        request_context.require_query(request, set())
+        owner = request_context.trusted_learner(request, settings).learner_id
         remove_staged_source(owner, material_id, source_id, dsn=settings.dsn)
-        return source_listing(owner, material_id)
+        return read_sources(owner, material_id, dsn=settings.dsn)
 
     @app.get(
         "/v1/materials/{material_id}/knowledge-structures/{revision}/evidence/{evidence_id}/source",
@@ -758,38 +1316,53 @@ def create_app(settings: ApiSettings) -> FastAPI:
     def evidence_source(
         request: Request, material_id: UUID, revision: str, evidence_id: str
     ):
-        _require_query(request, set())
-        owner = _trusted_learner(request, settings).learner_id
+        request_context.require_query(request, set())
+        owner = request_context.trusted_learner(request, settings).learner_id
         return resolve_evidence_source(
-            owner, material_id, revision, evidence_id, dsn=settings.dsn,
+            owner,
+            material_id,
+            revision,
+            evidence_id,
+            dsn=settings.dsn,
         )
 
     @app.get("/v1/artifacts/{artifact_id}/download", response_class=StreamingResponse)
     def original_artifact(request: Request, artifact_id: UUID):
-        _require_query(request, set())
-        owner = _trusted_learner(request, settings).learner_id
+        request_context.require_query(request, set())
+        owner = request_context.trusted_learner(request, settings).learner_id
         with database_session(settings.dsn) as session:
             artifact = session.get(Artifact, artifact_id)
-            if artifact is None or artifact.learner_id != owner or artifact.kind != "original":
-                raise _ApiFailure("RESOURCE_NOT_FOUND")
+            if (
+                artifact is None
+                or artifact.learner_id != owner
+                or artifact.kind != "original"
+            ):
+                raise request_context.ApiFailure("RESOURCE_NOT_FOUND")
             media = artifact.media_type
-            original_name = session.scalar(select(MaterialSource.original_name).where(
-                MaterialSource.learner_id == owner,
-                MaterialSource.original_artifact_id == artifact_id,
-            ))
+            original_name = session.scalar(
+                select(MaterialSource.original_name).where(
+                    MaterialSource.learner_id == owner,
+                    MaterialSource.original_artifact_id == artifact_id,
+                )
+            )
         context = open_verified_artifact(owner, artifact_id, dsn=settings.dsn)
         try:
             source = context.__enter__()
         except Exception:
-            raise _ApiFailure("RESOURCE_NOT_FOUND") from None
-        extension = next((ext for ext, mime in MIME.items() if mime == media), ".bin")
+            raise request_context.ApiFailure("RESOURCE_NOT_FOUND") from None
+        known = {**MIME, ".zip": IMAGE_SET_MIME, **AUDIO_MIME, ".youtube": YOUTUBE_MIME}
+        extension = next((ext for ext, mime in known.items() if mime == media), ".bin")
         download_name = original_name or ("material" + extension)
+        if media == AUDIO_MIME[".m4a"] and download_name.lower().endswith(".mp4"):
+            # 影片只保存抽出的音軌，下載檔名改為音訊副檔名。
+            download_name = download_name[:-4] + ".m4a"
         disposition = (
             f'attachment; filename="material{extension}"; '
             f"filename*=UTF-8''{quote(download_name, safe='')}"
         )
         return StreamingResponse(
-            _verified_source_iterator(context, source), media_type=media,
+            _verified_source_iterator(context, source),
+            media_type=media,
             headers={
                 "Content-Disposition": disposition,
                 "X-Content-Type-Options": "nosniff",
@@ -797,18 +1370,50 @@ def create_app(settings: ApiSettings) -> FastAPI:
             },
         )
 
+    @app.get("/v1/artifacts/{artifact_id}/media", response_class=StreamingResponse)
+    def original_media(request: Request, artifact_id: UUID):
+        """來源回查從指定時間播放原音訊（影片為抽出的音軌），支援 Range。"""
+        request_context.require_query(request, set())
+        owner = request_context.trusted_learner(request, settings).learner_id
+        with database_session(settings.dsn) as session:
+            artifact = session.get(Artifact, artifact_id)
+            if (
+                artifact is None
+                or artifact.learner_id != owner
+                or artifact.kind != "original"
+                or artifact.media_type not in AUDIO_MIME.values()
+            ):
+                raise request_context.ApiFailure("RESOURCE_NOT_FOUND")
+            media = artifact.media_type
+        try:
+            return artifact_response(
+                request,
+                open_verified_artifact(
+                    owner, artifact_id, dsn=settings.dsn, stream=True
+                ),
+                media,
+            )
+        except Exception:
+            raise request_context.ApiFailure("RESOURCE_NOT_FOUND") from None
 
     @app.delete(
-        "/v1/materials/{material_id}", status_code=202,
-        response_model=MaterialDiscardView, response_model_by_alias=True,
-        operation_id="discardMaterial", tags=["materials"],
-        dependencies=[Depends(_require_empty_body)],
+        "/v1/materials/{material_id}",
+        status_code=202,
+        response_model=MaterialDiscardView,
+        response_model_by_alias=True,
+        operation_id="discardMaterial",
+        tags=["materials"],
+        dependencies=[Depends(request_context.require_empty_body)],
     )
-    def discard_material_route(request: Request, material_id: UUID) -> MaterialDiscardView:
-        _require_query(request, set())
-        learner = _trusted_learner(request, settings)
+    def discard_material_route(
+        request: Request, material_id: UUID
+    ) -> MaterialDiscardView:
+        request_context.require_query(request, set())
+        learner = request_context.trusted_learner(request, settings)
         state = request_material_discard(
-            learner.learner_id, material_id, dsn=settings.dsn,
+            learner.learner_id,
+            material_id,
+            dsn=settings.dsn,
         )
         return MaterialDiscardView(material_id=material_id, state=state)
 
@@ -819,282 +1424,65 @@ def create_app(settings: ApiSettings) -> FastAPI:
         operation_id="getMaterialProcessingRun",
         tags=["material-processing"],
     )
-    def read_material_run_route(request: Request, run_id: UUID) -> MaterialProcessingRunView:
-        _require_query(request, set())
-        learner = _trusted_learner(request, settings)
-        return project_material_run(read_material_processing_run(
-            learner.learner_id, run_id, dsn=settings.dsn,
-        ))
-
-    @app.get(
-        "/v1/materials/{material_id}/knowledge-structures/{structure_revision}",
-        response_model=KnowledgeStructureView,
-        response_model_by_alias=True,
-        operation_id="getKnowledgeStructure",
-        tags=["review"],
-    )
-    def read_map_route(
-        request: Request, material_id: UUID, structure_revision: str
-    ) -> KnowledgeStructureView:
-        _require_query(request, set())
-        learner = _trusted_learner(request, settings)
-        stored = read_knowledge_structure(
-            learner.learner_id, material_id, revision=structure_revision, dsn=settings.dsn
-        )
-        return project_knowledge_structure(stored.view)
-
-    @app.get(
-        "/v1/materials/{material_id}/knowledge-structures/{structure_revision}"
-        "/study-sessions/{study_session_id}/resume",
-        response_model=StudyResumeView, operation_id="resumeStudySession", tags=["learning"],
-    )
-    def resume_study_route(
-        request: Request, material_id: UUID, structure_revision: str, study_session_id: UUID,
-        run_id: UUID,
-        set_id: UUID | None = None,
-    ) -> StudyResumeView:
-        _require_query(request, {"run_id", "set_id"})
-        learner = _trusted_learner(request, settings)
-        with progress_snapshot(
-            learner, study_session_id, dsn=settings.dsn
-        ) as (db, study, document, progress):
-            if (
-                study.material_id != material_id
-                or study.knowledge_structure_revision != structure_revision
-                or document['run_id'] != str(run_id)
-            ):
-                raise _ApiFailure('RESOURCE_NOT_FOUND')
-            from ..storage.knowledge_structures import _view
-            run = read_material_processing_run(learner.learner_id, run_id, dsn=settings.dsn)
-            rounds = assessment_sets._list_sets(db, study)
-            selected_set = (
-                str(set_id) if set_id is not None
-                else next(
-                    (
-                        group['set_id'] for group in rounds['sets']
-                        if group['target_concept_id'] == study.current_concept_id
-                    ),
-                    None,
-                )
-            )
-            if selected_set is not None and selected_set not in {group['set_id'] for group in rounds['sets']}:
-                raise _ApiFailure('RESOURCE_NOT_FOUND')
-            return StudyResumeView(
-                session=project_study_session(study),
-                run_id=run_id,
-                source_artifact_id=run.source_artifact_id,
-                knowledge_structure=project_knowledge_structure(_view(document, material_id)),
-                progress=project_learner_progress(progress),
-                assessment_sets=rounds['sets'],
-                selected_set_id=selected_set,
-            )
-
-    @app.post(
-        "/v1/study-sessions",
-        response_model=StudySessionView,
-        response_model_by_alias=True,
-        status_code=201,
-        operation_id="createStudySession",
-        tags=["learning"],
-    )
-    def create_study_session_route(
-        request: Request, body: StudySessionCreate
-    ) -> StudySessionView:
-        _require_query(request, set())
-        learner = _trusted_learner(request, settings)
-        stored = create_study_session(
-            learner,
-            body.material_id,
-            body.knowledge_structure_revision,
-            _idempotency_key(request),
-            current_concept_id=body.current_concept_id,
-            dsn=settings.dsn,
-        )
-        return project_study_session(stored)
-
-    @app.post(
-        "/v1/study-sessions/{study_session_id}/focus",
-        response_model=StudySessionView, response_model_by_alias=True,
-        operation_id="focusStudySession", tags=["learning"],
-    )
-    def focus_study_session_route(
-        request: Request, study_session_id: UUID, body: StudySessionFocus
-    ) -> StudySessionView:
-        _require_query(request, set())
-        learner = _trusted_learner(request, settings)
-        return project_study_session(set_current_study_concept(
-            learner, study_session_id, body.current_concept_id, dsn=settings.dsn,
-        ))
-
-    def read_set_view(learner: TrustedLearner, study_session_id: UUID, set_id: UUID):
-        return AssessmentSetView.model_validate(assessment_sets.read_set(
-            learner, study_session_id, set_id, dsn=settings.dsn,
-        ))
-
-    @app.get(
-        '/v1/study-sessions/{study_session_id}/assessment-plan',
-        response_model=AssessmentPlanView,
-        operation_id='getAssessmentPlan', tags=['learning'],
-    )
-    def get_assessment_plan(request: Request, study_session_id: UUID, concept_id: str):
-        _require_query(request, {'concept_id'})
-        return AssessmentPlanView.model_validate(assessment_sets.read_plan(
-            _trusted_learner(request, settings), study_session_id, concept_id,
-            dsn=settings.dsn,
-        ))
-
-    @app.get(
-        '/v1/study-sessions/{study_session_id}/assessment-sets',
-        response_model=AssessmentSetListView,
-        operation_id='listAssessmentSets', tags=['learning'],
-    )
-    def list_assessment_sets(request: Request, study_session_id: UUID):
-        _require_query(request, set())
-        return AssessmentSetListView.model_validate(assessment_sets.list_sets(
-            _trusted_learner(request, settings), study_session_id, dsn=settings.dsn,
-        ))
-
-    @app.post(
-        '/v1/study-sessions/{study_session_id}/assessment-sets',
-        response_model=AssessmentSetView, status_code=202,
-        operation_id='createAssessmentSet', tags=['learning'],
-    )
-    def create_assessment_set(request: Request, study_session_id: UUID, body: AssessmentSetCreate):
-        _require_query(request, set())
-        learner = _trusted_learner(request, settings)
-        set_id = assessment_sets.create_set(
-            learner, study_session_id, body.target_concept_id,
-            _idempotency_key(request), deepcopy(settings.local_config), dsn=settings.dsn,
-        )
-        return read_set_view(learner, study_session_id, set_id)
-
-    @app.get(
-        '/v1/study-sessions/{study_session_id}/assessment-sets/{set_id}',
-        response_model=AssessmentSetView,
-        operation_id='getAssessmentSet', tags=['learning'],
-    )
-    def get_assessment_set(request: Request, study_session_id: UUID, set_id: UUID):
-        _require_query(request, set())
-        return read_set_view(_trusted_learner(request, settings), study_session_id, set_id)
-
-    @app.post(
-        '/v1/study-sessions/{study_session_id}/assessment-sets/{set_id}/submissions',
-        response_model=AssessmentSetView,
-        operation_id='submitAssessmentSet', tags=['learning'],
-    )
-    def submit_assessment_set(
-        request: Request, study_session_id: UUID, set_id: UUID,
-        body: AssessmentSetSubmission,
-    ):
-        _require_query(request, set())
-        learner = _trusted_learner(request, settings)
-        assessment_sets.submit_set_answers(
-            learner, study_session_id, set_id,
-            [answer.model_dump() for answer in body.answers],
-            body.expected_set_version, _idempotency_key(request), dsn=settings.dsn,
-        )
-        return read_set_view(learner, study_session_id, set_id)
-
-    @app.post(
-        '/v1/study-sessions/{study_session_id}/assessment-sets/{set_id}/remediation',
-        response_model=AssessmentSetView, status_code=202,
-        operation_id='createRemediationSet', tags=['learning'],
-    )
-    def create_remediation_set(
-        request: Request, study_session_id: UUID, set_id: UUID, body: AssessmentSetAction
-    ):
-        _require_query(request, set())
-        learner = _trusted_learner(request, settings)
-        created = assessment_sets.create_remediation(
-            learner, study_session_id, set_id, body.expected_set_version,
-            _idempotency_key(request), deepcopy(settings.local_config), dsn=settings.dsn,
-        )
-        return read_set_view(learner, study_session_id, created)
-
-    def apply_set_action(request, study_session_id, set_id, body, action):
-        _require_query(request, set())
-        learner = _trusted_learner(request, settings)
-        assessment_sets.change_set(
-            learner, study_session_id, set_id, action, body.expected_set_version,
-            _idempotency_key(request), dsn=settings.dsn,
-        )
-        return read_set_view(learner, study_session_id, set_id)
-
-    @app.post(
-        '/v1/study-sessions/{study_session_id}/assessment-sets/{set_id}/retry',
-        response_model=AssessmentSetView,
-        operation_id='retryAssessmentSet', tags=['learning'],
-    )
-    def retry_assessment_set(
-        request: Request, study_session_id: UUID, set_id: UUID, body: AssessmentSetAction
-    ):
-        return apply_set_action(request, study_session_id, set_id, body, 'retry')
-
-    @app.post(
-        '/v1/study-sessions/{study_session_id}/assessment-sets/{set_id}/publish-partial',
-        response_model=AssessmentSetView,
-        operation_id='publishPartialAssessmentSet', tags=['learning'],
-    )
-    def publish_partial_assessment_set(
-        request: Request, study_session_id: UUID, set_id: UUID, body: AssessmentSetAction
-    ):
-        return apply_set_action(request, study_session_id, set_id, body, 'publish-partial')
-
-    @app.post(
-        '/v1/study-sessions/{study_session_id}/guidance/apply',
-        response_model=LearnerProgressView,
-        operation_id='applyGuidance', tags=['learning'],
-    )
-    def apply_guidance_route(request: Request, study_session_id: UUID, body: GuidanceApply):
-        _require_query(request, set())
-        return project_learner_progress(apply_guidance(
-            _trusted_learner(request, settings), study_session_id,
-            body.guidance_revision, dsn=settings.dsn,
-        ))
-
-    @app.get(
-        "/v1/study-sessions/{study_session_id}/progress",
-        response_model=LearnerProgressView,
-        response_model_by_alias=True,
-        operation_id="getLearnerProgress",
-        tags=["learning"],
-    )
-    def read_learner_progress_route(
-        request: Request, study_session_id: UUID
-    ) -> LearnerProgressView:
-        _require_query(request, set())
-        learner = _trusted_learner(request, settings)
-        return project_learner_progress(
-            derive_learner_progress(
-                learner, study_session_id, dsn=settings.dsn
+    def read_material_run_route(
+        request: Request, run_id: UUID
+    ) -> MaterialProcessingRunView:
+        request_context.require_query(request, set())
+        learner = request_context.trusted_learner(request, settings)
+        return project_material_run(
+            read_material_processing_run(
+                learner.learner_id,
+                run_id,
+                dsn=settings.dsn,
             )
         )
 
+    install_podcast_routes(app, settings)
+
+    install_card_routes(app, settings)
+
+    install_study_routes(app, settings)
 
     @app.get(
-        "/v1/artifacts/{artifact_id}", operation_id="getSourceArtifact",
-        tags=["artifacts"], response_class=StreamingResponse,
+        "/v1/artifacts/{artifact_id}",
+        operation_id="getSourceArtifact",
+        tags=["artifacts"],
+        response_class=StreamingResponse,
     )
     def read_artifact_route(request: Request, artifact_id: UUID) -> StreamingResponse:
-        _require_query(request, set())
-        learner = _trusted_learner(request, settings)
-        context = open_verified_source_pdf(learner.learner_id, artifact_id, dsn=settings.dsn)
+        request_context.require_query(request, set())
+        learner = request_context.trusted_learner(request, settings)
+        context = open_verified_artifact(
+            learner.learner_id, artifact_id, dsn=settings.dsn, kind="normalized_pdf"
+        )
         try:
             source = context.__enter__()
         except Exception:
-            raise _ApiFailure("RESOURCE_NOT_FOUND") from None
+            raise request_context.ApiFailure("RESOURCE_NOT_FOUND") from None
         return StreamingResponse(
             _verified_source_iterator(context, source),
             media_type="application/pdf",
-            headers={"Content-Length": str(source.size_bytes), "ETag": f'"sha256:{source.sha256}"'},
+            headers={
+                "Content-Length": str(source.size_bytes),
+                "ETag": f'"sha256:{source.sha256}"',
+            },
         )
 
+    install_scenes(app, settings)
+    install_videos(app, settings)
+    install_topics(app, settings)
+    install_notes(app, settings)
+    install_exports(app, settings)
+    install_research(app, settings)
+    install_voice(app, settings)
     _install_openapi(app)
     return app
 
 
 def canonical_openapi_bytes(app: FastAPI) -> bytes:
     return (
-        json.dumps(app.openapi(), ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+        json.dumps(
+            app.openapi(), ensure_ascii=False, sort_keys=True, separators=(",", ":")
+        )
         + "\n"
     ).encode("utf-8")

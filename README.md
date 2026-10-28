@@ -4,7 +4,7 @@
 
 **上傳教材 → 確認來源 → 分析與檢核 → 知識地圖 → 題組練習 → 錯題補強**
 
-支援 PDF、DOC／DOCX、PPT／PPTX、UTF-8 TXT 與 Markdown，可追加來源建立新版本，並承接符合條件的作答證據。
+支援 PDF、DOC／DOCX、PPT／PPTX、UTF-8 TXT、Markdown，以及影音與 YouTube 語音來源。可追加來源，建立知識地圖、題組、概念卡、筆記與 Podcast 講稿，並使用有引用的文字／語音輸入問答。可用格式與大小以介面讀取的來源能力為準。
 
 ## 部署與使用
 

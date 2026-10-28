@@ -9,10 +9,11 @@ from sqlalchemy import select
 
 import runtime.api.app as api
 from learning_adaptation import assessment_sets as sets
-from runtime.storage.tables import AssessmentSet, AssessmentSetItem, AnswerEvent, database_session
+from runtime.storage.tables import AssessmentSet, AssessmentSetItem, AnswerEvent
+from runtime.storage.database import database_session
 from browser_e2e_runner import PORT, local_api, main as run_browser
 from product_fixtures import closed_loop
-from assessment_fixtures import concept_fixture, model_for
+from assessment_fixtures import concept_fixture, model_for, other_model
 
 
 # API／DB 流程與 study-* mock 的版面測試分開執行。
@@ -44,6 +45,12 @@ def test_direct_remediation_resumes_after_lost_create_response_without_duplicate
                     round_by_set[work.set_id] = len(round_by_set) + 1
 
                 def model(client, **kwargs):
+                    request = kwargs["request"]
+                    # 「繼續下一個概念」直接建立 Other topic 的題組。
+                    if (request["claim"]["text"].startswith("Other topic") if kwargs["task"] == "assessment"
+                            else "other topic" in request["questions"][0]["prompt"]):
+                        calls.append(kwargs["task"])
+                        return other_model(client, **kwargs)
                     if kwargs["task"] == "assessment":
                         response = base_model(client, **kwargs)
                         for candidate in response["candidates"]:
@@ -102,13 +109,16 @@ def test_direct_remediation_resumes_after_lost_create_response_without_duplicate
 
     assert not thread.is_alive()
     assert errors == []
-    assert calls == ["assessment", "assessment_check"] * 6
+    assert calls == ["assessment", "assessment_check"] * 9
 
     with database_session(fixture["dsn"]) as session:
         groups = list(session.scalars(select(AssessmentSet).where(
             AssessmentSet.study_session_id == fixture["study"].study_session_id,
         )))
-        assert len(groups) == 3
+        following = [group for group in groups if group.target_concept_id != fixture["concept"]["concept_id"]]
+        assert [group.status for group in following] == ["ready"]
+        groups = [group for group in groups if group not in following]
+        assert len(groups) == 4
         assert all(group.status == "completed" for group in groups)
         root = next(group for group in groups if group.kind == "diagnostic")
         assert all(
@@ -119,5 +129,5 @@ def test_direct_remediation_resumes_after_lost_create_response_without_duplicate
         answers = list(session.scalars(select(AnswerEvent).where(
             AnswerEvent.study_session_id == fixture["study"].study_session_id,
         )))
-        assert len(answers) == 6
-        assert sum(answer.is_correct for answer in answers) == 3
+        assert len(answers) == 8
+        assert sum(answer.is_correct for answer in answers) == 5

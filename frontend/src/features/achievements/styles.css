@@ -1,0 +1,104 @@
+/* 成就頁：左欄等級與經驗值，右欄成就總覽；桌機頁面剛好填滿視窗，只有成就總覽在自己的區域內捲動。窄螢幕上下排列、整頁捲動。 */
+.achievements {
+  display: grid;
+  gap: 14px;
+}
+/* 標題說明與下方兩欄靠近一些；collection-head 是多頁共用，只在成就頁取消下緣。 */
+.achievements > .collection-head { margin-bottom: 0; }
+.achievements-layout {
+  display: grid;
+  grid-template-columns: minmax(340px, 420px) minmax(0, 1fr);
+  gap: 24px;
+  align-items: start;
+}
+.achievements-layout > .surface { padding: 20px 22px; }
+.achievements-layout h2 { margin: 0; font-size: 17px; }
+.level-xp { display: grid; align-content: start; gap: 4px; }
+.level-xp .level-next { margin-bottom: 8px; }
+
+/* 經驗值圖解：來源比例長條、各來源（精簡列） */
+.xp-rules {
+  display: grid;
+  gap: 14px;
+  padding-top: 16px;
+  border-top: 1px solid var(--border);
+}
+.xp-rules h3 { margin: 0; font-size: 15px; }
+.xp-rules .is-answers { --xp: var(--warning); --xp-soft: var(--warning-soft); }
+.xp-rules .is-concepts { --xp: var(--success); --xp-soft: var(--success-soft); }
+.xp-rules .is-cards { --xp: var(--violet); --xp-soft: var(--violet-soft); }
+.xp-rules .is-podcast { --xp: #1f9fd6; --xp-soft: #e2f5fd; }
+.xp-rules .is-goals { --xp: var(--studydy-blue); --xp-soft: var(--studydy-blue-soft); }
+.xp-rules .is-difficulties { --xp: var(--coral); --xp-soft: #ffe9e6; }
+.xp-mix p { margin: 0 0 6px; color: var(--text-secondary); font-size: 13px; font-weight: 700; }
+.xp-mix p b { color: var(--text-primary); font-size: 15px; }
+.xp-mix-bar {
+  display: flex;
+  height: 12px;
+  overflow: hidden;
+  border-radius: 999px;
+  background: var(--border);
+}
+.xp-mix-bar i { background: var(--xp); }
+.xp-mix-bar i + i { border-left: 2px solid #fff; }
+.xp-sources {
+  display: grid;
+  gap: 6px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+.xp-sources li {
+  display: grid;
+  grid-template-columns: 36px minmax(0, 1fr) auto auto;
+  align-items: center;
+  gap: 10px;
+  padding: 8px 10px;
+  border-radius: 14px;
+  background: var(--page-cool);
+}
+.xp-source-icon {
+  display: grid;
+  width: 36px;
+  height: 36px;
+  place-items: center;
+  border-radius: 11px;
+  background: var(--xp-soft);
+  color: var(--xp);
+}
+.xp-source-text { display: grid; min-width: 0; }
+.xp-source-title { font-size: 14px; }
+.xp-source-note { color: var(--text-muted); font-size: 11px; font-weight: 700; }
+.xp-gains { display: flex; gap: 8px; }
+.xp-gains > span { display: grid; justify-items: center; }
+.xp-gains strong { color: var(--xp); font-size: 19px; font-weight: 900; line-height: 1.1; }
+.xp-gains small { color: var(--text-muted); font-size: 10px; font-weight: 800; white-space: nowrap; }
+.xp-source-earned { display: grid; justify-items: end; min-width: 44px; }
+.xp-source-earned b { font-size: 15px; }
+.xp-source-earned small { color: var(--text-muted); font-size: 10px; font-weight: 800; }
+/* 頁首 70px＋內容區上緣 26px＋下緣 24px；左欄放不下時（矮螢幕）自己捲動。 */
+/* 保留 min-height: 640px：低於此高度兩欄各自捲動會太擠，改回整頁捲動；依內容高度決定。 */
+@media (min-width: 1025px) and (min-height: 640px) {
+  .app-shell.is-achievements .app-main { padding-bottom: 24px; }
+  .achievements {
+    height: calc(100dvh - 120px);
+    grid-template-rows: auto minmax(0, 1fr);
+  }
+  .achievements-layout { height: 100%; min-height: 0; align-items: stretch; }
+  .achievements-layout > .level-xp,
+  .achievements-layout > .badge-collection {
+    min-height: 0;
+    overflow-y: auto;
+    overscroll-behavior: contain;
+    /* 區塊高度固定時，內部各列維持內容高度、多出的部分捲動，不被壓縮而互相重疊。 */
+    grid-auto-rows: max-content;
+    align-content: start;
+  }
+}
+@media (max-width: 1024px) {
+  .achievements-layout { grid-template-columns: minmax(0, 1fr); }
+}
+@media (max-width: 480px) {
+  .xp-sources li { grid-template-columns: 36px minmax(0, 1fr) auto; }
+  .xp-source-earned { display: none; }
+}

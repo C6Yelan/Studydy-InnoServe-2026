@@ -68,7 +68,7 @@
   }
 }
 
-@media (max-width: 560px) {
+@media (max-width: 720px) {
   .state-view {
     padding-inline: var(--space-4);
   }
@@ -99,7 +99,7 @@
 .map-workspace .claim-text.is-code {
   padding: 12px;
   border: 1px solid var(--border);
-  border-radius: 8px;
+  border-radius: 12px;
   background: #f8fafc;
   font-family: ui-monospace, SFMono-Regular, Consolas, "Noto Sans TC", monospace;
   font-size: 14px;
@@ -136,10 +136,106 @@
   max-height: 85dvh;
   overflow: auto;
   padding: 24px;
-  border: 1px solid var(--border);
+  border: 0;
   border-radius: var(--radius-card);
   overflow-wrap: anywhere;
+  border-radius: var(--radius-card);
 }
 .source-dialog::backdrop {
   background: rgba(0, 0, 0, 0.35);
 }
+/* 音訊／影片來源：從該時間段開頭播放。 */
+.source-media { display: block; width: 100%; margin: 8px 0 12px; }
+.source-youtube { aspect-ratio: 16 / 9; height: auto; border: 0; border-radius: 12px; background: #000; }
+
+.quiet-loading { min-height:160px; padding:32px 24px; }
+.quiet-loading p { margin:0; font-size:14px; color:var(--text-secondary); }
+
+/* 共用插畫元件。 */
+.island-art { display: block; width: 100%; height: 100%; overflow: visible; }
+.progress-ring { position: relative; display: inline-grid; flex: none; place-items: center; }
+.progress-ring svg { position: absolute; inset: 0; }
+.progress-ring em { position: relative; font-size: 11px; font-style: normal; font-weight: 900; color: var(--text-primary); }
+.progress-ring em svg { position: static; color: var(--amber-deep); }
+
+/* 返回控制：所有頁面同一種外觀（白色膠囊、藍色箭頭與文字）。 */
+.back-link {
+  display: inline-flex;
+  align-self: flex-start;
+  align-items: center;
+  gap: 6px;
+  width: max-content;
+  max-width: 100%;
+  min-height: 38px;
+  margin: 0 0 var(--space-4);
+  padding: 0 16px 0 12px;
+  border: 0;
+  border-radius: 999px;
+  background: var(--surface);
+  box-shadow: var(--shadow);
+  color: var(--studydy-blue);
+  font: inherit;
+  font-size: 14px;
+  font-weight: 800;
+  text-decoration: none;
+  cursor: pointer;
+}
+.back-link:hover {
+  background: var(--studydy-blue-soft-2);
+  color: var(--studydy-blue-deep);
+}
+.back-link span {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* 共用空狀態：吉祥物插圖＋標題＋說明＋主要按鈕（清單頁與教材分頁同一種）。 */
+.empty-state {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  min-height: 0;
+  padding: var(--space-8) var(--space-6);
+  border-radius: var(--radius-card);
+  box-shadow: var(--shadow);
+  text-align: center;
+}
+.empty-state .library-empty-illustration {
+  width: 170px;
+  height: 160px;
+  margin-bottom: 8px;
+}
+.empty-state h2 {
+  margin: 4px 0 8px;
+  font-size: 22px;
+}
+.empty-state p {
+  max-width: 520px;
+  margin: 0 0 20px;
+  color: var(--text-secondary);
+}
+.empty-state-actions {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: center;
+  gap: var(--space-3);
+}
+
+/* 頁內區塊的讀取失敗（頁面已有 h1，所以用 h2，不用整頁 StateView）。 */
+.section-failure { padding: 20px 22px; }
+.section-failure h2 { margin: 0 0 6px; font-size: 17px; }
+.section-failure p { margin: 0; color: var(--text-secondary); }
+
+/* 原位置確認（InlineConfirm）：取代瀏覽器原生確認框。 */
+.inline-confirm { display:flex; flex-wrap:wrap; align-items:center; gap:8px 10px; width:100%; padding:10px 12px; border-radius:16px; background:var(--page-cool); }
+.inline-confirm > span { flex:1 1 12em; color:var(--text-primary); font-size:13px; font-weight:800; line-height:1.5; }
+.inline-confirm > span small { display:block; margin-top:2px; color:var(--text-secondary); font-size:12px; font-weight:600; }
+.inline-confirm > .form-error { flex-basis:100%; margin:0; }
+.inline-confirm-actions { display:flex; flex:none; gap:8px; margin-left:auto; }
+.inline-confirm-actions button { min-height:34px; padding:0 14px; font-size:13px; }
+.inline-confirm .cancel-confirm-button,
+.inline-confirm .cancel-confirm-button:hover:not(:disabled) { color:var(--error); border-color:var(--error); background:var(--error-soft); }
+/* 教材卡是直向排列：確認列和原本的按鈕列一樣貼在卡片底部，不撐高。 */
+.library-item > .inline-confirm { margin-top:auto; }
+.material-bookshelf .library-item > .inline-confirm { grid-column:1 / -1; }

@@ -6,14 +6,14 @@ from contextlib import contextmanager
 from pydantic import BaseModel, ConfigDict
 from sqlalchemy import select, text
 
-from pdf_evidence.ocr_page_evidence import canonical_sha256
+from content_identity import canonical_sha256
 from runtime.learner_session import TrustedLearner
-from runtime.storage.tables import Material, database_session
+from runtime.storage.tables import Material
+from runtime.storage.database import database_session
 
 from .answer_events import _read_events
 from .learning_states import ConceptLearningState, derive_learning_states
-from .map_context import ConceptContext, _context_from_validated_document
-from .study_sessions import StoredStudySession, _learner, _row, _stored, _validate_context
+from .study_sessions import StoredStudySession, _learner, _row, _stored, _validate_plan
 
 
 class LearnerProgressError(RuntimeError):
@@ -52,124 +52,96 @@ class LearnerProgressSnapshot(BaseModel):
     next_action: NextAction
     guidance_revision: str
     assessment_cycles: list[dict]
+    learning_path: list[str] = []
 
 
-def _concept(context, concept_id: str | None) -> ConceptContext | None:
-    return next((concept for concept in context.concepts if concept.concept_id == concept_id), None)
+def _concept(context, concept_id: str | None):
+    return next(
+        (
+            concept
+            for concept in context["concepts"]
+            if concept["concept_id"] == concept_id
+        ),
+        None,
+    )
 
 
-def _first_unmastered_claim(concept: ConceptContext, states: dict[str, ConceptLearningState]) -> str | None:
-    state = states[concept.concept_id]
+def _first_incomplete_claim(
+    concept: dict, states: dict[str, ConceptLearningState]
+) -> str | None:
+    state = states[concept["concept_id"]]
     weak = set(state.weak_claim_ids)
     uncovered = [
-        claim.claim_id for claim in concept.claims
-        if claim.claim_id not in state.covered_claim_ids
+        claim
+        for claim in concept["claim_ids"]
+        if claim in state.assessable_claim_ids and claim not in state.covered_claim_ids
     ]
     remaining = [
-        claim.claim_id for claim in concept.claims
-        if claim.claim_id not in state.mastered_claim_ids
+        claim
+        for claim in concept["claim_ids"]
+        if claim in state.assessable_claim_ids
+        and claim not in state.completed_claim_ids
     ]
-    return next(
-        (claim.claim_id for claim in concept.claims if claim.claim_id in weak), None
-    ) or (uncovered[0] if uncovered else remaining[0] if remaining else None)
+    return next((claim for claim in concept["claim_ids"] if claim in weak), None) or (
+        uncovered[0] if uncovered else remaining[0] if remaining else None
+    )
 
 
 def _next_action(
-    context, session: StoredStudySession, states: list[ConceptLearningState], cycles
+    context, session: StoredStudySession, states: list[ConceptLearningState], cycles, *, learning_path=None
 ) -> NextAction:
     by_id = {state.concept_id: state for state in states}
     current = _concept(context, session.current_concept_id)
-    deferred = set(session.deferred_concept_ids)
-    no_safe = set(session.no_safe_claim_ids)
-    if current is None:
-        target = next(
-            (item for item in context.initial_learning_path if by_id[item].status != "mastered"),
-            None,
-        )
-        return NextAction(
-            action="advance" if target else "complete",
-            target_concept_id=target,
-            target_claim_id=None,
-            prerequisite_concept_ids=[],
-            reason="initial_path" if target else "all_mastered",
-        )
-    cycle = next((item for item in cycles if item['concept_id'] == current.concept_id), None)
-    if cycle is not None:
-        if cycle['active_set_id']:
+    by_cycle = {cycle["concept_id"]: cycle for cycle in cycles}
+    path = context["initial_learning_path"] if learning_path is None else learning_path
+
+    def remaining(identity):
+        state = by_id[identity]
+        return state.status != "completed" and bool(state.assessable_claim_ids)
+
+    if current is not None:
+        state = by_id[current["concept_id"]]
+        cycle = by_cycle.get(current["concept_id"])
+        if cycle and cycle["active_set_id"]:
             return NextAction(
-                action='continue_set', target_concept_id=current.concept_id,
-                target_claim_id=None, prerequisite_concept_ids=[], reason='active_assessment_set',
+                action="continue_set",
+                target_concept_id=current["concept_id"],
+                target_claim_id=None,
+                prerequisite_concept_ids=[],
+                reason="active_assessment_set",
             )
-        if cycle['outcome'] == 'needs_review':
+        if remaining(current["concept_id"]):
+            unmet = [
+                identity
+                for identity in current["prerequisite_ids"]
+                if by_id[identity].status != "completed"
+            ]
+            remediation = bool(cycle and cycle["outcome"] == "needs_review")
             return NextAction(
-                action='remediate', target_concept_id=current.concept_id,
-                target_claim_id=None, prerequisite_concept_ids=[], reason='diagnostic_wrong_points',
+                action="remediate" if remediation else "assess",
+                target_concept_id=current["concept_id"],
+                target_claim_id=_first_incomplete_claim(current, by_id),
+                prerequisite_concept_ids=[] if remediation else unmet,
+                reason="incomplete_claims"
+                if remediation
+                else "canonical_prerequisite_gap"
+                if unmet
+                else "current_concept",
             )
-        if cycle['outcome'] in ('passed', 'incomplete'):
-            finished = {
-                item['concept_id'] for item in cycles
-                if item['outcome'] in ('passed', 'incomplete') and not item['active_set_id']
-            }
-            target = next(
-                (identity for identity in context.initial_learning_path if identity not in finished),
-                None,
-            )
-            return NextAction(
-                action='advance' if target else 'complete', target_concept_id=target,
-                target_claim_id=None, prerequisite_concept_ids=[], reason='round_finished',
-            )
-    state = by_id[current.concept_id]
-    target_claim = _first_unmastered_claim(current, by_id)
-    if target_claim in no_safe:
-        target = next(
-            (
-                item for item in context.initial_learning_path
-                if item != current.concept_id and item not in deferred
-                and by_id[item].status != "mastered"
-            ),
-            None,
-        )
-        return NextAction(
-            action="defer" if target else "no_safe", target_concept_id=target,
-            target_claim_id=target_claim, prerequisite_concept_ids=[], reason="no_safe_assessment",
-        )
-    if state.status != "mastered":
-        unmet = [
-            concept_id for concept_id in current.prerequisite_ids
-            if by_id[concept_id].status != "mastered"
-        ]
-        return NextAction(
-            action="assess", target_concept_id=current.concept_id,
-            target_claim_id=target_claim, prerequisite_concept_ids=unmet,
-            reason="canonical_prerequisite_gap" if unmet else "current_concept",
-        )
     target = next(
         (
-            item for item in context.initial_learning_path
-            if by_id[item].status != "mastered" and item not in deferred
+            identity
+            for identity in path
+            if remaining(identity)
         ),
         None,
     )
-    if target:
-        return NextAction(
-            action="advance", target_concept_id=target, target_claim_id=None,
-            prerequisite_concept_ids=[], reason="initial_path",
-        )
-    resumed = next(
-        (
-            item for item in context.initial_learning_path
-            if item in deferred and by_id[item].status != "mastered"
-        ),
-        None,
-    )
-    if resumed:
-        return NextAction(
-            action="resume", target_concept_id=resumed, target_claim_id=None,
-            prerequisite_concept_ids=[], reason="resume_deferred",
-        )
     return NextAction(
-        action="complete", target_concept_id=None, target_claim_id=None,
-        prerequisite_concept_ids=[], reason="all_mastered",
+        action="advance" if target else "complete",
+        target_concept_id=target,
+        target_claim_id=None,
+        prerequisite_concept_ids=[],
+        reason="initial_path" if target else "assessable_concepts_finished",
     )
 
 
@@ -183,11 +155,17 @@ def _snapshot(
         WeaknessFinding(
             concept_id=state.concept_id,
             claim_ids=state.weak_claim_ids,
-            reason="latest_answer_incorrect",
+            reason="remediation_incomplete"
+            if state.latest_is_correct
+            else "latest_answer_incorrect",
         )
-        for state in states if state.weak_claim_ids
+        for state in states
+        if state.weak_claim_ids
     ]
-    action = _next_action(context, session, list(states), cycles)
+    by_id = {state.concept_id: state for state in states}
+    path = [identity for identity in context["initial_learning_path"]
+            if by_id[identity].status != "completed" and by_id[identity].assessable_claim_ids]
+    action = _next_action(context, session, list(states), cycles, learning_path=path)
     identity = {
         "study_session_id": str(session.study_session_id),
         "knowledge_structure_revision": session.knowledge_structure_revision,
@@ -198,10 +176,11 @@ def _snapshot(
         "concept_states": [state.model_dump() for state in states],
         "next_action": action.model_dump(),
         "assessment_cycles": cycles,
-        "policy": "diagnostic-remediation/v1",
+        "policy": "claim-completion/v2",
+        "learning_path": path,
     }
     return LearnerProgressSnapshot(
-        schema_="learner-progress/v1",
+        schema_="learner-progress/v2",
         study_session_id=session.study_session_id,
         knowledge_structure_revision=session.knowledge_structure_revision,
         event_watermark=session.last_event_number,
@@ -212,56 +191,81 @@ def _snapshot(
         next_action=action,
         guidance_revision="learner-guidance:sha256:" + canonical_sha256(identity),
         assessment_cycles=cycles,
+        learning_path=path,
     )
 
 
 @contextmanager
 def progress_snapshot(learner: TrustedLearner, study_session_id: UUID, *, dsn=None):
     """同次讀取共用已驗證教材與一致 DB snapshot，不以重讀全部資料來偵測競態。"""
-    from runtime.storage.knowledge_structures import _read_verified_document
-    from .assessment_sets import _read_cycles
+    from runtime.storage.knowledge_reads import learning
+    from .assessment_state import _read_cycles, unavailable_claims, completed_concepts
     from .inherited_progress import inherited_progress
+
     with database_session(dsn) as db:
         try:
-            db.execute(text('SET TRANSACTION ISOLATION LEVEL REPEATABLE READ READ ONLY'))
-            row = _row(db, _learner(learner), study_session_id)
-            material = db.scalar(select(Material.material_id).where(
-                Material.learner_id == learner.learner_id,
-                Material.material_id == row.material_id,
-                Material.discard_requested_at.is_(None),
-            ))
-            if material is None:
-                raise LearnerProgressError('LEARNER_PROGRESS_UNAVAILABLE')
-            document = _read_verified_document(
-                db, learner.learner_id, row.material_id,
-                revision=row.knowledge_structure_revision,
+            db.execute(
+                text("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ READ ONLY")
             )
-            context = _context_from_validated_document(row.material_id, document)
-            _validate_context(row, context)
+            db.info["read_snapshot"] = {"documents": {}, "inherited": {}, "cycles": {}}
+            row = _row(db, _learner(learner), study_session_id)
+            material = db.execute(
+                select(Material.material_id).where(
+                    Material.learner_id == learner.learner_id,
+                    Material.material_id == row.material_id,
+                    Material.discard_requested_at.is_(None),
+                )
+            ).one_or_none()
+            if material is None:
+                raise LearnerProgressError("LEARNER_PROGRESS_UNAVAILABLE")
+            context = learning(
+                db,
+                learner.learner_id,
+                row.material_id,
+                row.knowledge_structure_revision,
+            )
+            _validate_plan(row, context)
             study = _stored(row)
             events = _read_events(db, row)
             if len(events) != study.last_event_number:
-                raise LearnerProgressError('LEARNER_PROGRESS_STALE')
-            cycles = _read_cycles(db, row)
-            inherited, inherited_cycles = inherited_progress(db, learner, study, document)
-            evidence = (
-                tuple(sorted(
-                    (*inherited, *events),
-                    key=lambda event: (event.created_at, str(event.answer_event_id)),
-                ))
-                if inherited else events
+                raise LearnerProgressError("LEARNER_PROGRESS_STALE")
+            inherited, inherited_cycles = inherited_progress(
+                db, learner, study.material_id, study.knowledge_structure_revision, context
             )
-            states = derive_learning_states(context, evidence)
-            current_cycles = {cycle['concept_id'] for cycle in cycles}
+            cycles = _read_cycles(db, row)
+            evidence = (
+                tuple(
+                    sorted(
+                        (*inherited, *events),
+                        key=lambda event: (
+                            event.created_at,
+                            str(event.answer_event_id),
+                        ),
+                    )
+                )
+                if inherited
+                else events
+            )
+            states = derive_learning_states(
+                context,
+                evidence,
+                unavailable_claim_ids=unavailable_claims(db, row, context),
+                completed_concept_ids=completed_concepts(db, row)
+                | {cycle["concept_id"] for cycle in inherited_cycles},
+            )
+            current_cycles = {cycle["concept_id"] for cycle in cycles}
             weak = {state.concept_id for state in states if state.weak_claim_ids}
-            cycles += [cycle for cycle in inherited_cycles
-                       if cycle['concept_id'] not in current_cycles | weak]
+            cycles += [
+                cycle
+                for cycle in inherited_cycles
+                if cycle["concept_id"] not in current_cycles | weak
+            ]
             snapshot = _snapshot(study, context, states, cycles)
         except LearnerProgressError:
             raise
         except Exception:
-            raise LearnerProgressError('LEARNER_PROGRESS_UNAVAILABLE') from None
-        yield db, study, document, snapshot
+            raise LearnerProgressError("LEARNER_PROGRESS_UNAVAILABLE") from None
+        yield db, study, context, snapshot
 
 
 def derive_learner_progress(
@@ -272,12 +276,16 @@ def derive_learner_progress(
 
 
 def apply_guidance(
-    learner: TrustedLearner, study_session_id: UUID, guidance_revision: str,
-    *, dsn: str | None = None,
+    learner: TrustedLearner,
+    study_session_id: UUID,
+    guidance_revision: str,
+    *,
+    dsn: str | None = None,
 ) -> LearnerProgressSnapshot:
     """只套用目前權威投影的 advance/complete；同 revision 重播不會多前進一步。"""
     from datetime import UTC, datetime
-    from .assessment_sets import _scope, has_active_set
+    from .assessment_state import _scope, has_active_set
+
     try:
         with database_session(dsn) as session:
             # 與題組建立／提交共用 Material → Study 鎖，阻止核對與套用之間插入作答。
@@ -286,28 +294,30 @@ def apply_guidance(
                 before = derive_learner_progress(learner, study_session_id, dsn=dsn)
                 action = before.next_action
                 if (
-                    stored.status not in ('active', 'no_safe')
+                    stored.status not in ("active", "no_safe")
                     or before.guidance_revision != guidance_revision
-                    or action.action not in ('advance', 'complete')
+                    or action.action not in ("advance", "complete")
                 ):
-                    raise LearnerProgressError('LEARNER_GUIDANCE_STALE')
+                    raise LearnerProgressError("LEARNER_GUIDANCE_STALE")
                 active_concept = (
-                    stored.current_concept_id if action.action == 'advance' else None
+                    stored.current_concept_id if action.action == "advance" else None
                 )
                 if has_active_set(session, study_session_id, active_concept):
-                    raise LearnerProgressError('ASSESSMENT_SET_ACTIVE')
-                if action.action == 'advance':
+                    raise LearnerProgressError("ASSESSMENT_SET_ACTIVE")
+                if action.action == "advance":
                     if action.target_concept_id is None:
-                        raise LearnerProgressError('LEARNER_GUIDANCE_STALE')
+                        raise LearnerProgressError("LEARNER_GUIDANCE_STALE")
                     stored.current_concept_id = action.target_concept_id
-                    stored.status = 'active'
+                    stored.status = "active"
                 else:
-                    stored.status = 'completed'
+                    stored.status = "completed"
                     stored.completed_at = datetime.now(UTC)
                 stored.last_applied_guidance_revision = guidance_revision
-                stored.last_applied_progress_sha256 = canonical_sha256(before.model_dump(mode='json'))
+                stored.last_applied_progress_sha256 = canonical_sha256(
+                    before.model_dump(mode="json")
+                )
     except LearnerProgressError:
         raise
     except Exception:
-        raise LearnerProgressError('LEARNER_PROGRESS_UNAVAILABLE') from None
+        raise LearnerProgressError("LEARNER_PROGRESS_UNAVAILABLE") from None
     return derive_learner_progress(learner, study_session_id, dsn=dsn)

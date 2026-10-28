@@ -15,9 +15,9 @@
   內部 artifact 上限不變；capabilities 失敗時不以寫死上限繼續上傳。
 - Nginx 限定正式與 localhost Host，清除未使用的 forwarded／Access 身分 headers，
   保留 exact Origin／Cookie；redirect 使用相對路徑。沒有新增 proxy trust chain。
-- native-text-only、branding、worker、runtime lock、migrations 與資料身分保持不變。
+- 使用新版持久工作、Gemma runtime lock 與 migration baseline；公開網域、UID、port 與資料位置保持競賽設定。
 
-公開部署已獲使用者批准，Access 非必要。啟動 connector 前必須完成本機 smoke，
+Access 非必要。每次切換須先完成本機驗收與部署核准；啟動 connector 前必須完成本機 smoke，
 使用 `docker compose -f compose.yaml -f compose.tunnel.yaml --profile tunnel up -d --no-deps cloudflared`。
 日後管理前後端也須保留兩個 Compose 檔；不要用 base-only 設定意外撤掉 HTTPS／edge。
 
@@ -26,9 +26,19 @@
 `STUDYDY_TEST_ENV_FILE`；Nginx test 指定兩個測試 image，僅使用測試 port 4183。
 資料測試使用 disposable DB；不得掛載產品資料或呼叫模型。
 
-切換前保存舊 image identity／私有設定，確認無 pending migration 與進行中工作，
-停止寫入後備份 DB 與 artifacts。只替換 frontend/backend；失敗先停止本版 connector，
-再以舊 images/config 恢復 localhost，不清 volume、不回寫 migration、不改主站。
+本版從 migration 0001 到最新序列使用獨立 baseline，只能套用到空的新資料庫，不能直接升級舊競賽資料庫。
+核准切換後，先保存舊 image identity、私有設定與 `pg_dump`，再將舊 `.studydy-product/compose/` 改名封存，另建新資料目錄。
+舊帳號不會自動轉入新資料庫。備份與舊目錄確認可回復後才開始新服務。
+回復時使用舊 images、設定與封存資料目錄；不把新 SQL 套到舊資料，也不清除 volume。
+
+語音辨識由本機獨立 `ops/podcast/provider.py` 提供 `/transcribe`、`/media-transcribe`、`/align`。
+以獨立 Python 環境安裝 `ops/podcast/stt-requirements.txt`，設定 `STUDYDY_STT_PYTHON`、`STUDYDY_STT_MODEL_DIR`、`STUDYDY_PODCAST_PROVIDER_TOKEN`；模型由本機目錄載入，不在請求時下載。
+服務預設 `127.0.0.1:18091`。容器使用主機服務時，須由部署者設定可達的監聽位址與存取邊界。
+短錄音與對齊使用 CPU；影音轉寫使用 GPU，部署前須與同機其他工作安排資源使用時段。
+SearXNG 由競賽 project 的 `research-search` 提供，不使用正式站的 provider 或搜尋服務。
+
+文字模型執行參數需符合 runtime lock，包含 `--max-model-len 65536`。
+Podcast 完成結果是可閱讀講稿；語音問答接受錄音，回答以文字與引用呈現。
 
 不需 AI 的驗證包含 auth、ownership、上傳、normalization／download、private no-store
 與公開 HTTPS。真 AI generation／retry／map generation 標記 DEFERRED_AI_VALIDATION。

@@ -11,9 +11,9 @@ async function login(page: Page, email: string) {
   await page.getByLabel("密碼", { exact: true }).fill("Synthetic test password 42");
   await page.getByRole("button", { name: "登入", exact: true }).click();
   await expect(
-    page.getByRole("heading", { name: "歡迎回來！", level: 1, exact: true }),
+    page.getByRole("heading", { name: "歡迎回來！今天想探索哪座島？", level: 1, exact: true }),
   ).toBeVisible();
-  await page.getByRole("button", { name: /^(教材庫|我的教材)$/, exact: true }).click();
+  await page.getByRole("link", { name: /^我的教材$/, exact: true }).click();
   await expect(page.getByRole("heading", { name: "我的教材", exact: true })).toBeVisible();
 }
 
@@ -26,11 +26,12 @@ test("fresh profiles reopen the current head and read exact historical versions"
   const first = page.getByRole("article", { name: "堆疊講義.pdf", exact: true });
   await expect(first).toContainText("知識地圖建立失敗");
   await expect(page.getByText("B 的私人教材.pdf", { exact: true })).toHaveCount(0);
-  await first.getByRole("button", { name: "開啟知識地圖", exact: true }).click();
+  await first.getByRole("link", { name: "開啟知識地圖", exact: true }).click();
   await expect(page.getByRole("button", { name: "教材概念：Stack", exact: true })).toBeVisible();
   const newerPath = new URL(page.url()).pathname;
   await page.reload();
   await expect(page.getByRole("button", { name: "教材概念：Stack", exact: true })).toBeVisible();
+  await page.goto("/materials");
   await page.getByRole("button", { name: "登出", exact: true }).click();
   await expect(page.getByRole("heading", { name: "登入您的帳戶" })).toBeVisible();
   await original.close();
@@ -39,17 +40,11 @@ test("fresh profiles reopen the current head and read exact historical versions"
   const fresh = await browser.newContext();
   const freshPage = await fresh.newPage();
   await login(freshPage, "learner_test@example.com");
-  // 只允許公開登入身分提示；教材定位、內容與憑證仍不得存入 localStorage。
-  expect(await freshPage.evaluate(() => Object.keys(localStorage))).toEqual([
-    "studydy.session-hint",
-  ]);
-  expect(
-    await freshPage.evaluate(() => JSON.parse(localStorage.getItem("studydy.session-hint")!)),
-  ).toEqual({
-    schema: "learner-identity/v1",
-    learner_id: expect.any(String),
-  });
-  await freshPage.getByRole("button", { name: "開啟知識地圖", exact: true }).click();
+  // 教材定位、內容與憑證不得存入 localStorage，只保留公開登入身分提示。
+  const hint = await freshPage.evaluate(() => JSON.parse(localStorage.getItem("studydy.session-hint")!));
+  expect(hint).toEqual({ schema: "learner-identity/v1", learner_id: expect.any(String) });
+  await expect.poll(() => freshPage.evaluate(() => Object.keys(localStorage).sort())).toEqual(["studydy.session-hint"]);
+  await freshPage.getByRole("link", { name: "開啟知識地圖", exact: true }).click();
   await expect(freshPage).toHaveURL(`${browserOrigin}${newerPath}`);
   await expect(
     freshPage.getByRole("button", { name: "教材概念：Stack", exact: true }),
@@ -86,7 +81,8 @@ test("fresh profiles reopen the current head and read exact historical versions"
     ).toBeVisible();
     await expect(freshPage).toHaveURL(`${browserOrigin}${headPath}`);
   }
-  await freshPage.getByRole("button", { name: /^(教材庫|我的教材)$/, exact: true }).click();
+  // 教材內由教材頁首的返回按鈕回到我的教材。
+  await freshPage.getByRole("button", { name: "回到我的教材", exact: true }).click();
   const pdfUrl = `/v1/artifacts/${material.source_artifact_id}`;
   const pdf = await fresh.request.get(`${browserOrigin}${pdfUrl}`);
   expect(pdf.status()).toBe(200);
@@ -94,12 +90,13 @@ test("fresh profiles reopen the current head and read exact historical versions"
   expect((await pdf.body()).subarray(0, 4).toString()).toBe("%PDF");
   await freshPage
     .getByRole("article", { name: "堆疊講義.pdf", exact: true })
-    .getByRole("button", { name: "開啟知識地圖", exact: true })
+    .getByRole("link", { name: "開啟知識地圖", exact: true })
     .click();
   await expect(freshPage).toHaveURL(`${browserOrigin}${newerPath}`);
   await expect(
     freshPage.getByRole("button", { name: "教材概念：Stack", exact: true }),
   ).toBeVisible();
+  await freshPage.goto("/materials");
   await freshPage.getByRole("button", { name: "登出", exact: true }).click();
   await expect(freshPage.getByRole("heading", { name: "登入您的帳戶" })).toBeVisible();
   await login(freshPage, "library_b@example.com");

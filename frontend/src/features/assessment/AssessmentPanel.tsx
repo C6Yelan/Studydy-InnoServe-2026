@@ -1,3 +1,4 @@
+import { MathText } from "../../ui/MathText";
 import { SourceButton, sourceLinks } from "../../ui/SourceButton";
 import type { StudydyApiClient } from "../../api/client";
 import type { AssessmentRecordView, KnowledgeStructureView } from "../../api/contracts";
@@ -14,7 +15,7 @@ export function AssessmentPanel({
   apiClient: StudydyApiClient;
   record: AssessmentRecordView;
   completed: boolean;
-  view: KnowledgeStructureView;
+  view: Pick<KnowledgeStructureView, "source_resolver" | "concepts">;
   answerSelection: {
     value: string | null;
     disabled: boolean;
@@ -25,7 +26,8 @@ export function AssessmentPanel({
   const feedback = record.feedback;
   const selection = answerSelection.value;
   const canAnswer = !completed && record.can_submit;
-  if (feedback) {
+  if (feedback && completed) {
+    const claim = view.concepts.flatMap(item => item.claims).find(item => item.claim_id === assessment.target_claim_id);
     const evidence = view.concepts
       .flatMap((item) => item.claims)
       .flatMap((claim) => claim.evidence)
@@ -40,30 +42,27 @@ export function AssessmentPanel({
           <span className="feedback-icon" aria-hidden="true">
             <Icon name={feedback.is_correct ? "check" : "warning"} size={24} />
           </span>
-          <div>
-            <p className="eyebrow">作答回饋</p>
-            <h2>{feedback.is_correct ? "答對了" : "這題需要再想一下"}</h2>
-          </div>
+          <h2>{feedback.is_correct ? "答對了" : "這題需要再想一下"}</h2>
         </header>
         <section className="feedback-section">
           <h3>題目</h3>
-          <p>{assessment.prompt}</p>
+          <p><MathText text={assessment.prompt}/></p>
         </section>
         <section className="feedback-section">
           <h3>你的答案</h3>
-          <p>
-            {
-              assessment.options.find((option) => option.option_id === feedback.selected_option_id)
-                ?.text
-            }
-          </p>
+          <p><MathText text={assessment.options.find(option => option.option_id === feedback.selected_option_id)?.text ?? ""}/></p>
         </section>
         <section className="feedback-section">
-          <h3>為什麼？</h3>
-          <p className="feedback-rationale">{feedback.rationale}</p>
+          <h3>正確答案</h3>
+          <p><MathText text={assessment.options.find(option => option.option_id === feedback.correct_option_id)?.text ?? "這份作答紀錄尚未提供正確答案。"}/></p>
+        </section>
+        <section className="feedback-section">
+          <h3>解析</h3>
+          <p className="feedback-rationale"><MathText text={feedback.rationale}/></p>
         </section>
         <div className="feedback-evidence">
-          <h3>教材依據</h3>
+          <h3>對應重點與原文來源</h3>
+          {claim && <p><MathText text={claim.text}/></p>}
           {evidenceLinks.map((item) => (
             <SourceButton
               apiClient={apiClient}
@@ -81,7 +80,7 @@ export function AssessmentPanel({
   return (
     <section className="assessment-card" aria-labelledby={questionId}>
       <p className="eyebrow">單選題</p>
-      <h2 id={questionId}>{assessment.prompt}</h2>
+      <h2 id={questionId}><MathText text={assessment.prompt}/></h2>
       <fieldset className="assessment-options" disabled={!canAnswer || answerSelection.disabled}>
         <legend className="sr-only">請選擇一個答案</legend>
         {assessment.options.map((option, index) => (
@@ -90,6 +89,7 @@ export function AssessmentPanel({
             key={option.option_id}
           >
             <input
+              className="question-option-input"
               type="radio"
               name={`assessment-option-${assessment.question_id}`}
               value={option.option_id}
@@ -97,7 +97,7 @@ export function AssessmentPanel({
               onChange={() => answerSelection.onChange(option.option_id)}
             />
             <span>{String.fromCharCode(65 + index)}</span>
-            <strong>{option.text}</strong>
+            <strong><MathText text={option.text}/></strong>
           </label>
         ))}
       </fieldset>

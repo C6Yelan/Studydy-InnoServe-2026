@@ -21,10 +21,11 @@ import runtime.storage.artifacts as artifacts
 import runtime.workers as workers
 from product_fixtures import _pdf, _structure, closed_loop, publish_fixture_structure, seed_pdf, seed_run
 from runtime.learner_session import register_account
-from runtime.source_normalization import SourceError
+from runtime.errors import SourceError
 from runtime.storage.knowledge_structures import KnowledgeStructureStoreError, read_knowledge_structure
 from runtime.storage.migrations import run_migrations
-from runtime.storage.tables import Material, MaterialProcessingRun as RunRow, database_session
+from runtime.storage.tables import Material, MaterialProcessingRun as RunRow
+from runtime.storage.database import database_session
 
 ORIGIN = "http://127.0.0.1:4173"
 
@@ -311,7 +312,7 @@ def test_storage_failures_reconcile_source_with_database(unused, monkeypatch, fa
     if failure == 'commit':
         assert_removed(unused)
     else:
-        with artifacts.open_verified_source_pdf(unused.learner.learner_id, unused.source.artifact_id, dsn=unused.dsn) as source:
+        with artifacts.open_verified_artifact(unused.learner.learner_id, unused.source.artifact_id, dsn=unused.dsn, kind="normalized_pdf") as source:
             assert source.file.read()
         assert not list((unused.root / '.trash').iterdir())
         assert request(unused) == 'removed'
@@ -326,22 +327,22 @@ def test_crash_quarantine_is_reconciled_after_restart(unused, monkeypatch, commi
     quarantined=[]
     with monkeypatch.context() as patch:
         if committed:
-            patch.setattr(discard, 'reconcile_discarded_sources', lambda **kw: (_ for _ in ()).throw(SimulatedProcessCrash()))
+            patch.setattr(discard, 'reconcile_discarded_artifacts', lambda **kw: (_ for _ in ()).throw(SimulatedProcessCrash()))
         else:
-            original = discard.quarantine_source_pdf
+            original = discard.quarantine_artifact
             def crash(session, identity):
                 original(session, identity)
                 quarantined.append(identity)
                 raise SimulatedProcessCrash()
-            patch.setattr(discard, 'quarantine_source_pdf', crash)
+            patch.setattr(discard, 'quarantine_artifact', crash)
         with pytest.raises(SimulatedProcessCrash): request(unused)
     moved=unused.source.artifact_id if committed else quarantined[0]
     assert (unused.root / '.trash' / moved.hex).exists()
     assert not (unused.root / 'objects' / moved.hex).exists()
-    artifacts.reconcile_discarded_sources(dsn=unused.dsn)
+    artifacts.reconcile_discarded_artifacts(dsn=unused.dsn)
     if committed: assert_removed(unused)
     else:
-        with artifacts.open_verified_source_pdf(unused.learner.learner_id, unused.source.artifact_id, dsn=unused.dsn) as source: assert source.file.read()
+        with artifacts.open_verified_artifact(unused.learner.learner_id, unused.source.artifact_id, dsn=unused.dsn, kind="normalized_pdf") as source: assert source.file.read()
         discard.finish_material_discards(dsn=unused.dsn)
         assert_removed(unused)
 
@@ -411,7 +412,7 @@ def test_discard_api_filesystem_failure_is_safe_503_and_retryable(unused, monkey
         response = client.delete(f'/v1/materials/{unused.source.material_id}', headers={'Origin': ORIGIN})
     assert response.status_code == 503 and response.json()['reason_code'] == 'STORAGE_UNAVAILABLE'
     assert response.json()['retryable'] is True and 'private-file-details' not in response.text
-    with artifacts.open_verified_source_pdf(unused.learner.learner_id, unused.source.artifact_id, dsn=unused.dsn) as source: assert source.file.read()
+    with artifacts.open_verified_artifact(unused.learner.learner_id, unused.source.artifact_id, dsn=unused.dsn, kind="normalized_pdf") as source: assert source.file.read()
     assert client.delete(f'/v1/materials/{unused.source.material_id}', headers={'Origin': ORIGIN}).json()['state'] == 'removed'
     assert_removed(unused)
 

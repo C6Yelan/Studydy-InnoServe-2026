@@ -1,4 +1,5 @@
 """HTTPS 與上傳入口契約；只使用 fixture DB，不建立外部連線。"""
+from runtime.api import request_context
 from uuid import uuid4
 from types import SimpleNamespace
 
@@ -44,16 +45,19 @@ def test_https_cookie_origin_and_forged_identity(clean_database_dsn, tmp_path, m
 @pytest.mark.parametrize('limit', [1024, 90 * 1024 * 1024])
 def test_upload_limit_capability_stream_and_rejected_state(limit, tmp_path, monkeypatch):
     application = app(tmp_path, monkeypatch, limit=limit)
-    monkeypatch.setattr(api, '_trusted_learner', lambda *_: SimpleNamespace(learner_id=uuid4()))
+    monkeypatch.setattr(request_context, 'trusted_learner', lambda *_: SimpleNamespace(learner_id=uuid4()))
     monkeypatch.setattr(api, 'normalizer_available', lambda: False)
+    # 這裡只驗證單次請求大小與串流邊界；帳號空間另由 test_podcast_storage.py 以真 DB 驗證。
+    monkeypatch.setattr(api, 'accept_upload', lambda *_args, **_kwargs: None)
     accepted = []
     # Storage sentinel proves oversize is rejected before any source write.
     def store(*args, **kwargs):
         accepted.append(len(args[2]))
-        raise api._ApiFailure('STORAGE_UNAVAILABLE')
+        raise request_context.ApiFailure('STORAGE_UNAVAILABLE')
     monkeypatch.setattr(api, 'upload_source', store)
     client = TestClient(application, base_url=ORIGIN)
-    assert client.get('/v1/source-capabilities').json()['formats'][0]['max_bytes'] == limit
+    # 單次請求上限；較大的檔案改由分段上傳，總大小依各格式的 max_bytes。
+    assert client.get('/v1/source-capabilities').json()['max_request_bytes'] == limit
     for size in [limit - 1, limit, limit + 1]:
         def chunks():
             remaining = size

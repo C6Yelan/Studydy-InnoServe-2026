@@ -5,99 +5,49 @@ import {
   materialProgressStageLabel,
   materialCurrentStagePercent,
   materialOverallProgressPercent,
-  validateSourceFile,
+  materialFailureMessage,
 } from "./material-flow.ts";
+
+test("review failures explain the actual cause instead of a generic failure", () => {
+  assert.match(materialFailureMessage('REVIEW_METADATA_REASON_INVALID'), /非教學內容.*分類理由/);
+  assert.match(materialFailureMessage('REVIEW_ALIAS_EDIT_INVALID'), /別名.*大小寫/);
+  assert.match(materialFailureMessage('REVIEW_GROUPING_CYCLE'), /循環/);
+  assert.match(materialFailureMessage('REVIEW_RESPONSE_INVALID'), /回應格式/);
+  assert.match(materialFailureMessage('SEMANTIC_INPUT_TOO_LARGE'), /目前批次.*單次模型容量.*分批方式/);
+});
 
 test("material stages describe the current processing work", () => {
   assert.equal(materialProgressStageLabel("evidence"), "整理頁面與教材來源");
   assert.equal(materialProgressStageLabel("semantics"), "建立概念、關係與學習順序");
 });
 
-test("each source follows its advertised format and individual size limit", () => {
-  const formats = [
-    { extension: ".pdf", media_type: "application/pdf", max_bytes: 100 * 1024 * 1024 },
-    { extension: ".txt", media_type: "text/plain", max_bytes: 100 * 1024 * 1024 },
-  ];
-  const valid = { name: "教材.PDF", type: "application/pdf", size: formats[0].max_bytes };
-  assert.equal(validateSourceFile(valid, formats), null);
-  assert.equal(validateSourceFile({ name: "notes.txt", type: "", size: 12 }, formats), null);
-  assert.match(validateSourceFile({ ...valid, type: "text/plain" }, formats), /類型不一致/);
-  assert.match(validateSourceFile({ ...valid, name: "file.exe" }, formats), /不支援/);
-  assert.match(validateSourceFile({ ...valid, size: 0 }, formats), /空白/);
-  assert.match(
-    validateSourceFile({ ...valid, size: formats[0].max_bytes + 1 }, formats),
-    /100 MiB/,
-  );
-});
-
 function processing(stage, completed, total = 45, status = "running") {
   return { progress_stage: stage, completed_pages: completed, total_pages: total, status };
 }
 
-test("processing projections distinguish measured stage work from structural overall estimates", () => {
-  for (const [stage, completed, overall, current] of [
-    ["queued", 0, 0, null],
-    ["evidence", 0, 0, 0],
-    ["evidence", 3, 3, 7],
-    ["evidence", 45, 49, 100],
-    ["semantics", 0, 49, 0],
-    ["semantics", 20, 71, 44],
-    ["semantics", 45, 99, 100],
-    ["publishing", 45, 99, null],
-  ]) {
-    assert.equal(materialOverallProgressPercent(processing(stage, completed)), overall);
-    assert.equal(materialCurrentStagePercent(processing(stage, completed)), current);
-  }
-  for (const status of ["succeeded", "partial"]) {
-    assert.equal(materialOverallProgressPercent(processing("completed", 45, 45, status)), 100);
-    assert.equal(materialCurrentStagePercent(processing("completed", 45, 45, status)), 100);
-  }
-  assert.equal(materialProgressStageLabel("queued"), "等待處理資源");
-  assert.equal(materialProgressStageLabel("publishing"), "發布知識地圖");
-});
-
-test("progress handles unknown/invalid denominators and clamps without declaring early completion", () => {
-  assert.equal(materialOverallProgressPercent(processing("queued", 0, null, "pending")), 0);
-  for (const total of [null, 0, -1, NaN, Infinity, Number.MAX_VALUE]) {
-    assert.equal(materialCurrentStagePercent(processing("evidence", 3, total)), null);
-    assert.equal(materialOverallProgressPercent(processing("semantics", 3, total)), null);
-  }
-  assert.equal(materialCurrentStagePercent(processing("evidence", -4)), 0);
-  assert.equal(materialCurrentStagePercent(processing("semantics", 99)), 100);
-  assert.equal(materialOverallProgressPercent(processing("evidence", -4)), 0);
-  assert.equal(materialOverallProgressPercent(processing("evidence", 99)), 49);
-  assert.equal(materialOverallProgressPercent(processing("semantics", 99)), 99);
-  assert.equal(materialOverallProgressPercent(processing("publishing", 500, 500)), 99);
-  assert.equal(materialCurrentStagePercent(processing("evidence", Infinity)), null);
-  assert.equal(materialOverallProgressPercent(processing("evidence", NaN)), null);
-  assert.equal(materialOverallProgressPercent(processing("completed", 45, 45, "failed")), null);
-  assert.equal(materialOverallProgressPercent(processing("semantics", 20, 45, "failed")), 71);
-});
-
-test("legal lifecycle projections never decrease as stage page counts reset", () => {
-  for (const total of [1, 45, 500]) {
-    const snapshots = [processing("queued", 0, null, "pending")];
-    for (const stage of ["evidence", "semantics"]) {
-      for (let completed = 0; completed <= total; completed++)
-        snapshots.push(processing(stage, completed, total));
+test("only published success has overall percent; stage counts use their own real units", () => {
+  for (const stage of ["queued", "evidence", "semantics", "review", "publishing"]) {
+    for (const status of ["running", "failed", "cancelled"]) {
+      assert.equal(materialOverallProgressPercent(processing(stage, 368, 368, status)), null);
     }
-    snapshots.push(
-      processing("publishing", total, total),
-      processing("completed", total, total, "succeeded"),
-    );
-    const values = snapshots.map(materialOverallProgressPercent);
-    assert.equal(values[0], 0);
-    assert.equal(values.at(-1), 100);
-    assert.ok(values.slice(0, -1).every((value) => value >= 0 && value <= 99));
-    assert.ok(values.every((value, index) => index === 0 || value >= values[index - 1]));
   }
+  for (const status of ["succeeded", "partial"])
+    assert.equal(materialOverallProgressPercent(processing("completed", 368, 368, status)), 100);
+  assert.equal(materialCurrentStagePercent(processing("semantics", 368, 368)), null);
+  assert.equal(materialCurrentStagePercent(processing("evidence", 3, 45)), 6);
+  assert.equal(materialCurrentStagePercent({ ...processing("semantics", 368, 368), completed_units: 99, total_units: 100 }), 99);
+  assert.equal(materialCurrentStagePercent({ ...processing("semantics", 368, 368), completed_units: 999, total_units: 1000 }), 99);
+  assert.equal(materialCurrentStagePercent({ ...processing("review", 368, 368), completed_units: 18, total_units: 48 }), 37);
+  assert.equal(materialCurrentStagePercent({ ...processing("review", 368, 368), completed_units: 18, total_units: 49 }), 36);
+  assert.equal(materialProgressStageLabel("review"), "檢查與修正知識結構");
 });
 
-test("cancelled is never projected as successful 100 percent completion", () => {
-  for (const stage of ["queued", "evidence", "semantics", "publishing", "completed"]) {
-    assert.equal(materialCurrentStagePercent(processing(stage, 45, 45, "cancelled")), null);
-    assert.equal(materialOverallProgressPercent(processing(stage, 45, 45, "cancelled")), null);
-  }
+test("unknown or invalid stage denominators are never replaced by guessed progress", () => {
+  for (const total of [null, 0, -1, NaN, Infinity, Number.MAX_VALUE])
+    assert.equal(materialCurrentStagePercent(processing("evidence", 3, total)), null);
+  for (const completed of [-1, 46, NaN, Infinity])
+    assert.equal(materialCurrentStagePercent(processing("evidence", completed)), null);
+  assert.equal(materialCurrentStagePercent(processing("publishing", 368, 368)), null);
 });
 
 test("delete warning describes existing learner content, independently of active processing", async () => {
@@ -113,9 +63,9 @@ test("delete warning describes existing learner content, independently of active
   sources.push({ status: "ready", media_type: "text/plain", normalized_artifact_id: "converted" });
   assert.match(materialDeleteCopy(initial, sources).scope, /3 份教材，以及已產生的轉換內容/);
   const map = { ...initial, available_structures: [{}] };
-  assert.equal(materialDeleteCopy(map).scope, "將刪除這份教材及已建立的知識地圖。此操作無法復原。");
+  assert.equal(materialDeleteCopy(map).scope, "將刪除這份教材、已建立的知識地圖與保存的概念卡組。此操作無法復原。");
   const history = { ...map, study_sessions: [{ status: "completed" }] };
-  assert.match(materialDeleteCopy(history).scope, /知識地圖，以及相關的學習紀錄、題目與作答/);
+  assert.match(materialDeleteCopy(history).scope, /知識地圖與保存的概念卡組，以及相關的學習紀錄、題目與作答/);
   for (const status of ["pending", "running"]) {
     assert.equal(
       materialDeleteCopy({ ...initial, latest_attempt: { status } }).notice,
@@ -131,10 +81,34 @@ test("delete warning describes existing learner content, independently of active
 });
 
 
-test("configured upload limit controls selection and message", () => {
-  const max = 90 * 1024 * 1024;
-  const formats = [{ extension: ".pdf", media_type: "application/pdf", max_bytes: max }];
-  const file = { name: "fixture.pdf", type: "application/pdf", size: max };
-  assert.equal(validateSourceFile(file, formats), null);
-  assert.match(validateSourceFile({ ...file, size: max + 1 }, formats), /90 MiB/);
+test("remembered material indexes stay isolated by API client and material", async () => {
+  const {rememberMaterial, rememberedMaterial} = await import("./material-memory.ts");
+  const firstClient = {}, secondClient = {};
+  rememberMaterial(firstClient, {material_id:"first", display_name:"first version"});
+  rememberMaterial(firstClient, {material_id:"second", display_name:"other material"});
+  assert.equal(rememberedMaterial(secondClient,"first"),null);
+  assert.equal(rememberedMaterial(firstClient,"first").display_name,"first version");
+  rememberMaterial(firstClient, {material_id:"first", display_name:"updated version"});
+  assert.equal(rememberedMaterial(firstClient,"first").display_name,"updated version");
+  assert.equal(rememberedMaterial(firstClient,"second").display_name,"other material");
+});
+
+
+test("source summaries separate documents, images and verified media duration", async () => {
+  const { sourceTotals, sourceTotalsLabel, sourceMetadata } = await import("./source-summary.ts");
+  const sources=[{source_kind:"document",page_count:12},{source_kind:"image",page_count:3,image_count:3},{source_kind:"youtube",page_count:7,duration_seconds:833}];
+  assert.deepEqual(sourceTotals(sources),{page_count:12,image_count:3,media_seconds:833});
+  assert.equal(sourceTotalsLabel(sourceTotals(sources)),"共 12 頁 · 3 張圖片 · 影音 13 分 53 秒");
+  assert.equal(sourceMetadata(sources[2]),"YouTube · 13:53");
+  sources.push({source_kind:"audio",page_count:20,duration_seconds:null});
+  assert.equal(sourceTotalsLabel(sourceTotals(sources)),"共 12 頁 · 3 張圖片");
+  assert.equal(sourceMetadata(sources[3]),"音訊");
+});
+
+test("updated runs require their actual work counts and show percentages", async () => {
+  const { materialStageCountLabel } = await import("./material-flow.ts");
+  const run={...processing("evidence",1,200),base_revision:"existing"};
+  assert.equal(materialCurrentStagePercent(run),null);
+  assert.equal(materialStageCountLabel({...run,completed_units:1,total_units:4}),"已完成 25%");
+  assert.equal(materialStageCountLabel({...run,progress_stage:"review",completed_units:31,total_units:49}),"已完成 63%");
 });

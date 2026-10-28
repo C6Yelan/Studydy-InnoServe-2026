@@ -1,6 +1,7 @@
 """單 worker 在真實 run/lease 下退出 blocking fake，且維持發布隔離。"""
 
 from threading import Event
+import sys
 from uuid import uuid4
 
 import pytest
@@ -8,14 +9,21 @@ import pytest
 from pdf_evidence import material_pipeline
 import runtime.material_processing as processing
 import runtime.workers as workers
-from runtime.storage.tables import Material, MaterialProcessingRun, database_session
+from runtime.storage.tables import Material, MaterialProcessingRun
+from runtime.storage.database import database_session
 from test_inference_controlled_exit import blocked_http
 from test_source_revisions import revisions
 from product_fixtures import closed_loop
 
 
+@pytest.mark.parametrize('worker_count', [1, 3])
 @pytest.mark.parametrize('intent', ['cancel', 'shutdown', 'lost-token'])
-def test_material_worker_exits_blocking_inference_and_fences_publication(revisions, monkeypatch, intent):
+def test_material_worker_exits_blocking_inference_and_fences_publication(revisions, monkeypatch, intent, worker_count):
+    monkeypatch.setenv("STUDYDY_MATERIAL_WORKERS", str(worker_count))
+    from test_note_queue import answer
+    note_step = workers.material_notes.step
+    # 此 HTTP 替身只阻塞教材推論；已排入的筆記仍走真 worker 與受控回答，不能卡住下一份教材。
+    monkeypatch.setattr(workers.material_notes, "step", lambda **kwargs: note_step(call=answer, **kwargs))
     learner, material, settings, dsn, add, start, _, _, old, _ = revisions
     second = add('B.pdf', 'A queue removes the first inserted element first.')
     run = start([second], 'controlled-exit', old['revision'])

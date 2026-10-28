@@ -1,9 +1,11 @@
+import { mockCreationSettings } from "../fixtures/creation-settings";
 import { expect, test, type Page } from "@playwright/test";
 import type {
   MaterialLibraryItem,
   MaterialProcessingRunView,
   SourceView,
 } from "../../src/api/contracts";
+import { emptyCelebrationClaim, emptyLearningActivity } from "../fixtures/learning-activity";
 
 const uuid = (seed: number) => `00000000-0000-4000-8000-${String(seed).padStart(12, "0")}`;
 const materialId = uuid(1);
@@ -48,6 +50,7 @@ function material(job: SourceView, id = materialId): MaterialLibraryItem {
 }
 
 async function mockSources(page: Page, getSource: () => SourceView, id = materialId) {
+  await mockCreationSettings(page);
   await page.route(`**/v1/materials/${id}`, (route) => {
     expect(route.request().method()).toBe("GET");
     return route.fulfill({ json: material(getSource(), id) });
@@ -66,22 +69,35 @@ test.beforeEach(async ({ page }) => {
   await page.route(/\/v[12]\//, (route) => {
     const request = route.request();
     const path = new URL(request.url()).pathname;
+    if (path === "/v1/learning-activity/celebrations/claim") {
+      expect(route.request().method()).toBe("POST");
+      return route.fulfill({ json: emptyCelebrationClaim });
+    }
     expect(request.method()).toBe(path === "/v1/session/refresh" ? "POST" : "GET");
     switch (path) {
+      case "/v1/topics":
+        return route.fulfill({ json: { topics: [] } });
       case "/v1/session":
       case "/v1/session/refresh":
         return route.fulfill({ json: { schema: "learner-identity/v1", learner_id: learnerId } });
       case "/v1/source-capabilities":
         return route.fulfill({
           json: {
-            schema: "source-capabilities/v1",
+            schema: "source-capabilities/v2", max_request_bytes: 104857600, max_images: 50, max_media_seconds: 7200, youtube: false,
             formats: [
-              { extension: ".pdf", media_type: "application/pdf", max_bytes: 104857600 },
-              { extension: ".txt", media_type: "text/plain", max_bytes: 104857600 },
+              { extension: ".pdf", media_type: "application/pdf", max_bytes: 104857600, kind: "document" },
+              { extension: ".txt", media_type: "text/plain", max_bytes: 104857600, kind: "document" },
             ],
           },
         });
+      // 頁首帳號設定讀取名稱；這些案例不涉及名稱。
+      case "/v1/profile":
+        return route.fulfill({ json: { schema: "learner-profile/v1", display_name: null } });
+      // 頁首學習進度；這些案例不涉及學習紀錄。
+      case "/v1/learning-activity":
+        return route.fulfill({ json: emptyLearningActivity });
       default:
+        if (route.request().method() === "GET" && new URL(route.request().url()).pathname === "/v1/account/storage") return route.fulfill({ json: { schema: "account-storage/v2", used_bytes: 0, reserved_bytes: 0, limit_bytes: 5368709120, remaining_bytes: 5368709120, breakdown: { material_files_bytes: 0, podcast_audio_bytes: 0, podcast_video_bytes: 0, analysis_bytes: 0, reserved_bytes: 0 }, largest_materials: [] } });
         throw new Error(`Unexpected normalization request: ${request.method()} ${path}`);
     }
   });
@@ -105,7 +121,7 @@ for (const width of [1536, 390])
       expect(request.method()).toBe("POST");
       expect(request.postDataJSON()).toEqual({
         schema: "material-draft-create/v1",
-        display_name: "notes.txt",
+        display_name: "notes",
       });
       draftKeys.push(request.headers()["idempotency-key"]);
       return route.fulfill({
@@ -152,7 +168,7 @@ for (const width of [1536, 390])
     await expect(page.getByRole("article")).not.toContainText("尚未建立知識地圖");
     await expect(page.getByRole("article").getByRole("link")).toHaveCount(0);
     await page.getByRole("button", { name: "管理「notes.txt」", exact: true }).click();
-    await page.getByRole("button", { name: "管理教材", exact: true }).click();
+    await page.getByRole("button", { name: "來源與更新", exact: true }).click();
     await expect(row.getByRole("link", { name: "下載原檔", exact: true })).toHaveAttribute(
       "href",
       `/v1/artifacts/${artifactId}/download`,
@@ -212,6 +228,7 @@ test("failed conversion recovers after explicit retry and keeps the original", a
 test("accepted deletion of a converting source survives reload and returns to library", async ({
   page,
 }) => {
+  await mockCreationSettings(page);
   let deleting = false;
   let removed = false;
   let deletes = 0;
@@ -264,7 +281,7 @@ test("accepted deletion of a converting source survives reload and returns to li
   await expect(page.getByText("正在刪除教材…", { exact: true })).toBeVisible();
   await page.reload();
   await expect(page.getByText("正在刪除教材…", { exact: true })).toBeVisible();
-  await expect(page.getByLabel("選擇新增教材", { exact: true })).toHaveCount(0);
+  await expect(page.getByRole("button",{name:"新增來源",exact:true})).toHaveCount(0);
   await expect(page.getByRole("button", { name: "開始分析教材", exact: true })).toHaveCount(0);
   await expect(page.locator(".source-download")).toHaveAttribute("aria-disabled", "true");
   removed = true;
@@ -359,6 +376,8 @@ for (const viewport of [
       });
     const run: MaterialProcessingRunView = {
       schema: "material-processing-run/v1",
+      auto_retry_count: 0,
+      auto_retry_reason: null,
       run_id: runId,
       material_id: materialId,
       source_artifact_id: previewId,
@@ -387,65 +406,48 @@ for (const viewport of [
     await page.goto("/upload");
     await expect(page.locator(".file-drop")).toContainText("PDF、TXT");
     await expectApplicationFrame();
-    expect((await page.locator(".file-drop").boundingBox())!.width).toBeLessThanOrEqual(880);
-    const uploadColumns = await page
-      .locator(".upload-layout")
-      .evaluate((element) => getComputedStyle(element).gridTemplateColumns);
-    const uploadMascot = await page.locator(".upload-hero > img").boundingBox();
+    // 拖放區撐滿階段卡片的內容寬度（只扣卡片左右內距）。
+    const drop = (await page.locator(".file-drop").boundingBox())!;
+    const stage = (await page.locator(".flow-stage").filter({ has: page.locator(".file-drop") }).boundingBox())!;
+    expect(drop.width).toBeGreaterThanOrEqual(stage.width - 80);
+    await expect(page.locator(".learning-steps [aria-current=step]")).toContainText("上傳教材");
     await page.goto(`/materials/${materialId}/sources`);
     await expect(page.getByRole("link", { name: "預覽 PDF", exact: true })).toBeVisible();
     await expect(page.locator(".source-row").getByRole("status")).toHaveCount(0);
     await expectApplicationFrame();
-    expect((await page.locator(".source-add-control").boundingBox())!.height).toBeLessThanOrEqual(
+    expect((await page.getByRole("button",{name:"新增來源",exact:true}).boundingBox())!.height).toBeLessThanOrEqual(
       44,
     );
     await expect(page.locator(".source-page .primary-button")).toHaveCount(1);
-    expect(
-      await page
-        .locator(".upload-layout")
-        .evaluate((element) => getComputedStyle(element).gridTemplateColumns),
-    ).toBe(uploadColumns);
-    const mascot = (await page.locator(".upload-hero > img").boundingBox())!;
-    expect(mascot.width).toBe(uploadMascot!.width);
-    expect(mascot.height).toBe(uploadMascot!.height);
-    const copy = (await page.locator(".upload-hero > div").boundingBox())!;
-    expect(copy.x + copy.width).toBeLessThan(mascot.x);
-    const card = (await page.locator(".source-list-card").boundingBox())!;
-    const rail = (await page.locator(".source-guide").boundingBox())!;
+    // 上傳、確認教材與處理中共用同一個步驟列：確認階段在第二步。
+    const steps = page.locator(".learning-steps > li");
+    await expect(steps).toHaveCount(3);
+    await expect(steps.nth(1)).toHaveAttribute("aria-current", "step");
     const confirmation = (await page.locator(".source-list-footer").boundingBox())!;
     const cta = (await page.getByRole("button", { name: "開始分析教材" }).boundingBox())!;
     expect(cta.y).toBeGreaterThan(confirmation.y);
-    expect(confirmation.y + confirmation.height - cta.y - cta.height).toBeLessThanOrEqual(33);
-    if (viewport.width > 1200) {
-      expect(rail.width).toBe(320);
-      expect(rail.x - card.x - card.width).toBeCloseTo(24, 0);
-    } else {
-      expect(rail.y).toBeGreaterThan(confirmation.y + confirmation.height);
-    }
-    const back = (await page.getByRole("button", { name: "返回教材庫" }).boundingBox())!;
-    await expect(page.getByRole("button", { name: "刪除教材", exact: true })).toBeVisible();
-    expect(
-      (await page.getByRole("button", { name: "刪除教材", exact: true }).boundingBox())!.y,
-    ).toBeCloseTo(back.y, 0);
-    const steps = page.locator(".source-guide li");
-    await expect(steps.nth(1)).toHaveAttribute("aria-current", "step");
+    expect(cta.y + cta.height).toBeLessThanOrEqual(confirmation.y + confirmation.height);
+    const back = (await page.getByRole("button", { name: "返回我的教材" }).boundingBox())!;
+    const remove = page.getByRole("button", { name: "刪除教材", exact: true });
+    await expect(remove).toBeVisible();
+    const removeBox = (await remove.boundingBox())!;
+    expect(Math.abs(removeBox.y + removeBox.height / 2 - (back.y + back.height / 2))).toBeLessThanOrEqual(2);
+    // 刪除教材是完整的按鈕：文字不超出按鈕。
+    expect(await remove.evaluate((element) => element.scrollWidth <= element.clientWidth)).toBe(true);
     for (const [index, token] of [
       [0, "--success"],
       [1, "--studydy-blue"],
       [2, "--text-secondary"],
     ] as const) {
       expect(
-        await steps
-          .nth(index)
-          .locator(":scope > span")
-          .evaluate((element, token) => {
-            const expected = document.createElement("span");
-            expected.style.color = `var(${token})`;
-            element.append(expected);
-            const matches = getComputedStyle(element).color === getComputedStyle(expected).color;
-            expected.remove();
-            return matches;
-          }, token),
+        await steps.nth(index).evaluate((element, token) => {
+          const expected = document.createElement("span");
+          expected.style.color = `var(${token})`;
+          element.append(expected);
+          const matches = getComputedStyle(element).color === getComputedStyle(expected).color;
+          expected.remove();
+          return matches;
+        }, token),
       ).toBe(true);
     }
     filename = `${"VeryLongFilenameWithoutSpaces".repeat(8)}.docx`;

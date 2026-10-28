@@ -15,19 +15,41 @@ from sqlalchemy.exc import DBAPIError
 
 from product_fixtures import HEADERS, ORIGIN, _app, closed_loop
 from assessment_fixtures import concept_fixture, create, finish_set, model_for, read
-from test_inference_controlled_exit import blocked_http
+from learning_adaptation import assessment_state
 from learning_adaptation import assessment_sets as sets
-from learning_adaptation.answer_events import read_answer_events
+from product_fixtures import read_answer_events
 from runtime.learner_session import TrustedLearner
 from runtime.material_discard import request_material_discard
-from runtime.storage.tables import Assessment, AssessmentSet, AssessmentSetItem, StudySession, database_session
+from runtime.storage.tables import Assessment, AssessmentSet, AssessmentSetItem, Material, StudySession
+from runtime.storage.database import database_session
 
 
 # 保留單題及多題的動態範圍；三題完整流程另由 API／整組交卷案例驗證。
+@pytest.mark.parametrize('discard', [False, True])
+def test_structure_verification_does_not_hold_material_lock_and_rechecks_discard(closed_loop, monkeypatch, discard):
+    fixture = concept_fixture(closed_loop, 1)
+    original = assessment_state._read_verified_document
+
+    def verify(session, owner, material_id, **kwargs):
+        document = original(session, owner, material_id, **kwargs)
+        with database_session(fixture['dsn']) as other:
+            material = other.scalar(select(Material).where(Material.material_id == material_id).with_for_update(nowait=True))
+            if discard:
+                material.discard_requested_at = datetime.now(UTC)
+        return document
+
+    monkeypatch.setattr(assessment_state, '_read_verified_document', verify)
+    if discard:
+        with pytest.raises(assessment_state.AssessmentSetError, match='ASSESSMENT_SET_NOT_FOUND'):
+            create(fixture)
+    else:
+        assert create(fixture)
+
+
 @pytest.mark.parametrize("count", [1, 7])
 def test_dynamic_set_covers_multiple_points_of_one_concept_and_read_never_generates(closed_loop, count):
     fixture = concept_fixture(closed_loop, count)
-    plan = sets.read_plan(
+    plan = assessment_state.read_plan(
         fixture["learner"], fixture["study"].study_session_id,
         fixture["concept"]["concept_id"], dsn=fixture["dsn"],
     )
@@ -161,6 +183,8 @@ def test_api_preserves_scope_private_preparation_and_read_only_resume(closed_loo
     assert restored.status_code == 200, restored.json()
     assert restored.json()["schema"] == "study-resume/v1"
     assert restored.json()["selected_set_id"] == set_id
+    assert restored.json()["selected_set"] == result.json()
+    assert all(item["assessment"] is None for item in restored.json()["selected_set"]["items"])
     assert "assessments" not in restored.json()
     assert len(calls) == 2
 
@@ -180,8 +204,8 @@ def test_api_preserves_scope_private_preparation_and_read_only_resume(closed_loo
     assert not {"runtime_lock_document", "target_plan", "action_receipts"} & ready.keys()
     for item in ready["items"]:
         assert not {"prepared_document", "correct_option_id", "generation_provenance"} & item.keys()
-    with pytest.raises(sets.AssessmentSetError, match="NOT_FOUND"):
-        sets.read_set(
+    with pytest.raises(assessment_state.AssessmentSetError, match="NOT_FOUND"):
+        assessment_state.read_set(
             TrustedLearner(uuid4()), study_session_id, work.set_id, dsn=fixture["dsn"],
         )
 
@@ -269,7 +293,7 @@ def test_concurrent_creation_replays_same_intent_and_rejects_another_active_set_
     with ThreadPoolExecutor(max_workers=2) as pool:
         first, second = list(pool.map(lambda _: concurrent(), range(2)))
     assert first == second
-    with pytest.raises(sets.AssessmentSetError, match="ACTIVE"):
+    with pytest.raises(assessment_state.AssessmentSetError, match="ACTIVE"):
         create(fixture, "another-intent")
     with database_session(fixture["dsn"]) as session:
         groups = list(session.scalars(select(AssessmentSet).where(
@@ -324,7 +348,7 @@ def test_heading_classification_does_not_exclude_a_grounded_definition(closed_lo
         evidence_kind="heading",
     )
     assert all(row["kind"] == "heading" for row in fixture["document"]["evidence"])
-    plan = sets.read_plan(
+    plan = assessment_state.read_plan(
         fixture["learner"], fixture["study"].study_session_id,
         fixture["concept"]["concept_id"], dsn=fixture["dsn"],
     )
@@ -345,7 +369,7 @@ def test_heartbeat_retries_storage_failure_but_stops_on_stale_work(monkeypatch):
         if len(calls) == 1:
             raise RuntimeError("synthetic storage failure")
         if len(calls) == 3:
-            raise sets.AssessmentSetError("ASSESSMENT_SET_STALE_WORK")
+            raise assessment_state.AssessmentSetError("ASSESSMENT_SET_STALE_WORK")
         return None, None, None, group
 
     monkeypatch.setattr(sets, "database_session", lambda _: nullcontext(None))
@@ -359,6 +383,7 @@ def test_heartbeat_retries_storage_failure_but_stops_on_stale_work(monkeypatch):
 def test_blocking_semantic_wait_exits_without_publishing(closed_loop, monkeypatch, intent):
     from threading import Event, Thread
     from runtime.semantic_service import request_semantics
+    from test_inference_controlled_exit import blocked_http
 
     fixture = concept_fixture(closed_loop, 1)
     set_id = create(fixture)
@@ -403,6 +428,7 @@ def test_blocking_semantic_wait_exits_without_publishing(closed_loop, monkeypatc
 
 def test_worker_shutdown_interrupts_assessment_and_does_not_claim_again(closed_loop, monkeypatch):
     import runtime.workers as workers
+    from test_inference_controlled_exit import blocked_http
 
     fixture = concept_fixture(closed_loop, 1)
     set_id = create(fixture)
@@ -422,6 +448,8 @@ def test_worker_shutdown_interrupts_assessment_and_does_not_claim_again(closed_l
             worker.stop()
             worker.stop()
             assert not worker._thread.is_alive()
+            assert not worker._assessment_thread.is_alive()
+            assert not worker._maintenance_thread.is_alive()
             assert len(claimed) == 1
             with database_session(fixture['dsn']) as session:
                 group = session.get(AssessmentSet, set_id)

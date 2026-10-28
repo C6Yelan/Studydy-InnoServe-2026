@@ -5,7 +5,8 @@ from uuid import UUID
 
 from sqlalchemy import select
 
-from pdf_evidence.ocr_page_evidence import canonical_sha256
+from content_identity import canonical_sha256
+from pdf_evidence.analysis_scope import selected_pages
 from knowledge_map.structure import finalize_knowledge_structure
 
 from .storage.tables import (
@@ -13,12 +14,14 @@ from .storage.tables import (
     MaterialProcessingRun,
     MaterialSourceSet,
     MaterialSourceSetItem,
+    MaterialSource,
     SourceNormalization,
-    database_session,
 )
-from .storage.source_artifacts import open_verified_artifact
-from .source_normalization import SourceError
+from .storage.database import database_session
+from .storage.artifacts import open_verified_artifact
+from .errors import SourceError
 from .material_runtime import lock_matches_binding
+from .source_transcript import transcript_metadata
 
 
 def _bound_input(session, owner, run):
@@ -28,24 +31,64 @@ def _bound_input(session, owner, run):
     if run.input_source_set_id is None:
         raise SourceError("SOURCE_BINDING_INVALID")
     source_set = session.get(MaterialSourceSet, run.input_source_set_id)
-    if source_set is None or source_set.learner_id != owner or source_set.material_id != run.material_id:
+    if (
+        source_set is None
+        or source_set.learner_id != owner
+        or source_set.material_id != run.material_id
+    ):
         raise SourceError("SOURCE_BINDING_INVALID")
 
     manifest = deepcopy(source_set.manifest)
     bundle = deepcopy(run.bundle_manifest)
-    members = session.scalars(select(MaterialSourceSetItem).where(
-        MaterialSourceSetItem.source_set_id == source_set.source_set_id,
-    ).order_by(MaterialSourceSetItem.ordinal)).all()
+    members = session.scalars(
+        select(MaterialSourceSetItem)
+        .where(
+            MaterialSourceSetItem.source_set_id == source_set.source_set_id,
+        )
+        .order_by(MaterialSourceSetItem.ordinal)
+    ).all()
     if (
         canonical_sha256(manifest) != source_set.digest
         or canonical_sha256(bundle) != run.bundle_manifest_sha256
         or bundle.get("source_set_digest") != source_set.digest
         or len(members) != len(manifest["items"])
         or not members
-        or bundle.get("schema") != "bundle-manifest/v1"
+        or bundle.get("schema") != "bundle-manifest/v2"
     ):
         raise SourceError("SOURCE_BINDING_INVALID")
 
+    # 來源關係仍逐筆核對，但以批次查詢避免每份來源另開五次 DB 往返。
+    jobs = {
+        row.normalization_id: row
+        for row in session.scalars(
+            select(SourceNormalization).where(
+                SourceNormalization.normalization_id.in_(
+                    [member.normalization_id for member in members]
+                ),
+            )
+        )
+    }
+    sources = {
+        row.source_id: row
+        for row in session.scalars(
+            select(MaterialSource).where(
+                MaterialSource.source_id.in_([member.source_id for member in members]),
+            )
+        )
+    }
+    artifact_ids = {
+        UUID(item[f"{prefix}_artifact_id"])
+        for item in manifest["items"]
+        for prefix in ("original", "normalized", "mapping")
+    }
+    artifacts = {
+        row.artifact_id: row
+        for row in session.scalars(
+            select(Artifact).where(
+                Artifact.artifact_id.in_(artifact_ids),
+            )
+        )
+    }
     for ordinal, (member, item) in enumerate(zip(members, manifest["items"]), 1):
         if (
             member.ordinal != ordinal
@@ -53,7 +96,8 @@ def _bound_input(session, owner, run):
             or str(member.normalization_id) != item["normalization_id"]
         ):
             raise SourceError("SOURCE_BINDING_INVALID")
-        job = session.get(SourceNormalization, member.normalization_id)
+        job = jobs.get(member.normalization_id)
+        source = sources.get(member.source_id)
         if (
             job is None
             or job.status != "ready"
@@ -64,10 +108,18 @@ def _bound_input(session, owner, run):
             or job.page_count != item["page_count"]
             or str(job.normalized_artifact_id) != item["normalized_artifact_id"]
             or str(job.mapping_artifact_id) != item["mapping_artifact_id"]
+            or source is None
+            or job.analysis_scope != item["analysis_scope"]
+            or (source.analysis_scope is None) != (job.analysis_scope is None)
+            or (
+                job.analysis_scope is not None
+                and {k: v for k, v in job.analysis_scope.items() if k != "pages"}
+                != source.analysis_scope
+            )
         ):
             raise SourceError("SOURCE_BINDING_INVALID")
         for prefix in ("original", "normalized", "mapping"):
-            artifact = session.get(Artifact, UUID(item[f"{prefix}_artifact_id"]))
+            artifact = artifacts.get(UUID(item[f"{prefix}_artifact_id"]))
             if (
                 artifact is None
                 or artifact.learner_id != owner
@@ -75,27 +127,35 @@ def _bound_input(session, owner, run):
                 or bytes(artifact.sha256).hex() != item[f"{prefix}_sha256"]
             ):
                 raise SourceError("SOURCE_BINDING_INVALID")
+        # 舊來源集合沒有此欄位，保留其原封存身分；新集合核對實際 mapping。
+        if "transcript" in item and item["transcript"] != transcript_metadata(
+            owner, item, session
+        ):
+            raise SourceError("SOURCE_BINDING_INVALID")
 
     first_source = manifest["items"][0]
     if str(run.source_artifact_id) != first_source["normalized_artifact_id"]:
         raise SourceError("SOURCE_BINDING_INVALID")
-    if (
-        bundle.get("processing_policy") != "source-boundary-incremental/v1"
-        or bundle.get("source_names") != [item["original_name"] for item in manifest["items"]]
-    ):
+    if bundle.get(
+        "processing_policy"
+    ) != "source-boundary-incremental/v1" or bundle.get("source_names") != [
+        item["original_name"] for item in manifest["items"]
+    ]:
         raise SourceError("SOURCE_BINDING_INVALID")
     expected_pages = []
     for item in manifest["items"]:
-        for number in range(1, item["page_count"] + 1):
-            expected_pages.append({
-                "page": len(expected_pages) + 1,
-                "source_id": item["source_id"],
-                "normalized_page": number,
-            })
+        for number in selected_pages(item):
+            expected_pages.append(
+                {
+                    "page": len(expected_pages) + 1,
+                    "source_id": item["source_id"],
+                    "normalized_page": number,
+                }
+            )
     if bundle["pages"] != expected_pages:
         raise SourceError("SOURCE_BINDING_INVALID")
     return {
-        "schema": "structure-input-binding/v1",
+        "schema": "structure-input-binding/v2",
         "source_set_id": str(source_set.source_set_id),
         "source_set_digest": source_set.digest,
         "bundle_manifest_sha256": run.bundle_manifest_sha256,
@@ -110,11 +170,13 @@ def _input(owner, run_id, *, dsn=None):
         return _bound_input(session, owner, session.get(MaterialProcessingRun, run_id))
 
 
-def verify_source_files(owner, binding, *, dsn=None):
+def verify_source_files(session, owner, binding):
     """發布邊界檢查完整來源檔案；下載／預覽另由開檔入口檢查實際 bytes。"""
     for item in binding["manifest"]["items"]:
         for prefix in ("original", "normalized", "mapping"):
-            with open_verified_artifact(owner, UUID(item[f"{prefix}_artifact_id"]), dsn=dsn) as blob:
+            with open_verified_artifact(
+                owner, UUID(item[f"{prefix}_artifact_id"]), session=session
+            ) as blob:
                 if blob.sha256 != item[f"{prefix}_sha256"]:
                     raise SourceError("SOURCE_BINDING_INVALID")
 

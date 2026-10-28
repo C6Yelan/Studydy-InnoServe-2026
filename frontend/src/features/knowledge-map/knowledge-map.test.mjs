@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { learningNavigationItems, initialFocusConceptId, focusGraph } from "./knowledge-map.ts";
+import { learningNavigationItems, initialFocusConceptId, focusGraph, navigatorRange, groupSlices, NAVIGATOR_WINDOW } from "./knowledge-map.ts";
 
 const view = {
   concepts: ["a", "b", "c", "d"].map((concept_id) => ({ concept_id })),
@@ -198,4 +198,78 @@ test("direct neighbours also respect the node limit", () => {
   assert.equal(graph.totalNodes, 100);
   assert.equal(graph.relations.length, 29);
   assert.equal(graph.totalRelations, 99);
+});
+
+test("map regions are used only when they cover exactly the outline concepts", async () => {
+  const { mapRegions } = await import("./knowledge-map.ts");
+  const outline = { concepts: ["a", "b", "c"].map((concept_id) => ({ concept_id })) };
+  const regions = (groups) => ({
+    schema: "knowledge-regions/v1", material_id: "m", knowledge_structure_revision: "r", basis: "source",
+    regions: groups.map((concept_ids, index) => ({ region_id: `region:${index + 1}`, label: `R${index + 1}`, source_id: null, concept_ids })),
+  });
+  const value = mapRegions(outline, regions([["a", "c"], ["b"]]));
+  assert.deepEqual([...value.byConcept], [["a", 0], ["c", 0], ["b", 1]]);
+  assert.deepEqual(value.regions.map((r) => r.label), ["R1", "R2"]);
+  assert.equal(mapRegions(outline, regions([["a"], ["b"]])), null);
+  assert.equal(mapRegions(outline, regions([["a", "b"], ["c", "x"]])), null);
+  assert.equal(mapRegions(outline, null), null);
+});
+
+test("large learning navigators render a window around the selected concept", () => {
+  // 一般教材維持完整清單。
+  assert.deepEqual(navigatorRange(null, 5, 200), { start: 0, end: 200 });
+  const total = 4902;
+  const first = navigatorRange(null, 2000, total);
+  assert.deepEqual(first, { start: 2000 - NAVIGATOR_WINDOW / 2, end: 2000 + NAVIGATOR_WINDOW / 2 });
+  // 範圍仍包含選取概念時沿用（包含使用者展開過的範圍）。
+  const expanded = { start: first.start, end: first.end + NAVIGATOR_WINDOW };
+  assert.equal(navigatorRange(expanded, first.end + 10, total), expanded);
+  // 移出範圍時重新置中；靠近兩端時不超出清單。
+  assert.deepEqual(navigatorRange(first, 3, total), { start: 0, end: NAVIGATOR_WINDOW });
+  assert.deepEqual(navigatorRange(first, total - 1, total), { start: total - NAVIGATOR_WINDOW, end: total });
+});
+
+test("grouped navigator windows keep region order and skip regions outside the range", () => {
+  const groups = [{ id: "a", items: [1, 2, 3] }, { id: "b", items: [4, 5] }, { id: "c", items: [6, 7, 8] }];
+  assert.deepEqual(groupSlices(groups, { start: 2, end: 6 }).map(({ group, slice }) => [group.id, slice]),
+    [["a", [3]], ["b", [4, 5]], ["c", [6]]]);
+  assert.deepEqual(groupSlices(groups, { start: 3, end: 5 }).map(({ group }) => group.id), ["b"]);
+});
+
+test("chapter regions use two levels only for many chapters across several source files", async () => {
+  const { mapRegions, regionColorIndex, regionBasisText, TWO_LEVEL_MIN_REGIONS } = await import("./knowledge-map.ts");
+  const chapters = (count) => {
+    const ids = Array.from({ length: count * 3 }, (_, i) => `c${i}`);
+    return {
+      outline: { concepts: ids.map((concept_id) => ({ concept_id })) },
+      value: {
+        schema: "knowledge-regions/v1", material_id: "m", knowledge_structure_revision: "r", basis: "chapters",
+        // API 依島群排列；這裡故意交錯，前端仍要讓同群相鄰。
+        regions: Array.from({ length: count }, (_, i) => ({
+          region_id: `chapter:${i + 1}`, label: `章${i + 1}`, source_id: null,
+          concept_ids: ids.slice(i * 3, i * 3 + 3), group_id: i % 2 ? "region:2" : "region:1",
+        })),
+        groups: [
+          { group_id: "region:1", label: "01_生成", source_id: null },
+          { group_id: "region:2", label: "02_推論", source_id: null },
+          { group_id: "region:3", label: "沒有章節的檔", source_id: null },
+        ],
+        partial: true,
+      },
+    };
+  };
+  const big = chapters(TWO_LEVEL_MIN_REGIONS + 2);
+  const two = mapRegions(big.outline, big.value);
+  assert.deepEqual(two.groups.map((g) => [g.label, g.regionIndexes.length, g.conceptCount]), [["01_生成", 13, 39], ["02_推論", 13, 39]]);
+  assert.deepEqual(two.regions.slice(12, 15).map((r) => [r.label, r.group]), [["章25", 0], ["章2", 1], ["章4", 1]]);
+  assert.equal(two.byConcept.get("c3"), 13);
+  assert.equal(regionColorIndex(two, 20), 1);
+  assert.equal(regionBasisText(two), "依內容整理的章節，來源檔為島群；部分依來源檔分區");
+  // 三份 demo 的章數（9／15／14）維持一層，區域順序照 API。
+  const small = chapters(15);
+  const one = mapRegions(small.outline, { ...small.value, partial: false });
+  assert.deepEqual(one.groups, []);
+  assert.deepEqual(one.regions.slice(0, 3).map((r) => [r.label, r.group]), [["章1", null], ["章2", null], ["章3", null]]);
+  assert.equal(regionColorIndex(one, 2), 2);
+  assert.equal(regionBasisText(one), "依教材內容整理的章節");
 });

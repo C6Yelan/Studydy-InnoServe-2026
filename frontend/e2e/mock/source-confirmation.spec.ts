@@ -1,9 +1,12 @@
+import { emptyVersionMovePreview } from "../fixtures/knowledge-map";
+import { mockCreationSettings } from "../fixtures/creation-settings";
 import { expect, test, type Locator, type Page } from "@playwright/test";
 import type {
   MaterialLibraryItem,
   MaterialProcessingRunView,
   SourceView,
 } from "../../src/api/contracts";
+import { emptyCelebrationClaim, emptyLearningActivity } from "../fixtures/learning-activity";
 
 const uuid = (seed: number) => `22222222-2222-4222-8222-${String(seed).padStart(12, "0")}`;
 const materialId = uuid(1);
@@ -39,6 +42,7 @@ async function mockSources(page: Page, append = false) {
         original_name,
         media_type,
         status: "ready",
+        source_kind: "document",
         page_count: 10,
         error_code: null,
         included: append && index === 0,
@@ -79,7 +83,14 @@ async function mockSources(page: Page, append = false) {
   await page.route(/\/v[12]\//, (route) => {
     const request = route.request();
     const path = new URL(request.url()).pathname;
+    if (path === "/v1/learning-activity/celebrations/claim") {
+      expect(route.request().method()).toBe("POST");
+      return route.fulfill({ json: emptyCelebrationClaim });
+    }
     switch (path) {
+      case `/v1/materials/${materialId}/version-move`:
+        expect(request.method()).toBe("GET");
+        return route.fulfill({ json: emptyVersionMovePreview(materialId, revision) });
       case "/v1/session":
       case "/v1/session/refresh":
         expect(request.method()).toBe(path.endsWith("/refresh") ? "POST" : "GET");
@@ -88,10 +99,10 @@ async function mockSources(page: Page, append = false) {
         expect(request.method()).toBe("GET");
         return route.fulfill({
           json: {
-            schema: "source-capabilities/v1",
+            schema: "source-capabilities/v2", max_request_bytes: 104857600, max_images: 50, max_media_seconds: 7200, youtube: false,
             formats: [
-              { extension: ".pdf", media_type: "application/pdf", max_bytes: 104857600 },
-              { extension: ".txt", media_type: "text/plain", max_bytes: 104857600 },
+              { extension: ".pdf", media_type: "application/pdf", max_bytes: 104857600, kind: "document" },
+              { extension: ".txt", media_type: "text/plain", max_bytes: 104857600, kind: "document" },
             ],
           },
         });
@@ -107,6 +118,8 @@ async function mockSources(page: Page, append = false) {
         state.starts.push(request.postDataJSON());
         state.run = {
           schema: "material-processing-run/v1",
+          auto_retry_count: 0,
+          auto_retry_reason: null,
           run_id: newRunId,
           material_id: materialId,
           source_artifact_id: uuid(40),
@@ -138,15 +151,24 @@ async function mockSources(page: Page, append = false) {
         Object.assign(state.sources[2], {
           status: "ready",
           normalized_artifact_id: uuid(42),
-          page_count: 10,
+          source_kind: "document",
+        page_count: 10,
           error_code: null,
         });
         return route.fulfill({ json: listing() });
+      // 頁首帳號設定讀取名稱；這些案例不涉及名稱。
+      case "/v1/profile":
+        return route.fulfill({ json: { schema: "learner-profile/v1", display_name: null } });
+      // 頁首學習進度；這些案例不涉及學習紀錄。
+      case "/v1/learning-activity":
+        return route.fulfill({ json: emptyLearningActivity });
       default:
+        if (route.request().method() === "GET" && new URL(route.request().url()).pathname === "/v1/account/storage") return route.fulfill({ json: { schema: "account-storage/v2", used_bytes: 0, reserved_bytes: 0, limit_bytes: 5368709120, remaining_bytes: 5368709120, breakdown: { material_files_bytes: 0, podcast_audio_bytes: 0, podcast_video_bytes: 0, analysis_bytes: 0, reserved_bytes: 0 }, largest_materials: [] } });
         throw new Error(`Unexpected source confirmation request: ${request.method()} ${path}`);
     }
   });
-  return { state, listing };
+  const settings = !append ? await mockCreationSettings(page) : null;
+  return { state, listing, settings };
 }
 
 async function readyRows(page: Page) {
@@ -170,6 +192,10 @@ for (const width of [1536, 390])
       });
       await page.goto(sourcesPath);
       await expect(page.getByRole("heading", { name: "確認教材", exact: true })).toBeVisible();
+      await expect(page.getByRole("button", { name: "教材問答", exact: true })).toHaveCount(0);
+      const hero = (await page.locator('.flow-head').boundingBox())!, header = (await page.locator('.app-header').boundingBox())!;
+      expect(hero.x).toBeGreaterThanOrEqual(16); expect(hero.y).toBeGreaterThanOrEqual(header.y+header.height+16);
+      expect(await page.evaluate(()=>document.documentElement.scrollWidth<=innerWidth)).toBe(true);
       const rows = await readyRows(page);
       const start = page.getByRole("button", { name: "開始分析教材", exact: true });
       await expect(start).toBeEnabled();
@@ -204,6 +230,7 @@ for (const width of [1536, 390])
       expect(state.starts).toEqual([]);
       await activate(start);
       await expect(page.getByRole("heading", { name: "等待開始處理", exact: true })).toBeVisible();
+      await expect(page.getByRole("button", { name: "教材問答", exact: true })).toHaveCount(0);
       await expect(page).toHaveURL(new RegExp(`/runs/${newRunId}$`));
       expect(state.starts).toEqual([
         {
@@ -219,7 +246,10 @@ for (const width of [1536, 390])
     }) => {
       const { state } = await mockSources(page, true);
       await page.goto(sourcesPath);
-      await expect(page.getByRole("heading", { name: "新增教材", exact: true })).toBeVisible();
+      await expect(page.locator('.source-inclusion-summary')).toHaveText('目前地圖使用 1 份 · 2 份尚未納入地圖');
+      await expect(page.getByText('尚未納入目前地圖', {exact: true})).toHaveCount(2);
+      await expect(page.getByText('目前地圖使用中', {exact: true})).toHaveCount(1);
+      await expect(page.getByRole("heading", { name: "教材來源", exact: true })).toBeVisible();
       const rows = await readyRows(page);
       await expect(rows.first().getByRole("button", { name: "移除", exact: true })).toHaveCount(0);
       await expect(page.getByRole("button", { name: /^(上移|下移) / })).toHaveCount(0);
@@ -229,6 +259,7 @@ for (const width of [1536, 390])
       Object.assign(job, {
         status: "failed",
         normalized_artifact_id: null,
+        source_kind: "document",
         page_count: null,
         error_code: "NORMALIZATION_FAILED",
       });
@@ -260,7 +291,7 @@ for (const width of [1536, 390])
       const choices = page.getByRole("checkbox");
       await expect(choices).toHaveCount(2);
       for (const choice of await choices.all()) await expect(choice).toBeDisabled();
-      await expect(page.getByLabel("選擇新增教材", { exact: true })).toHaveCount(0);
+      await expect(page.getByRole("button",{name:"新增來源",exact:true})).toHaveCount(0);
     });
 
     test("upload queue retries one file with the same intent and waits for source confirmation", async ({
@@ -286,6 +317,7 @@ for (const width of [1536, 390])
         included: false,
         status: "running",
         normalized_artifact_id: null,
+        source_kind: "document",
         page_count: null,
         error_code: null,
       };
@@ -307,9 +339,11 @@ for (const width of [1536, 390])
         return route.fulfill({ json: listing() });
       });
       await page.goto(sourcesPath);
+      await activate(page.getByRole("button", {name:"新增來源",exact:true}));
+      await expect(page.getByRole("dialog",{name:"新增來源"})).toBeVisible();
       await expect(page.getByLabel("選擇新增教材", { exact: true })).toBeEnabled();
       const chooser = page.waitForEvent("filechooser");
-      await activate(page.locator(".source-add-control"));
+      await activate(page.getByLabel("選擇新增教材", {exact:true}));
       await (
         await chooser
       ).setFiles([
@@ -367,3 +401,57 @@ for (const width of [1536, 390])
       );
     });
   });
+
+
+for(const append of [false,true])test(`source picker shares upload controls and restores focus in ${append?'published':'confirmation'} view`,async({page},testInfo)=>{
+ await mockSources(page,append);
+ await page.route('**/v1/source-capabilities',route=>route.fulfill({json:{schema:'source-capabilities/v2',max_request_bytes:104857600,max_images:50,max_media_seconds:7200,youtube:true,formats:[{extension:'.pdf',media_type:'application/pdf',max_bytes:104857600,kind:'document'}]}}));
+ await page.goto(sourcesPath);
+ const opener=page.getByRole('button',{name:'新增來源',exact:true});await opener.click();
+ const dialog=page.getByRole('dialog',{name:'新增來源',exact:true});
+ await expect(dialog).toBeVisible();await expect(dialog.locator('.file-drop')).toContainText('PDF');
+ await expect(dialog.getByLabel('YouTube 影片網址',{exact:true})).toBeVisible();
+ for(const [width,height] of [[1440,900],[1300,900],[1200,900],[1024,768],[390,844]]){
+  await page.setViewportSize({width,height});await page.screenshot({path:testInfo.outputPath(`source-picker-${append?'published':'confirmation'}-${width}.png`),animations:'disabled'});
+  expect(await page.evaluate(()=>document.documentElement.scrollWidth<=innerWidth)).toBe(true);
+ }
+ await page.keyboard.press('Escape');await expect(dialog).toHaveCount(0);await expect(opener).toBeFocused();
+ await opener.click();await dialog.getByRole('button',{name:'關閉新增來源'}).click();await expect(opener).toBeFocused();
+ await opener.click();await dialog.getByLabel('YouTube 影片網址',{exact:true}).fill('https://www.youtube.com/watch?v=dQw4w9WgXcQ');
+ await dialog.getByRole('button',{name:'加入影片',exact:true}).click();
+ await expect(dialog).toHaveCount(0);await expect(opener).toBeFocused();
+ await expect(page.locator('.source-upload-row')).toContainText('YouTube 影片');
+ await expect(page.getByRole('button',{name:'上傳新增教材',exact:true})).toBeVisible();
+});
+
+
+for(const append of [false,true])test(`source display names drive labels and search in ${append?'published':'confirmation'} view`,async({page},testInfo)=>{
+ const {state}=await mockSources(page,append);
+ Object.assign(state.sources[0],{original_name:'【生成式 AI】淺談圖像生成模型 Diffusion Model 原理與實際應用.youtube',display_name:'【生成式 AI】淺談圖像生成模型 Diffusion Model 原理與實際應用',media_type:'application/vnd.studydy.youtube+json',source_kind:'youtube',page_count:7,duration_seconds:833,image_count:null,transcript_source:'uploader_subtitles',transcript_display_name:'YouTube 上傳者字幕'});
+ Object.assign(state.sources[1],{original_name:'架構圖（圖片）.zip',display_name:'3 張圖片',media_type:'application/zip',source_kind:'image',page_count:3,duration_seconds:null,image_count:3,transcript_source:null,transcript_display_name:null});
+ await page.goto(sourcesPath);
+ const video=page.getByRole('listitem',{name:'【生成式 AI】淺談圖像生成模型 Diffusion Model 原理與實際應用',exact:true}),pictures=page.getByRole('listitem',{name:'3 張圖片',exact:true});
+ await expect(video.locator('.source-name')).toHaveText('【生成式 AI】淺談圖像生成模型 Diffusion Model 原理與實際應用');await expect(video.locator('.source-name')).toHaveAttribute('title','【生成式 AI】淺談圖像生成模型 Diffusion Model 原理與實際應用');await expect(pictures.locator('.source-name')).toHaveText('3 張圖片');
+ await expect(video.locator('.source-metadata')).toContainText('YouTube · 13:53');
+ await expect(pictures.locator('.source-metadata')).toContainText('3 張圖片');
+ await expect(page.locator(append ? '.source-panel-head' : '.source-list-card')).toContainText('共 10 頁 · 3 張圖片 · 影音 13 分 53 秒');
+ await page.route(`**/v1/materials/${materialId}/sources/${state.sources[0].normalization_id}/transcript`,route=>route.fulfill({json:{schema:'source-transcript/v1',text:'已保存逐字稿預覽（測試內容）\n第二段原文'}}));
+ const opener=video.getByRole('button',{name:'查看逐字稿',exact:true});
+ await opener.click();
+ const dialog=page.getByRole('dialog',{name:'【生成式 AI】淺談圖像生成模型 Diffusion Model 原理與實際應用',exact:true});
+ await expect(dialog).toContainText('逐字稿來源：YouTube 上傳者字幕');
+ await expect(dialog.locator('.source-transcript-text')).toHaveText('已保存逐字稿預覽（測試內容）\n第二段原文');
+ for(const [width,height] of [[1440,900],[1024,768],[390,844]]){
+  await page.setViewportSize({width,height});await page.screenshot({path:testInfo.outputPath(`transcript-${append?'published':'confirmation'}-${width}.png`),animations:'disabled'});
+  expect(await page.evaluate(()=>document.documentElement.scrollWidth<=innerWidth)).toBe(true);
+ }
+ await page.keyboard.press('Escape');await expect(dialog).toHaveCount(0);await expect(opener).toBeFocused();
+ await opener.click();await dialog.getByRole('button',{name:'關閉逐字稿'}).click();await expect(opener).toBeFocused();
+ await expect(pictures.getByRole('link',{name:'下載原檔',exact:true})).toHaveAttribute('href',`/v1/artifacts/${state.sources[1].original_artifact_id}/download`);
+ if(!append)await expect(page.getByRole('button',{name:'上移 3 張圖片',exact:true})).toBeVisible();
+ for(const [width,height] of [[1440,900],[1300,900],[1200,900],[1024,768],[390,844]]){
+  await page.setViewportSize({width,height});await page.screenshot({path:testInfo.outputPath(`source-names-${append?'published':'confirmation'}-${width}.png`),animations:'disabled'});
+  expect(await page.evaluate(()=>document.documentElement.scrollWidth<=innerWidth)).toBe(true);
+ }
+ if(append){await page.getByRole('searchbox',{name:'搜尋教材來源',exact:true}).fill('3 張圖片');await expect(page.locator('.source-row')).toHaveCount(1);await expect(pictures).toBeVisible();}
+});

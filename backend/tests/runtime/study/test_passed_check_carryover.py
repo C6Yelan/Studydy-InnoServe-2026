@@ -8,6 +8,7 @@ from fastapi.testclient import TestClient
 
 from assessment_fixtures import concept_fixture, create, finish, answer, read, supplement, change
 from product_fixtures import closed_loop, publish_fixture_structure, ORIGIN, _app
+from learning_adaptation import assessment_state
 from learning_adaptation import assessment_sets as sets
 from learning_adaptation.learner_progress import derive_learner_progress, apply_guidance
 from learning_adaptation.study_sessions import create_study_session
@@ -26,7 +27,7 @@ def append_revision(fixture, *, mutation=None):
         payload = pdf.tobytes()
     source_id = upload_source(owner, material, payload, 'Additional.pdf', 'application/pdf', str(uuid4()), dsn=dsn)
     assert normalize_next(dsn=dsn)
-    source = next(s for s in read_sources(owner, material, dsn=dsn) if s['source_id'] == source_id)
+    source = next(s for s in read_sources(owner, material, dsn=dsn)["sources"] if s['source_id'] == source_id)
     run = create_revision(owner, material, [source['normalization_id']], str(uuid4()),
                           fixture['settings'], base_revision=old['revision'], dsn=dsn)
     assert claim_next_material_processing_run(dsn=dsn).run.run_id == run.run_id
@@ -70,6 +71,9 @@ def passed_fixture(closed_loop, *, count=1, remediation=False):
         child = supplement(fixture, root)
         finish(fixture, 'follow-up')
         answer(fixture, child)
+        child = supplement(fixture, root)
+        finish(fixture, 'second-follow-up')
+        answer(fixture, child)
     assert read(fixture, root)['cycle']['outcome'] == 'passed'
     return fixture, root
 
@@ -90,11 +94,11 @@ def test_complete_check_and_followup_carry_to_appended_revision_and_keep_history
         'knowledge_structure_revision': old['document']['revision'],
         'run_id': old['document']['run_id'],
     }
-    assert state.attempts == 6 and state.correct_answers == 5
-    assert state.status != 'mastered' and not state.mastered_claim_ids
+    assert state.attempts == 7 and state.correct_answers == 6
+    assert state.status == 'completed' and len(state.completed_claim_ids) == 5
     assert progress.next_action.action == 'advance'
     assert progress.next_action.target_concept_id != new['concept']['concept_id']
-    assert sets.list_sets(new['learner'], new['study'].study_session_id, dsn=new['dsn'])['sets'] == []
+    assert assessment_state.list_sets(new['learner'], new['study'].study_session_id, dsn=new['dsn'])['sets'] == []
     client = TestClient(_app(new['dsn'], tmp_path, monkeypatch), base_url=ORIGIN)
     client.cookies.set('studydy_session', new['token'])
     path = (f"/v1/materials/{new['source'].material_id}/knowledge-structures/{new['document']['revision']}"
@@ -118,39 +122,66 @@ def test_changed_or_ambiguous_concept_does_not_inherit_a_whole_check(closed_loop
     assert progress.next_action.action == 'assess'
 
 
-def test_current_revision_check_supersedes_inherited_pass(closed_loop):
+def test_current_revision_check_supersedes_inherited_pass(closed_loop, monkeypatch):
     old, _ = passed_fixture(closed_loop)
     new = append_revision(old)
     root = create(new, 'new-check')
+    import runtime.storage.knowledge_structures as storage
+    checks = []
+    validate = storage.validate_knowledge_structure
+    def counted(document):
+        checks.append(document['revision'])
+        return validate(document)
+    monkeypatch.setattr(storage, 'validate_knowledge_structure', counted)
     progress = derive_learner_progress(new['learner'], new['study'].study_session_id, dsn=new['dsn'])
     cycle, = progress.assessment_cycles
     assert cycle['diagnostic_set_id'] == str(root) and cycle['outcome'] == 'in_progress'
     assert not cycle.get('inherited_from')
+    assert checks == []  # 發布時已驗證，進度只讀有雜湊的學習索引。
     assert progress.next_action.action == 'continue_set'
     finish(new, 'new-version-check')
     answer(new, root, wrong={1})
     progress = derive_learner_progress(new['learner'], new['study'].study_session_id, dsn=new['dsn'])
     assert progress.assessment_cycles[0]['outcome'] == 'needs_review'
-    assert progress.next_action.action == 'remediate'
+    assert progress.next_action.action == 'advance'
+    assert next(s for s in progress.concept_states if s.concept_id == new['concept']['concept_id']).status == 'completed'
 
 
-def test_partial_check_does_not_become_passed_after_append(closed_loop):
+def test_partial_check_completion_carries_after_append(closed_loop):
     old = concept_fixture(closed_loop, 3)
     root = create(old)
     finish(old, fail={2})
     change(old, root, 'publish-partial')
     answer(old, root)
-    assert read(old, root)['cycle']['outcome'] == 'incomplete'
+    assert read(old, root)['cycle']['outcome'] == 'passed'
     new = append_revision(old)
     progress = derive_learner_progress(new['learner'], new['study'].study_session_id, dsn=new['dsn'])
-    assert progress.assessment_cycles == []
+    assert progress.assessment_cycles[0]['outcome'] == 'passed'
     assert next(s for s in progress.concept_states if s.concept_id == new['concept']['concept_id']).attempts == 2
 
 
-def test_newer_historical_unfinished_check_does_not_fall_back_to_old_pass(closed_loop):
+def test_newer_practice_does_not_revoke_historical_completion(closed_loop):
     old, _ = passed_fixture(closed_loop)
     middle = append_revision(old)
     create(middle, 'unfinished-new-check')
     current = append_revision(middle)
     progress = derive_learner_progress(current['learner'], current['study'].study_session_id, dsn=current['dsn'])
-    assert progress.assessment_cycles == []
+    assert progress.assessment_cycles[0]['outcome'] == 'passed'
+
+
+def test_wrong_history_cannot_be_bypassed_by_new_revision_first_correct(closed_loop):
+    old = concept_fixture(closed_loop, 1)
+    root = create(old)
+    finish(old)
+    answer(old, root, wrong={1})
+    new = append_revision(old)
+    root = create(new, 'new-check')
+    finish(new, 'new-diagnostic')
+    answer(new, root)
+    assert read(new, root)['cycle']['outcome'] == 'needs_review'
+    progress = derive_learner_progress(new['learner'], new['study'].study_session_id, dsn=new['dsn'])
+    assert progress.next_action.action == 'remediate'
+    child = supplement(new, root)
+    finish(new, 'second-distinct-correct')
+    answer(new, child)
+    assert read(new, root)['cycle']['outcome'] == 'passed'

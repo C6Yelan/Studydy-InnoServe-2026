@@ -1,5 +1,6 @@
 import { expect, test } from "@playwright/test";
 import type { MaterialLibraryItem, SourceView } from "../../src/api/contracts";
+import { emptyCelebrationClaim, emptyLearningActivity } from "../fixtures/learning-activity";
 
 const uuid = (seed: number) => `00000000-0000-4000-8000-${String(seed).padStart(12, "0")}`;
 const materialId = uuid(1);
@@ -13,6 +14,7 @@ const initialSources: SourceView[] = [
     source_id: uuid(10),
     normalization_id: uuid(20),
     original_artifact_id: uuid(30),
+    source_kind: "document",
     original_name: "第一章.pdf",
     media_type: "application/pdf",
     status: "ready",
@@ -25,6 +27,7 @@ const initialSources: SourceView[] = [
     source_id: uuid(11),
     normalization_id: uuid(21),
     original_artifact_id: uuid(31),
+    source_kind: "document",
     original_name: officeName,
     media_type: "application/vnd.ms-powerpoint",
     status: "running",
@@ -37,6 +40,7 @@ const initialSources: SourceView[] = [
     source_id: uuid(12),
     normalization_id: uuid(22),
     original_artifact_id: uuid(32),
+    source_kind: "document",
     original_name: "補充.docx",
     media_type: "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
     status: "failed",
@@ -78,11 +82,17 @@ for (const width of [1536, 390]) {
     await page.route(/\/v[12]\//, (route) => {
       const request = route.request();
       const path = new URL(request.url()).pathname;
+      if (path === "/v1/learning-activity/celebrations/claim") {
+        expect(route.request().method()).toBe("POST");
+        return route.fulfill({ json: emptyCelebrationClaim });
+      }
       expect(request.method()).toBe(path === "/v1/session/refresh" ? "POST" : "GET");
       switch (path) {
         case "/v1/session":
         case "/v1/session/refresh":
           return route.fulfill({ json: { schema: "learner-identity/v1", learner_id: learnerId } });
+        case "/v1/topics":
+          return route.fulfill({ json: { topics: [] } });
         case "/v1/materials":
           return route.fulfill({ json: { schema: "material-library/v1", materials: [item] } });
         case `/v1/materials/${materialId}`:
@@ -90,8 +100,8 @@ for (const width of [1536, 390]) {
         case "/v1/source-capabilities":
           return route.fulfill({
             json: {
-              schema: "source-capabilities/v1",
-              formats: [{ extension: ".pdf", media_type: "application/pdf", max_bytes: 104857600 }],
+              schema: "source-capabilities/v2", max_request_bytes: 104857600, max_images: 50, max_media_seconds: 7200, youtube: false,
+              formats: [{ extension: ".pdf", media_type: "application/pdf", max_bytes: 104857600, kind: "document" }],
             },
           });
         case `/v1/materials/${materialId}/sources`:
@@ -99,7 +109,14 @@ for (const width of [1536, 390]) {
           return route.fulfill({
             json: { schema: "material-sources/v1", material_id: materialId, sources },
           });
+        // 頁首帳號設定讀取名稱；這些案例不涉及名稱。
+        case "/v1/profile":
+          return route.fulfill({ json: { schema: "learner-profile/v1", display_name: null } });
+        // 頁首學習進度；這些案例不涉及學習紀錄。
+        case "/v1/learning-activity":
+          return route.fulfill({ json: emptyLearningActivity });
         default:
+          if (route.request().method() === "GET" && new URL(route.request().url()).pathname === "/v1/account/storage") return route.fulfill({ json: { schema: "account-storage/v2", used_bytes: 0, reserved_bytes: 0, limit_bytes: 5368709120, remaining_bytes: 5368709120, breakdown: { material_files_bytes: 0, podcast_audio_bytes: 0, podcast_video_bytes: 0, analysis_bytes: 0, reserved_bytes: 0 }, largest_materials: [] } });
           throw new Error(`Unexpected library source request: ${request.method()} ${path}`);
       }
     });
@@ -109,18 +126,19 @@ for (const width of [1536, 390]) {
     await expect(card).not.toContainText(
       /來源檔案|第一章.pdf|轉換後 PDF|下載原檔|最新處理|教材轉換|先前題目與作答|partial|needs_review/,
     );
-    await expect(card.getByRole("link")).toHaveCount(0);
+    // 卡片只有操作入口是連結，不出現來源檔案等連結。
+    await expect(card.locator("a:not(.state-actions a)")).toHaveCount(0);
     await expect(card.locator("details:not(.material-management-menu)")).toHaveCount(0);
     await expect(card.locator(".library-state")).toHaveCount(0);
     await expect(card.locator(".primary-button")).toHaveText("開啟知識地圖");
-    await expect(card.locator(".state-actions > button")).toHaveCount(1);
+    await expect(card.locator(".state-actions > :is(button, a)")).toHaveText(["開啟知識地圖", "概念卡", "Podcast"]);
     await page.clock.runFor(5_000);
     expect(reads).toBe(0);
     expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(
       true,
     );
     await card.getByRole("button", { name: "管理「資料結構」", exact: true }).click();
-    await card.getByRole("button", { name: "管理教材", exact: true }).click();
+    await card.getByRole("button", { name: "來源與更新", exact: true }).click();
     await expect(page).toHaveURL(new RegExp(`/materials/${materialId}/sources$`));
     const rows = page.getByRole("region", { name: "教材來源", exact: true }).locator(".source-row");
     await expect(rows.locator(".source-name")).toHaveText(
@@ -138,7 +156,7 @@ for (const width of [1536, 390]) {
     await expect(rows.nth(1).getByRole("link", { name: "預覽 PDF", exact: true })).toHaveCount(0);
     await expect(rows.nth(2).getByRole("status")).toHaveText("轉換失敗");
     await expect(rows.nth(2).getByRole("link", { name: "預覽 PDF", exact: true })).toHaveCount(0);
-    await expect(page.getByLabel("選擇新增教材", { exact: true })).toBeEnabled();
+    await expect(page.getByRole("button", {name:"新增來源",exact:true})).toBeEnabled();
     await expect(
       page.getByText("無法載入上傳限制，請重新整理後再試。", { exact: true }),
     ).toHaveCount(0);

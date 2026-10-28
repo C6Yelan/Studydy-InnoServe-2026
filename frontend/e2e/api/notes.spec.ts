@@ -1,0 +1,52 @@
+import { expect, test } from "@playwright/test";
+test.skip(process.env.STUDYDY_E2E_NOTES !== "true", "Requires isolated notes API/DB fixture");
+const data = JSON.parse(process.env.STUDYDY_E2E_NOTES_DATA ?? "{}");
+test("real notes save an annotation, reopen its source and generate full notes only on demand", async ({ page }) => {
+  const errors: string[] = [];
+  page.on("pageerror", e => errors.push(e.message));
+  await page.goto("/");
+  await page.getByLabel("Email", { exact: true }).fill("learner_test@example.com");
+  await page.getByLabel("密碼", { exact: true }).fill("Synthetic test password 42");
+  await page.getByRole("button", { name: "登入", exact: true }).click();
+  await expect(page.locator(".dashboard-content")).toBeVisible();
+  await page.goto(`/materials/${data.material}/notes`);
+  await expect(page.locator(".note-paragraph")).toHaveCount(3);
+  await page.getByRole("button", { name: "新增註記", exact: true }).first().click();
+  await page.getByLabel("個人註記", { exact: true }).fill("真 API 保存我的複習想法");
+  await page.getByRole("button", { name: "儲存註記", exact: true }).click();
+  await expect(page.getByRole("dialog")).toBeHidden();
+  await page.reload();
+  // 第一則個人註記會取得新徽章（寫下心得），先關閉提示才能繼續操作。
+  await page.getByRole("dialog", { name: "獲得新徽章" }).getByRole("button", { name: "太好了" }).click();
+  await expect(page.getByText("真 API 保存我的複習想法", { exact: true })).toBeVisible();
+  const controls = page.getByRole("dialog", { name: "匯出筆記" });
+  for (const format of ["md", "pdf", "docx"]) {
+    await page.getByRole("button", { name: "匯出筆記", exact: true }).click();
+    await controls.locator(`input[type="radio"][value="${format}"]`).check();
+    const download = page.waitForEvent("download");
+    await controls.getByRole("button", { name: "匯出", exact: true }).click();
+    const file = await download;
+    expect(file.suggestedFilename()).toBe(`重點整理.${format}`);
+    expect(await file.failure()).toBeNull();
+  }
+  await page.locator(".note-sources button").first().click();
+  await expect(page.getByRole("dialog", { name: "教材來源" })).toBeVisible();
+  await expect(page.getByRole("link", { name: "開啟 PDF 來源頁" })).toHaveAttribute("href", /page=1/);
+  await page.getByRole("button", { name: "關閉", exact: true }).click();
+  await page.getByRole("button", { name: "完整筆記", exact: true }).click();
+  await expect(page.getByRole("button", { name: "生成完整筆記", exact: true })).toBeVisible();
+  await page.getByRole("button", { name: "生成完整筆記", exact: true }).click();
+  await expect(page.locator(".note-paragraph")).toHaveCount(3);
+  await page.getByRole("button", { name: "新增註記", exact: true }).first().click();
+  await page.getByLabel("個人註記", { exact: true }).fill("完整筆記的複習想法");
+  await page.getByRole("button", { name: "儲存註記", exact: true }).click();
+  await expect(page.getByRole("dialog")).toBeHidden();
+  await page.getByLabel("更多筆記操作").click();
+  await page.getByRole("button", { name: "重新生成", exact: true }).click();
+  await page.getByRole("button", { name: "確認重新生成", exact: true }).click();
+  await expect(page.getByRole("button", { name: "重新生成", exact: true })).toBeEnabled();
+  await expect(page.getByText("完整筆記的複習想法", { exact: true })).toBeVisible();
+  await page.getByRole("button", { name: "重點整理", exact: true }).click();
+  await expect(page.getByText("真 API 保存我的複習想法", { exact: true })).toBeVisible();
+  expect(errors).toEqual([]);
+});

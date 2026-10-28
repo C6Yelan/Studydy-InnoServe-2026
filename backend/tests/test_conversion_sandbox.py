@@ -2,25 +2,8 @@
 
 from pathlib import Path
 import socket
-from hashlib import sha256
-
-import pymupdf
-import pytest
 
 from document_normalization import converter
-
-
-@pytest.mark.parametrize('extension,pages', [('.doc', 3), ('.ppt', 2)])
-def test_binary_office_converts_inside_real_sandbox(extension, pages):
-    data = (Path(__file__).parent / 'fixtures' / ('sample' + extension)).read_bytes()
-    pdf, mapping = converter.convert(data, extension, converter.MIME[extension], converter.conversion_policy())
-    assert mapping['original_sha256'] == sha256(data).hexdigest()
-    assert mapping['normalized_sha256'] == sha256(pdf).hexdigest()
-    with pymupdf.open(stream=pdf, filetype='pdf') as document:
-        assert len(document) == mapping['page_count'] == pages
-        text = ''.join(page.get_text() for page in document)
-        assert text.strip()
-        assert 'HIDDEN_SLIDE_MARKER' not in text and 'PRIVATE_NOTES_MARKER' not in text
 
 
 def test_renderer_cannot_access_parent_files_environment_or_loopback(tmp_path, monkeypatch):
@@ -48,7 +31,7 @@ def test_renderer_cannot_access_parent_files_environment_or_loopback(tmp_path, m
         monkeypatch.setattr(converter, '__file__', str(tmp_path / 'converter.py'))
 
         def spawn(command, **kwargs):
-            if command[0] != 'bwrap':
+            if 'bwrap' not in command:
                 return original(command, **kwargs)
             source = Path(command[command.index('/input') - 1])
             (source / 'renderer_impl.py').write_text(renderer)

@@ -13,13 +13,45 @@ from runtime.semantic_service import (
 
 
 def _lock() -> dict:
-    return json.loads((Path(__file__).parents[2] / "local_ai/runtime-lock.json").read_text())
+    lock=json.loads((Path(__file__).parents[2] / "local_ai/runtime-lock.json").read_text())
+    lock['material_semantics']=json.loads((Path(__file__).parent/'fixtures/legacy_material_semantics.json').read_text())
+    # 原有邊界案例刻意驗證仍支援的 32K 設定。
+    lock["semantic_service"]["max_model_len"]=32768
+    return lock
+
+
+def test_gemma_64k_capacity_upgrade_preserves_old_binding_and_rejects_downgrade():
+    from copy import deepcopy
+    from runtime.material_runtime import runtime_binding, runtime_binding_is_valid, same_material_runtime
+    from runtime.material_runtime import validate_runtime_lock
+    from runtime.local_ai_config import read_local_ai_config_from_environment
+    old = read_local_ai_config_from_environment({})
+    old['runtime_lock'] = _lock()
+    new = deepcopy(old)
+    new['runtime_lock']['semantic_service']['max_model_len'] = 65536
+    validate_runtime_lock(new['runtime_lock'])
+    before = deepcopy(old)
+    old_binding, new_binding = runtime_binding(old), runtime_binding(new)
+    assert runtime_binding_is_valid(old_binding) and runtime_binding_is_valid(new_binding)
+    assert same_material_runtime(old['runtime_lock'], old_binding, new['runtime_lock'], new_binding)
+    assert not same_material_runtime(new['runtime_lock'], new_binding, old['runtime_lock'], old_binding)
+    assert old == before
+
+
+@pytest.mark.parametrize('count,fits', [(57344, True), (57345, False)])
+def test_gemma_64k_still_reserves_material_output_room(count, fits):
+    lock = _lock()
+    lock['semantic_service']['max_model_len'] = 65536
+    with httpx.Client(transport=httpx.MockTransport(lambda request: httpx.Response(
+        200, json={'count': count, 'max_model_len': 65536},
+    ))) as client:
+        assert material_request_fits(client, lock, {'sections': [{'evidence': [[0, 1, 'paragraph', 'Fact']]}]}) is fits
 
 
 @pytest.mark.parametrize('field', ['max_tokens', 'check_max_tokens'])
 @pytest.mark.parametrize('value', [0, -1, True, '16384', 32769])
 def test_assessment_budget_must_be_an_integer_within_context(field, value):
-    from pdf_evidence.material_pipeline import MaterialAnalysisError, validate_runtime_lock
+    from runtime.material_runtime import MaterialAnalysisError, validate_runtime_lock
 
     lock = _lock()
     lock['assessment'][field] = value
@@ -92,7 +124,7 @@ def test_tasks_share_configured_http_wire(task, budget):
     ('example/semantic-model', 32768, True, False),
 ])
 def test_preflight_checks_configured_model_and_service_identity(model, context, extra_model, accepted):
-    from pdf_evidence.material_pipeline import validate_runtime_lock
+    from runtime.material_runtime import validate_runtime_lock
 
     lock = _lock()
     lock["semantic_service"].update(model_id="example/semantic-model", revision="a" * 40)
@@ -207,7 +239,7 @@ def test_offline_ai_requests_report_fixed_service_error(failure, reason):
 ])
 def test_wrong_contract_is_rejected_by_lock_and_client_before_network(field, value):
     """模型身分不可為空；服務網路位置與能力限制仍在呼叫前檢查。"""
-    from pdf_evidence.material_pipeline import MaterialAnalysisError, validate_runtime_lock
+    from runtime.material_runtime import MaterialAnalysisError, validate_runtime_lock
     lock = _lock()
     validate_runtime_lock(lock)
     lock["semantic_service"][field] = value
@@ -346,7 +378,7 @@ def test_truncation_archives_only_safe_phase_and_token_metadata(monkeypatch):
                               request={'source': secret}, response_schema={})
     assert str(caught.value) == 'SEMANTIC_OUTPUT_TRUNCATED'
     saved = {}
-    monkeypatch.setattr(AnalysisArchive, '_write', lambda self, name, value: saved.update({name: value}))
+    monkeypatch.setattr(AnalysisArchive, '_write', lambda self, name, value, **kwargs: saved.update({name: value}))
     AnalysisArchive.__new__(AnalysisArchive).save_failure(caught.value)
     assert saved['failure.json']['semantic_request'] == {
         'task': 'material_review', 'input_tokens': 12000, 'max_tokens': 20768,

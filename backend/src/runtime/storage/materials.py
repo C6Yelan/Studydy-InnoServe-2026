@@ -15,93 +15,249 @@ from .tables import (
     MaterialSource,
     SourceNormalization,
     StudySession,
-    database_session,
 )
+from .database import database_session
+from ..errors import SourceError
 
 
 class MaterialLibraryError(RuntimeError):
     """教材庫儲存錯誤不包含 SQL、名稱或連線資訊。"""
 
 
+def require_material(session, owner, material_id, *, read=False):
+    material = session.scalar(
+        select(Material)
+        .where(
+            Material.learner_id == owner,
+            Material.material_id == material_id,
+            Material.discard_requested_at.is_(None),
+        )
+        .with_for_update(read=read)
+    )
+    if material is None:
+        raise MaterialLibraryError("RESOURCE_NOT_FOUND")
+    return material
+
+
+def require_source_material(session, owner, material_id):
+    """來源編修須鎖住已要求刪除的父項，回報衝突；媒體入口則視為不存在。"""
+    material = session.scalar(
+        select(Material)
+        .where(Material.learner_id == owner, Material.material_id == material_id)
+        .with_for_update()
+    )
+    if material is None:
+        raise SourceError("RESOURCE_NOT_FOUND")
+    if material.discard_requested_at is not None:
+        raise SourceError("MATERIAL_NOT_DISCARDABLE")
+    return material
+
+
+def validate_concept_selection(name, concept_ids):
+    if (
+        not isinstance(name, str)
+        or not 1 <= len(name.strip()) <= 200
+        or any(ord(char) < 32 or ord(char) == 127 for char in name)
+        or not isinstance(concept_ids, list)
+        or not concept_ids
+        or any(not isinstance(value, str) for value in concept_ids)
+        or len(set(concept_ids)) != len(concept_ids)
+    ):
+        raise MaterialLibraryError("REQUEST_INVALID")
+    return name.strip()
+
+
 def read_material_library(
-    learner_id: UUID, *, material_id: UUID | None = None, dsn: str | None = None,
+    learner_id: UUID,
+    *,
+    material_id: UUID | None = None,
+    dsn: str | None = None,
 ) -> list[dict]:
     """唯讀整理教材、發布結構與學習紀錄。"""
     try:
         with database_session(dsn) as session:
             statement = select(
-                Material.material_id, Material.source_artifact_id, Material.display_name,
-                Material.created_at, Material.head_revision,
+                Material.material_id,
+                Material.source_artifact_id,
+                Material.display_name,
+                Material.created_at,
+                Material.head_revision,
             ).where(Material.learner_id == learner_id)
             if material_id is not None:
                 statement = statement.where(Material.material_id == material_id)
-            materials = session.execute(
-                statement.order_by(Material.created_at.desc(), Material.material_id.desc())
-            ).mappings().all()
+            materials = (
+                session.execute(
+                    statement.order_by(
+                        Material.created_at.desc(), Material.material_id.desc()
+                    )
+                )
+                .mappings()
+                .all()
+            )
             if not materials:
                 return []
             ids = [row["material_id"] for row in materials]
-            runs = session.execute(select(
-                MaterialProcessingRun.material_id, MaterialProcessingRun.run_id,
-                MaterialProcessingRun.status, MaterialProcessingRun.progress_stage,
-                MaterialProcessingRun.completed_pages, MaterialProcessingRun.total_pages,
-                MaterialProcessingRun.error_code, MaterialProcessingRun.created_at, MaterialProcessingRun.cancel_requested_at,
-                MaterialProcessingRun.base_revision,
-            ).where(
-                MaterialProcessingRun.learner_id == learner_id,
-                MaterialProcessingRun.material_id.in_(ids),
-            ).distinct(MaterialProcessingRun.material_id).order_by(
-                MaterialProcessingRun.material_id, MaterialProcessingRun.created_at.desc(), MaterialProcessingRun.run_id.desc(),
-            )).mappings().all()
-            structures = session.execute(select(
-                KnowledgeStructure.material_id, KnowledgeStructure.run_id,
-                KnowledgeStructure.structure_revision.label("knowledge_structure_revision"),
-                KnowledgeStructure.created_at, MaterialProcessingRun.status,
-                MaterialProcessingRun.base_revision,
-            ).join(MaterialProcessingRun, (MaterialProcessingRun.run_id == KnowledgeStructure.run_id)
-                   & (MaterialProcessingRun.learner_id == KnowledgeStructure.learner_id)
-                   & (MaterialProcessingRun.material_id == KnowledgeStructure.material_id)
-            ).join(Material, (Material.material_id == KnowledgeStructure.material_id)
-                   & (Material.learner_id == KnowledgeStructure.learner_id)
-            ).where(
-                KnowledgeStructure.learner_id == learner_id,
-                KnowledgeStructure.material_id.in_(ids),
-                MaterialProcessingRun.status.in_(("succeeded", "partial")),
-                MaterialProcessingRun.output_binding["knowledge_structure_revision"].astext == KnowledgeStructure.structure_revision,
-            ).order_by(KnowledgeStructure.created_at.desc(), KnowledgeStructure.run_id.desc())).mappings().all()
-            studies = session.execute(select(
-                StudySession.material_id, StudySession.study_session_id,
-                StudySession.knowledge_structure_revision, StudySession.status,
-                StudySession.current_concept_id, StudySession.started_at, KnowledgeStructure.run_id,
-            ).join(KnowledgeStructure,
-                (KnowledgeStructure.learner_id == StudySession.learner_id)
-                & (KnowledgeStructure.material_id == StudySession.material_id)
-                & (KnowledgeStructure.structure_revision == StudySession.knowledge_structure_revision),
-            ).where(StudySession.learner_id == learner_id, StudySession.material_id.in_(ids))
-              .order_by(StudySession.started_at.desc(), StudySession.study_session_id.desc())).mappings().all()
+            runs = (
+                session.execute(
+                    select(
+                        MaterialProcessingRun.material_id,
+                        MaterialProcessingRun.run_id,
+                        MaterialProcessingRun.status,
+                        MaterialProcessingRun.progress_stage,
+                        MaterialProcessingRun.completed_pages,
+                        MaterialProcessingRun.total_pages,
+                        MaterialProcessingRun.error_code,
+                        MaterialProcessingRun.created_at,
+                        MaterialProcessingRun.cancel_requested_at,
+                        MaterialProcessingRun.base_revision,
+                    )
+                    .where(
+                        MaterialProcessingRun.learner_id == learner_id,
+                        MaterialProcessingRun.material_id.in_(ids),
+                    )
+                    .distinct(MaterialProcessingRun.material_id)
+                    .order_by(
+                        MaterialProcessingRun.material_id,
+                        MaterialProcessingRun.created_at.desc(),
+                        MaterialProcessingRun.run_id.desc(),
+                    )
+                )
+                .mappings()
+                .all()
+            )
+            structures = (
+                session.execute(
+                    select(
+                        KnowledgeStructure.material_id,
+                        KnowledgeStructure.run_id,
+                        KnowledgeStructure.structure_revision.label(
+                            "knowledge_structure_revision"
+                        ),
+                        KnowledgeStructure.created_at,
+                        MaterialProcessingRun.status,
+                        MaterialProcessingRun.base_revision,
+                    )
+                    .join(
+                        MaterialProcessingRun,
+                        (MaterialProcessingRun.run_id == KnowledgeStructure.run_id)
+                        & (
+                            MaterialProcessingRun.learner_id
+                            == KnowledgeStructure.learner_id
+                        )
+                        & (
+                            MaterialProcessingRun.material_id
+                            == KnowledgeStructure.material_id
+                        ),
+                    )
+                    .join(
+                        Material,
+                        (Material.material_id == KnowledgeStructure.material_id)
+                        & (Material.learner_id == KnowledgeStructure.learner_id),
+                    )
+                    .where(
+                        KnowledgeStructure.learner_id == learner_id,
+                        KnowledgeStructure.material_id.in_(ids),
+                        MaterialProcessingRun.status.in_(("succeeded", "partial")),
+                        MaterialProcessingRun.output_binding[
+                            "knowledge_structure_revision"
+                        ].astext
+                        == KnowledgeStructure.structure_revision,
+                    )
+                    .order_by(
+                        KnowledgeStructure.created_at.desc(),
+                        KnowledgeStructure.run_id.desc(),
+                    )
+                )
+                .mappings()
+                .all()
+            )
+            studies = (
+                session.execute(
+                    select(
+                        StudySession.material_id,
+                        StudySession.study_session_id,
+                        StudySession.knowledge_structure_revision,
+                        StudySession.status,
+                        StudySession.current_concept_id,
+                        StudySession.started_at,
+                        KnowledgeStructure.run_id,
+                    )
+                    .join(
+                        KnowledgeStructure,
+                        (KnowledgeStructure.learner_id == StudySession.learner_id)
+                        & (KnowledgeStructure.material_id == StudySession.material_id)
+                        & (
+                            KnowledgeStructure.structure_revision
+                            == StudySession.knowledge_structure_revision
+                        ),
+                    )
+                    .where(
+                        StudySession.learner_id == learner_id,
+                        StudySession.material_id.in_(ids),
+                    )
+                    .order_by(
+                        StudySession.started_at.desc(),
+                        StudySession.study_session_id.desc(),
+                    )
+                )
+                .mappings()
+                .all()
+            )
             source_rows = session.execute(
                 select(MaterialSource, SourceNormalization, Artifact.size_bytes)
-                .join(SourceNormalization, SourceNormalization.source_id == MaterialSource.source_id)
-                .join(Artifact, Artifact.artifact_id == MaterialSource.original_artifact_id)
-                .where(MaterialSource.learner_id == learner_id, MaterialSource.material_id.in_(ids),
-                       MaterialSource.removed_at.is_(None))
+                .join(
+                    SourceNormalization,
+                    SourceNormalization.source_id == MaterialSource.source_id,
+                )
+                .join(
+                    Artifact,
+                    Artifact.artifact_id == MaterialSource.original_artifact_id,
+                )
+                .where(
+                    MaterialSource.learner_id == learner_id,
+                    MaterialSource.material_id.in_(ids),
+                    MaterialSource.removed_at.is_(None),
+                )
                 .order_by(MaterialSource.source_id)
             ).all()
+            from ..source_display import source_display
+            presentation = {source.source_id: source_display(learner_id, source, job, session)
+                            for source, job, _ in source_rows}
     except (DatabaseConfigurationError, SQLAlchemyError):
         raise MaterialLibraryError("MATERIAL_LIBRARY_STORAGE_FAILED") from None
 
-    latest = {row["material_id"]: {key: value for key, value in row.items() if key != "material_id"} for row in runs}
+    latest = {
+        row["material_id"]: {
+            key: value for key, value in row.items() if key != "material_id"
+        }
+        for row in runs
+    }
     published: dict[UUID, list[dict]] = {identity: [] for identity in ids}
     for row in structures:
-        published[row["material_id"]].append({key: value for key, value in row.items() if key != "material_id"})
+        published[row["material_id"]].append(
+            {key: value for key, value in row.items() if key != "material_id"}
+        )
     sessions: dict[UUID, list[dict]] = {identity: [] for identity in ids}
     for row in studies:
-        sessions[row["material_id"]].append({key: value for key, value in row.items() if key != "material_id"})
+        sessions[row["material_id"]].append(
+            {key: value for key, value in row.items() if key != "material_id"}
+        )
     sources = {}
     original_sizes = {identity: 0 for identity in ids}
     counts = {identity: 0 for identity in ids}
+    totals = {identity: {"page_count": 0, "image_count": 0, "media_seconds": 0} for identity in ids}
     for source, normalization, size in source_rows:
+        display = presentation[source.source_id]
+        total = totals[source.material_id]
+        if display["source_kind"] == "document":
+            total["page_count"] += normalization.page_count or 0
+        elif display["source_kind"] == "image":
+            total["image_count"] += display["image_count"] or 0
+        elif total["media_seconds"] is not None:
+            duration = display["duration_seconds"]
+            total["media_seconds"] = None if duration is None else total["media_seconds"] + duration
         sources[source.material_id] = {
+            **presentation[source.source_id],
             "source_id": source.source_id,
             "normalization_id": normalization.normalization_id,
             "original_artifact_id": source.original_artifact_id,
@@ -114,31 +270,44 @@ def read_material_library(
         }
         original_sizes[source.material_id] += size
         counts[source.material_id] += 1
-    return [{
-        **row,
-        "schema": "material-library-item/v1",
-        "size_bytes": original_sizes[row["material_id"]],
-        "source_count": counts[row["material_id"]],
-        "source": sources.get(row["material_id"]),
-        "display_name": row["display_name"],
-        "latest_attempt": latest.get(row["material_id"]),
-        "available_structures": published[row["material_id"]],
-        "study_sessions": sessions[row["material_id"]],
-    } for row in materials]
+    return [
+        {
+            **row,
+            "schema": "material-library-item/v1",
+            "size_bytes": original_sizes[row["material_id"]],
+            "source_count": counts[row["material_id"]],
+            "source_totals": totals[row["material_id"]],
+            "source": sources.get(row["material_id"]),
+            "display_name": row["display_name"],
+            "latest_attempt": latest.get(row["material_id"]),
+            "available_structures": published[row["material_id"]],
+            "study_sessions": sessions[row["material_id"]],
+        }
+        for row in materials
+    ]
 
 
-def rename_material(learner_id: UUID, material_id: UUID, display_name: str, *, dsn: str | None = None) -> dict:
+def rename_material(
+    learner_id: UUID, material_id: UUID, display_name: str, *, dsn: str | None = None
+) -> dict:
     """只修改教材顯示名稱，保留來源身分與內容。"""
-    if not isinstance(display_name, str) or any(category(char) in {"Cc", "Cs"} for char in display_name):
+    if not isinstance(display_name, str) or any(
+        category(char) in {"Cc", "Cs"} for char in display_name
+    ):
         raise MaterialLibraryError("REQUEST_INVALID")
     name = display_name.strip()
-    if not 1 <= len(name) <= 200:
+    if not 1 <= len(name) <= 40:
         raise MaterialLibraryError("REQUEST_INVALID")
     try:
         with database_session(dsn) as session:
-            material = session.scalar(select(Material).where(
-                Material.learner_id == learner_id, Material.material_id == material_id,
-            ).with_for_update())
+            material = session.scalar(
+                select(Material)
+                .where(
+                    Material.learner_id == learner_id,
+                    Material.material_id == material_id,
+                )
+                .with_for_update()
+            )
             if material is None:
                 raise MaterialLibraryError("RESOURCE_NOT_FOUND")
             if material.discard_requested_at is not None:

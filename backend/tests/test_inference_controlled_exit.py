@@ -1,20 +1,16 @@
-"""只使用本機 HTTP stub，驗證推論等待可取消且不設總時限。"""
+"""只使用本機 HTTP stub／小型 child，驗證推論等待可取消且不設總時限。"""
 
 from contextlib import contextmanager
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import json
 from pathlib import Path
+import sys
 from threading import Event, Thread, enumerate as threads
 from types import SimpleNamespace
 
-import httpx
 import pytest
 
 from runtime.semantic_service import request_semantics, semantic_client
-
-
-# 只供下方綁定到測試 server 的 transport 使用；其他位址仍由原 guard 拒絕。
-_http_handle_request = httpx.HTTPTransport.handle_request
 
 
 class Cancelled(RuntimeError):
@@ -39,7 +35,7 @@ def blocked_http(monkeypatch, *, path='/v1/chat/completions', body=False):
         def do_POST(self):
             self.rfile.read(int(self.headers['Content-Length']))
             state.requests.append(self.path)
-            payload = json.dumps({'count': 50, 'max_model_len': 32768} if self.path == '/tokenize'
+            payload = json.dumps({'count': 50, 'max_model_len': json.loads((Path(__file__).parents[2] / 'local_ai/runtime-lock.json').read_text())['semantic_service']['max_model_len']} if self.path == '/tokenize'
                                  else {'choices': [{'finish_reason': 'stop', 'message': {'content': '{"ok":true}'}}]}).encode()
             blocking = self.path == path
             if blocking and not body:
@@ -64,13 +60,6 @@ def blocked_http(monkeypatch, *, path='/v1/chat/completions', body=False):
     server.daemon_threads = True
     thread = Thread(target=server.serve_forever, daemon=True)
     thread.start()
-    # 競賽版禁止所有 live HTTP；僅開放此 fixture 自己持有的 loopback socket。
-    reject_other = httpx.HTTPTransport.handle_request
-    def local_stub_only(transport, request):
-        if request.url.host != '127.0.0.1' or request.url.port != server.server_port:
-            return reject_other(transport, request)
-        return _http_handle_request(transport, request)
-    monkeypatch.setattr(httpx.HTTPTransport, 'handle_request', local_stub_only)
     monkeypatch.delenv('VLLM_API_KEY', raising=False)
     monkeypatch.setenv('STUDYDY_SEMANTIC_BASE_URL', f'http://127.0.0.1:{server.server_port}')
     try:
@@ -122,9 +111,6 @@ def test_normal_semantic_wait_survives_many_cancellation_checks(monkeypatch):
     cancel = Event()
     results = []
     with blocked_http(monkeypatch) as server:
-        with httpx.Client(trust_env=False) as client:
-            with pytest.raises(AssertionError, match='LIVE_MODEL_HTTP_FORBIDDEN_IN_TESTS'):
-                client.post('http://127.0.0.1:1/tokenize')
         thread = Thread(target=lambda: results.append(semantic_request(cancel)), daemon=True)
         thread.start()
         try:

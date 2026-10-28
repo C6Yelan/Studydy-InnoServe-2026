@@ -29,13 +29,12 @@ for (const width of [1366, 390]) {
     });
     const label = "使用者端與多階段網路服務中的請求及回應角色";
     const fixture = await studyLayoutFixture(page, "completed", {
-      navigation: true,
-      kind: "remediation",
+      navigation: true, kind: "remediation",
       wrong: [],
       nextLabel: label,
     });
     await fixture.open();
-    const next = page.getByRole("button", { name: `下一個觀念：${label}`, exact: true });
+    const next = page.getByRole("button", { name: "繼續下一個概念", exact: true });
     await expect(next).toBeVisible();
     await expect(
       page.getByRole("button", { name: /查看原始初篩題組|回到地圖繼續學習/ }),
@@ -52,10 +51,9 @@ for (const width of [1366, 390]) {
     ).toBeDisabled();
     await expect(page).toHaveURL(before);
     release();
-    await expect(page).toHaveURL(new RegExp(fixture.path + "$"));
+    await expect(page).toHaveURL(new RegExp(fixture.path + "/assessment-sets/"));
     await expect(page.getByRole("heading", { name: label, level: 1, exact: true })).toBeVisible();
-    await expect(page.locator(".current-concept-card")).toContainText(label);
-    await expect(page.getByRole("button", { name: "開始本輪 6 題", exact: true })).toBeVisible();
+    await expect(page.getByRole("progressbar", { name: "準備進度", exact: true })).toBeVisible();
     const requests = fixture.requests.filter((request) => request.path.endsWith("/guidance/apply"));
     expect(requests).toHaveLength(1);
     expect(JSON.parse(requests[0].body!)).toEqual({
@@ -65,25 +63,31 @@ for (const width of [1366, 390]) {
   });
 }
 
-test("complete applies authority before showing completion", async ({ page }) => {
+for (const width of [1440, 390]) test(`complete applies authority before showing completion at ${width}px`, async ({ page }, testInfo) => {
+  await page.setViewportSize({ width, height: width === 390 ? 844 : 900 });
   const fixture = await studyLayoutFixture(page, "completed", {
-    navigation: true,
-    nextAction: "complete",
+    navigation: true, nextAction: "complete",
     wrong: [],
   });
   await fixture.open();
   const release = await holdGuidanceApply(page);
   await page.getByRole("button", { name: "完成本次學習", exact: true }).click();
   await expect(page.getByRole("button", { name: "正在完成…", exact: true })).toBeDisabled();
-  await expect(page.getByRole("heading", { name: "學習已完成", exact: true })).toHaveCount(0);
+  await expect(page.getByRole("heading", { name: "本次學習已結束", exact: true })).toHaveCount(0);
   release();
-  await expect(page.getByRole("heading", { name: "學習已完成", exact: true })).toBeVisible();
+  await expect(page.getByRole("heading", { name: "本次學習已結束", exact: true })).toBeVisible();
   await expect(page).toHaveURL(new RegExp(fixture.path + "$"));
+  await expect(page.getByRole("button", { name: "查看知識地圖", exact: true })).toBeVisible();
+  await expect(page.getByRole("heading", { name: "本輪檢測結果", exact: true })).toBeVisible();
+  await page.reload();
+  await expect(page.getByRole("heading", { name: "本次學習已結束", exact: true })).toBeVisible();
+  expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);
+  await page.screenshot({ path: testInfo.outputPath(`study-completed-${width}.png`) });
   await expect(page.getByRole("button", { name: /下一個觀念|完成本次學習/ })).toHaveCount(0);
 });
 
 for (const [name, stage, scenario] of [
-  ["wrong points", "completed", { wrong: [2] }],
+  ["wrong points", "completed", { wrong: [2], conceptStatus: "needs_review", nextAction: "assess" }],
   ["active remediation", "ready", { kind: "remediation" }],
   ["preparing remediation", "preparing", { kind: "remediation" }],
   ["another active set", "completed", { wrong: [], preparingHistory: true }],
@@ -93,8 +97,20 @@ for (const [name, stage, scenario] of [
     await fixture.open();
     await expect(page.getByRole("button", { name: /下一個觀念|完成本次學習/ })).toHaveCount(0);
     if (name === "wrong points")
-      await expect(page.getByRole("button", { name: "開始補強 1 題", exact: true })).toBeVisible();
+      await expect(page.getByRole("button", { name: "補強這 1 個重點", exact: true })).toBeVisible();
   });
+
+test("a completed concept keeps saved completion and prioritizes remediation", async ({ page }) => {
+  const fixture = await studyLayoutFixture(page, "completed", {
+    navigation: true, wrong: [2], conceptStatus: "completed",
+  });
+  await fixture.open();
+  await expect(page.getByText("本次練習有需要加強的重點，先前的完成紀錄會保留。", { exact: true })).toBeVisible();
+  await expect(page.getByRole("button", { name: "補強這 1 個重點", exact: true })).toBeEnabled();
+  await expect(page.locator(".assessment-cycle .primary-button")).toHaveCount(1);
+  await page.getByRole("button", { name: "查看知識地圖", exact: true }).click();
+  expect(await page.evaluate(() => window.history.state.knowledgeMap.detail)).toBe(fixture.knowledgeStructure.concepts[0].concept_id);
+});
 
 test("failed apply keeps result and allows retry with the same guidance", async ({ page }) => {
   const fixture = await studyLayoutFixture(page, "completed", { navigation: true, wrong: [] });
@@ -110,10 +126,10 @@ test("failed apply keeps result and allows retry with the same guidance", async 
       });
     await route.fallback();
   });
-  await page.getByRole("button", { name: "下一個觀念：使用者端", exact: true }).click();
+  await page.getByRole("button", { name: "繼續下一個概念", exact: true }).click();
   await expect(page.getByRole("alert")).toBeVisible();
   await expect(page).toHaveURL(before);
-  await page.getByRole("button", { name: "下一個觀念：使用者端", exact: true }).click();
+  await page.getByRole("button", { name: "繼續下一個概念", exact: true }).click();
   await expect(
     page.getByRole("heading", { name: "使用者端", level: 1, exact: true }),
   ).toBeVisible();
@@ -136,12 +152,12 @@ test("stale guidance refreshes the decision without automatic apply", async ({ p
     }
     await route.fallback();
   });
-  await page.getByRole("button", { name: "下一個觀念：使用者端", exact: true }).click();
+  await page.getByRole("button", { name: "繼續下一個概念", exact: true }).click();
   await expect(page.getByRole("button", { name: "完成本次學習", exact: true })).toBeVisible();
   await expect(page).toHaveURL(before);
   expect(revisions).toHaveLength(1);
   await page.getByRole("button", { name: "完成本次學習", exact: true }).click();
-  await expect(page.getByRole("heading", { name: "學習已完成", exact: true })).toBeVisible();
+  await expect(page.getByRole("heading", { name: "本次學習已結束", exact: true })).toBeVisible();
   expect(revisions[1]).toBe("learner-guidance:sha256:" + "2".padStart(64, "0"));
 });
 
@@ -149,13 +165,12 @@ test("incomplete cycle follows the backend next action without claiming a pass",
   page,
 }) => {
   const fixture = await studyLayoutFixture(page, "completed", {
-    navigation: true,
-    wrong: [],
+    navigation: true, wrong: [],
     unavailable: 1,
   });
   await fixture.open();
   await expect(page.getByText("本輪有未作答或未檢測的重點。", { exact: true })).toBeVisible();
-  await page.getByRole("button", { name: "下一個觀念：使用者端", exact: true }).click();
+  await page.getByRole("button", { name: "繼續下一個概念", exact: true }).click();
   await expect(
     page.getByRole("heading", { name: "使用者端", level: 1, exact: true }),
   ).toBeVisible();

@@ -4,13 +4,6 @@ from dataclasses import dataclass
 from typing import Any
 from uuid import UUID
 
-from knowledge_map.structure import validate_knowledge_structure
-
-
-class MapContextError(RuntimeError):
-    pass
-
-
 @dataclass(frozen=True)
 class EvidenceContext:
     evidence_id: str
@@ -42,18 +35,18 @@ class MapContext:
     initial_learning_path: tuple[str, ...]
 
 
-def context_from_structure(material_id: UUID, document: dict[str, Any]) -> MapContext:
-    if not isinstance(material_id, UUID) or not validate_knowledge_structure(document):
-        raise MapContextError("KNOWLEDGE_STRUCTURE_UNAVAILABLE")
-    return _context_from_validated_document(material_id, document)
-
-
-def _context_from_validated_document(material_id: UUID, document: dict[str, Any]) -> MapContext:
+def _context_from_validated_document(
+    material_id: UUID, document: dict[str, Any]
+) -> MapContext:
     evidence_by_id = {item["evidence_id"]: item for item in document["evidence"]}
-    prerequisites: dict[str, list[str]] = {concept["concept_id"]: [] for concept in document["concepts"]}
+    prerequisites: dict[str, list[str]] = {
+        concept["concept_id"]: [] for concept in document["concepts"]
+    }
     for relation in document["relations"]:
         if relation["type"] == "prerequisite":
-            prerequisites[relation["target_concept_id"]].append(relation["source_concept_id"])
+            prerequisites[relation["target_concept_id"]].append(
+                relation["source_concept_id"]
+            )
     concepts = []
     for concept in document["concepts"]:
         claims = []

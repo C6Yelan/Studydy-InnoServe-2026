@@ -1,6 +1,8 @@
-import { useEffect, useRef, useState } from "react";
+import { createPortal } from "react-dom";
+import { useEffect, useId, useRef, useState } from "react";
 import { errorMessage, type StudydyApiClient } from "../api/client";
 import type { EvidenceSourceView, EvidenceView } from "../api/contracts";
+import "./source-reference.css";
 
 export function sourceLinks(evidence: EvidenceView[]): EvidenceView[] {
   // 僅合併同教材同 PDF 頁的入口，保留代表 Evidence 供 resolver 回查；不修改 Evidence。
@@ -19,25 +21,79 @@ export function sourceLinks(evidence: EvidenceView[]): EvidenceView[] {
   return [...links.values()];
 }
 
+const timedSource = /\.(mp3|m4a|wav|mp4|youtube)$/i;
+
+/** 音訊、影片與 YouTube 的「頁」是約 2 分鐘的逐字稿時間段，畫面稱為「段」。 */
+export function evidencePlace(
+  evidence: Pick<EvidenceView, "page" | "normalized_page" | "source_name">,
+): string {
+  const page = evidence.normalized_page ?? evidence.page;
+  return evidence.source_name && timedSource.test(evidence.source_name)
+    ? `第 ${page} 段`
+    : `第 ${page} 頁`;
+}
+
+/** 完整來源名稱：文件標「PDF 第 N 頁」，音訊／影片／YouTube 標「第 N 段」。 */
+export function evidenceSourceTitle(
+  evidence: Pick<EvidenceView, "page" | "normalized_page" | "source_name">,
+): string {
+  const timed = !!evidence.source_name && timedSource.test(evidence.source_name);
+  return `${evidence.source_name ?? "教材"} · ${timed ? "" : "PDF "}${evidencePlace(evidence)}`;
+}
+
+function clock(seconds: number): string {
+  const whole = Math.floor(seconds);
+  const hours = Math.floor(whole / 3600);
+  const rest = `${String(Math.floor((whole % 3600) / 60)).padStart(2, "0")}:${String(whole % 60).padStart(2, "0")}`;
+  return hours ? `${hours}:${rest}` : rest;
+}
+
 export function SourceButton({
   apiClient,
   resolver,
   evidence,
+  label,
+  title,
+  reference,
 }: {
   apiClient: StudydyApiClient;
   resolver: string;
-  evidence: EvidenceView;
+  evidence: Pick<EvidenceView, "evidence_id" | "page" | "normalized_page" | "source_name">;
+  label?: string;
+  /** 按鈕文字較短時，提示完整來源。 */
+  title?: string;
+  reference?: { number?: number; list?: boolean; quote: string };
 }) {
   const [source, setSource] = useState<EvidenceSourceView | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const [opened, setOpened] = useState(false);
+  const [panelTop, setPanelTop] = useState(16);
+  const [preview, setPreview] = useState<{left:number;top:number}|null>(null);
+  const previewAt = () => { const box = opener.current?.getBoundingClientRect(); if (box) setPreview({left:Math.max(8, Math.min(box.left, window.innerWidth - Math.min(352, window.innerWidth * .75) - 8)),top:Math.min(box.bottom + 8, window.innerHeight - 240)}); };
+  const previewId = useId();
+  const previewTimer = useRef<ReturnType<typeof setTimeout> | undefined>(undefined);
+  const closePreview = () => { previewTimer.current = setTimeout(() => setPreview(null), 150); };
+  const keepPreview = () => clearTimeout(previewTimer.current);
+  useEffect(() => () => clearTimeout(previewTimer.current), []);
   const [busy, setBusy] = useState(false);
   const dialog = useRef<HTMLDialogElement>(null);
   const opener = useRef<HTMLButtonElement>(null);
   useEffect(() => {
-    if (source) dialog.current?.showModal();
-  }, [source]);
-  const open = async () => {
-    if (busy) return;
+    if (opened && source) {
+      if (reference) {
+        const position = () => setPanelTop(Math.max(8, (document.querySelector(".material-header")?.getBoundingClientRect().bottom ?? 8) + 8));
+        position();
+        dialog.current?.show();
+        dialog.current?.querySelector<HTMLButtonElement>("button")?.focus();
+        window.addEventListener("resize", position);
+        window.addEventListener("scroll", position, { passive: true });
+        return () => { window.removeEventListener("resize", position); window.removeEventListener("scroll", position); };
+      }
+      dialog.current?.showModal();
+    }
+  }, [source, opened]);
+  const load = async () => {
+    if (busy || source) return;
     setBusy(true);
     setError(null);
     try {
@@ -48,31 +104,42 @@ export function SourceButton({
       setBusy(false);
     }
   };
-  return (
+  useEffect(() => { if (reference) void load(); }, [resolver, evidence.evidence_id]);
+  const place = source?.playback ? `▶ ${clock(source.playback.start_seconds)}` : source?.format === "images" ? source.label : source ? `p.${source.normalized_page}` : "來源";
+  const name = source?.display_name ?? source?.original_name ?? evidence.source_name ?? "教材";
+  const content = (
     <>
       <button
         ref={opener}
-        className="text-button"
+        className={reference ? `text-button source-reference-button${reference.list ? " source-reference-list" : ""}` : "text-button source-chip"}
         type="button"
         disabled={busy}
-        onClick={() => void open()}
+        onFocus={() => { if (reference) previewAt(); }}
+        onBlur={closePreview}
+        onKeyDown={event => { if (event.key === "Escape" && preview) { event.stopPropagation(); setPreview(null); } }}
+        onClick={() => { setPreview(null); setOpened(true); void load(); }}
+        aria-describedby={reference && preview ? previewId : undefined}
+        aria-label={reference ? `${reference.number ? `來源 ${reference.number}：` : ""}${name} · ${place}` : undefined}
         aria-haspopup="dialog"
+        title={title ?? label}
       >
-        {busy
+        {reference ? (reference.list ? <>{source?.playback ? "▶" : source?.format === "images" ? "▧" : "▤"} {reference.number ? `${reference.number}. ` : ""}{name} · {place}</> : <sup>[{reference.number ?? place}]</sup>) : busy
           ? "正在讀取來源…"
-          : evidence.source_name
-            ? `${evidence.source_name} · PDF 第 ${evidence.normalized_page ?? evidence.page} 頁`
-            : `查看第 ${evidence.normalized_page ?? evidence.page} 頁來源`}
+          : label ?? (evidence.source_name
+            ? evidenceSourceTitle(evidence)
+            : `查看${evidencePlace(evidence)}來源`)}
       </button>
+      {reference && preview && createPortal(<span onMouseEnter={keepPreview} onMouseLeave={closePreview} style={preview} id={previewId} role="tooltip" className="source-reference-preview"><strong>{name} · {place}</strong><span>{reference.quote}</span>{source?.format === "images" && <iframe src={source.preview_url} title={`${name}圖片預覽`} tabIndex={-1}/>}</span>, document.body)}
       {error && (
         <p role="alert" className="form-error">
           {error}
         </p>
       )}
-      {source && (
+      {source && opened && createPortal(
         <dialog
           ref={dialog}
-          className="source-dialog"
+          className={reference ? "source-reference-panel" : "source-dialog"}
+          style={reference ? { top: panelTop, maxHeight: `calc(100dvh - ${panelTop}px - 1rem)` } : undefined}
           aria-label="教材來源"
           onCancel={(event) => {
             event.preventDefault();
@@ -80,14 +147,15 @@ export function SourceButton({
             dialog.current?.close();
           }}
           onKeyDown={(event) => {
-            if (event.key === "Escape") event.stopPropagation();
+            if (event.key === "Escape") { event.stopPropagation(); if (reference) dialog.current?.close(); }
           }}
           onClose={() => {
-            setSource(null);
+            setOpened(false);
+            if (!reference) setSource(null);
             opener.current?.focus();
           }}
         >
-          <h2>{source.original_name}</h2>
+          <h2>{source.display_name ?? source.original_name}</h2>
           <p>{source.label}</p>
           {source.accuracy !== "exact" && (
             <p>
@@ -95,24 +163,62 @@ export function SourceButton({
               ，請以轉換後 PDF 回查。
             </p>
           )}
-          {source.format !== "pdf" && <p>此 PDF 由系統自動轉換，轉換品質不保證。</p>}
+          {source.playback ? (
+            <>
+              <p>逐字稿由本機語音辨識或影片上傳者的字幕產生，可能有誤，請以原音回查。</p>
+              {source.playback.kind === "audio" ? (
+                <audio
+                  className="source-media"
+                  controls
+                  autoPlay
+                  preload="metadata"
+                  src={`${source.playback.url}#t=${Math.floor(source.playback.start_seconds)}`}
+                  aria-label={`從 ${clock(source.playback.start_seconds)} 播放原音`}
+                />
+              ) : (
+                <iframe
+                  className="source-media source-youtube"
+                  src={`https://www.youtube-nocookie.com/embed/${source.playback.video_id}?start=${Math.floor(source.playback.start_seconds)}&autoplay=1&rel=0`}
+                  title={`YouTube 影片，從 ${clock(source.playback.start_seconds)} 播放`}
+                  allow="autoplay; encrypted-media; picture-in-picture"
+                  allowFullScreen
+                  referrerPolicy="strict-origin-when-cross-origin"
+                />
+              )}
+            </>
+          ) : source.format === "images" ? (
+            <p>圖片中的文字由系統辨識，辨識品質不保證。</p>
+          ) : (
+            source.format !== "pdf" && <p>此 PDF 由系統自動轉換，轉換品質不保證。</p>
+          )}
           <div className="state-actions">
             <a
-              className="primary-button"
+              className={source.playback ? "secondary-button" : "primary-button"}
               href={source.preview_url}
               target="_blank"
               rel="noopener noreferrer"
             >
-              開啟 PDF 來源頁
+              {source.playback ? "開啟逐字稿頁" : source.format === "images" ? "開啟圖片頁" : "開啟 PDF 來源頁"}
             </a>
-            <a
-              className="secondary-button"
-              href={source.original_url}
-              target="_blank"
-              rel="noopener noreferrer"
-            >
-              下載原檔
-            </a>
+            {source.playback?.kind === "youtube" ? (
+              <a
+                className="secondary-button"
+                href={`https://www.youtube.com/watch?v=${source.playback.video_id}&t=${Math.floor(source.playback.start_seconds)}s`}
+                target="_blank"
+                rel="noopener noreferrer"
+              >
+                在 YouTube 開啟
+              </a>
+            ) : (
+              <a
+                className="secondary-button"
+                href={source.original_url}
+                target="_blank"
+                rel="noopener noreferrer"
+              >
+                {source.format === "video" ? "下載音軌" : "下載原檔"}
+              </a>
+            )}
             <button
               className="secondary-button"
               type="button"
@@ -121,8 +227,9 @@ export function SourceButton({
               關閉
             </button>
           </div>
-        </dialog>
+        </dialog>, document.body
       )}
     </>
   );
+  return reference ? <span className="source-reference" onMouseEnter={() => { keepPreview(); previewAt(); }} onMouseLeave={closePreview}>{content}</span> : content;
 }

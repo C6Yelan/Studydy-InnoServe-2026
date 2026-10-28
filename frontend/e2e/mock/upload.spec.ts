@@ -1,5 +1,7 @@
+import { mockCreationSettings } from "../fixtures/creation-settings";
 import { expect, test, type Page } from "@playwright/test";
 import type { MaterialProcessingRunView, SourceView } from "../../src/api/contracts";
+import { emptyCelebrationClaim, emptyLearningActivity } from "../fixtures/learning-activity";
 
 const uuid = (seed: number) => `11111111-1111-4111-8111-${String(seed).padStart(12, "0")}`;
 const material = uuid(1);
@@ -28,7 +30,9 @@ async function fileTransfer(page: Page, name: string, type: string) {
 
 async function setup(page: Page) {
   const state = {
+    settings: null as Awaited<ReturnType<typeof mockCreationSettings>> | null,
     drafts: [] as string[],
+    name:"A.pdf", renames:[] as string[], renameFailsOnce:false,
     uploads: [] as { name: string; key: string }[],
     sources: [] as SourceView[],
     starts: [] as {
@@ -47,6 +51,16 @@ async function setup(page: Page) {
       `Unexpected upload request: ${route.request().method()} ${route.request().url()}`,
     );
   });
+  state.settings = await mockCreationSettings(page);
+  await page.route("**/v1/account/storage", route => route.fulfill({ json: { schema: "account-storage/v2", used_bytes: 0, reserved_bytes: 0, limit_bytes: 5368709120, remaining_bytes: 5368709120, breakdown: { material_files_bytes: 0, podcast_audio_bytes: 0, podcast_video_bytes: 0, analysis_bytes: 0, reserved_bytes: 0 }, largest_materials: [] } }));
+  // 頁首帳號設定讀取名稱；這些案例不涉及名稱。
+  await page.route("**/v1/profile", (route) => route.fulfill({ json: { schema: "learner-profile/v1", display_name: null } }));
+  // 頁首學習進度；這些案例不涉及學習紀錄。
+  await page.route("**/v1/learning-activity/celebrations/claim", (route) => {
+    expect(route.request().method()).toBe("POST");
+    return route.fulfill({ json: emptyCelebrationClaim });
+  });
+  await page.route("**/v1/learning-activity", (route) => route.fulfill({ json: emptyLearningActivity }));
   await page.route("**/v1/session", (route) =>
     route.fulfill({ json: { schema: "learner-identity/v1", learner_id: uuid(99) } }),
   );
@@ -58,10 +72,10 @@ async function setup(page: Page) {
   await page.route("**/v1/source-capabilities", (route) =>
     route.fulfill({
       json: {
-        schema: "source-capabilities/v1",
+        schema: "source-capabilities/v2", max_request_bytes: 104857600, max_images: 50, max_media_seconds: 7200, youtube: false,
         formats: [
-          { extension: ".pdf", media_type: "application/pdf", max_bytes: 104857600 },
-          { extension: ".txt", media_type: "text/plain", max_bytes: 104857600 },
+          { extension: ".pdf", media_type: "application/pdf", max_bytes: 104857600, kind: "document" },
+          { extension: ".txt", media_type: "text/plain", max_bytes: 104857600, kind: "document" },
         ],
       },
     }),
@@ -70,7 +84,7 @@ async function setup(page: Page) {
     schema: "material-library-item/v1",
     material_id: material,
     source_artifact_id: null,
-    display_name: "A.pdf",
+    display_name: state.name,
     size_bytes: 128,
     created_at: stamp,
     latest_attempt: state.run,
@@ -85,6 +99,7 @@ async function setup(page: Page) {
     expect(route.request().method()).toBe("POST");
     expect(route.request().headers()["idempotency-key"]).toMatch(/\S/);
     state.drafts.push(route.request().headers()["idempotency-key"]);
+    state.name=route.request().postDataJSON().display_name;
     if (state.draftLost) {
       state.draftLost = false;
       return route.abort("connectionreset");
@@ -95,6 +110,11 @@ async function setup(page: Page) {
     });
   });
   await page.route(`**/v1/materials/${material}`, (route) => route.fulfill({ json: item() }));
+  await page.route(`**/v1/materials/${material}/rename`,route=>{
+    const body=route.request().postDataJSON();expect(body.schema).toBe('material-rename/v1');state.renames.push(body.display_name);
+    if(state.renameFailsOnce){state.renameFailsOnce=false;return route.fulfill({status:503,json:failure});}
+    state.name=body.display_name;return route.fulfill({json:item()});
+  });
   const listing = () => ({
     schema: "material-sources/v1",
     material_id: material,
@@ -113,6 +133,7 @@ async function setup(page: Page) {
           normalization_id: uuid(n + 1),
           original_artifact_id: uuid(n + 2),
           original_name: name,
+          source_kind: "document",
           media_type: route.request().headers()["content-type"],
           status: failed ? "failed" : "ready",
           normalized_artifact_id: failed ? null : uuid(n + 3),
@@ -150,6 +171,8 @@ async function setup(page: Page) {
     }
     state.run = {
       schema: "material-processing-run/v1",
+      auto_retry_count: 0,
+      auto_retry_reason: null,
       run_id: runId,
       material_id: material,
       source_artifact_id: uuid(13),
@@ -207,6 +230,11 @@ for (const width of [1536, 390]) {
     expect(error.y + error.height).toBeLessThanOrEqual(card.y);
     await page.getByRole("button", { name: "移除 A.pdf", exact: true }).click();
     await expect(page.locator(".chosen-file")).toHaveCount(0);
+    // 原生檔案輸入不保留前次值，移除後選同一檔仍能加入。
+    await expect(input).toHaveValue("");
+    await input.setInputFiles(pdf);
+    await expect(page.locator(".chosen-file strong")).toHaveText(["A.pdf"]);
+    await page.getByRole("button", { name: "移除 A.pdf", exact: true }).click();
     await input.setInputFiles([
       pdf,
       txt,
@@ -231,14 +259,14 @@ for (const width of [1536, 390]) {
     const state = await setup(page);
     await page.goto("/upload");
     await expect(page.getByRole("heading", { name: "上傳教材", exact: true })).toBeVisible();
-    await expect(page.locator(".upload-hero p:last-child")).toHaveText(
-      "選擇一份或多份教材，確認來源後再開始分析。",
+    await expect(page.locator(".flow-head p")).toHaveText(
+      "選擇文件、圖片、音訊、影片或 YouTube 影片，確認來源後再開始分析。",
     );
     await expect(page.locator(".file-drop strong")).toHaveText("將教材拖放到此處，或點擊選取");
     await expect(page.locator(".file-drop > span:last-child")).toHaveText(
-      "PDF、TXT · 可選多份 · 每份最大 100.0 MiB",
+      "文件 PDF、TXT（每份最大 100.0 MiB） · 可選多份",
     );
-    const conversion = page.getByText("非 PDF 教材會先轉換為 PDF，請在下一步確認轉換內容。", {
+    const conversion = page.getByText("非 PDF 教材會先轉換為 PDF；音訊、影片與 YouTube 會轉成逐字稿。請在下一步確認轉換內容。", {
       exact: true,
     });
     const input = page.getByLabel("選擇教材檔案", { exact: true });
@@ -265,6 +293,7 @@ test("initial multi-source upload confirms exact order and retries analysis", as
   state.uploadLost = true;
   state.analysisFailsOnce = true;
   await page.goto("/upload");
+  await expect(page.getByLabel("選擇教材檔案", { exact: true })).toBeEnabled();
   await page.getByLabel("選擇教材檔案", { exact: true }).setInputFiles([pdf, txt]);
   await expect(page.locator(".chosen-file")).toHaveCount(2);
   const upload = page.getByRole("button", { name: "上傳並確認來源", exact: true });
@@ -342,7 +371,7 @@ test("capability failure blocks upload until the configured limit is known", asy
   await expect(page.getByRole("button", { name: "上傳並確認來源", exact: true })).toBeDisabled();
 });
 
-test("selection waits for capabilities instead of rejecting a supported non-PDF format", async ({
+test("file selection and dropping stay disabled until capabilities are loaded", async ({
   page,
 }) => {
   await setup(page);
@@ -358,9 +387,12 @@ test("selection waits for capabilities instead of rejecting a supported non-PDF 
   const input = page.getByLabel("選擇教材檔案", { exact: true });
   await expect(input).toBeDisabled();
   const data = await fileTransfer(page, "B.txt", "text/plain");
+  await page.locator(".file-drop").dispatchEvent("dragenter", { dataTransfer: data });
+  await expect(page.locator(".file-drop")).not.toHaveClass(/is-dragging/);
   await page.locator(".file-drop").dispatchEvent("drop", { dataTransfer: data });
   await data.dispose();
-  await expect(page.getByRole("alert")).toContainText("支援格式載入");
+  await expect(page.getByRole("alert")).toHaveCount(0);
+  await expect(page.getByText("正在載入上傳限制", { exact: true })).toBeVisible();
   await expect(page.locator(".chosen-file")).toHaveCount(0);
   release();
   await expect(input).toBeEnabled();
@@ -447,4 +479,73 @@ test("drag state and accessible picker support multiple files without accidental
     await expect(page.locator(".chosen-file")).toHaveCount(3);
   }
   expect(state.uploads).toHaveLength(0);
+});
+
+
+test('confirmation edits the default material name and saves it before starting analysis',async({page},testInfo)=>{
+ const state=await setup(page);await page.goto('/upload');
+ await page.getByLabel('選擇教材檔案',{exact:true}).setInputFiles({...pdf,name:'01.機率模型.pdf'});
+ await page.getByRole('button',{name:'上傳並確認來源',exact:true}).click();
+ const name=page.getByRole('textbox',{name:'教材名稱',exact:true}),start=page.getByRole('button',{name:'開始分析教材',exact:true});
+ await expect(name).toHaveValue('01.機率模型');expect(state.name).toBe('01.機率模型');
+ await expect(name).toHaveAttribute('maxlength','40');
+ await name.fill('字'.repeat(41));await expect(name).toHaveValue('字'.repeat(40));
+ await name.fill('   ');await expect(start).toBeDisabled();await expect(page.getByText('請填寫教材名稱。',{exact:true})).toBeVisible();
+ await name.fill('自訂機率課程');
+ for(const [width,height] of [[1440,900],[1300,900],[1200,900],[1024,768],[390,844]]){
+  await page.setViewportSize({width,height});await page.screenshot({path:testInfo.outputPath(`material-name-${width}.png`),animations:'disabled'});
+  expect(await page.evaluate(()=>document.documentElement.scrollWidth<=innerWidth)).toBe(true);
+ }
+ state.renameFailsOnce=true;await start.click();await expect.poll(()=>state.renames.length).toBe(1);
+ await expect(page.getByRole('alert')).toBeVisible();expect(state.starts).toHaveLength(0);await expect(name).toHaveValue('自訂機率課程');
+ await start.click();await expect.poll(()=>state.starts.length).toBe(1);
+ expect(state.renames).toEqual(['自訂機率課程','自訂機率課程']);expect(state.name).toBe('自訂機率課程');
+});
+
+test('confirmation polling preserves the edited name and reload keeps the saved draft name',async({page})=>{
+ await page.clock.install();const state=await setup(page);await page.goto('/upload');
+ await page.getByLabel('選擇教材檔案',{exact:true}).setInputFiles(txt);
+ await page.getByRole('button',{name:'上傳並確認來源',exact:true}).click();
+ await expect(page).toHaveURL(new RegExp(`/materials/${material}/sources$`));
+ Object.assign(state.sources[0],{status:'pending',normalized_artifact_id:null,page_count:null});
+ await page.reload();
+ const name=page.getByRole('textbox',{name:'教材名稱',exact:true});await expect(name).toHaveValue('B');
+ let reads=0;page.on('request',request=>{if(request.method()==='GET'&&new URL(request.url()).pathname===`/v1/materials/${material}/sources`)reads++;});
+ await name.fill('尚未儲存的名稱');await page.clock.runFor(6000);await expect.poll(()=>reads).toBeGreaterThan(0);await expect(name).toHaveValue('尚未儲存的名稱');
+ state.name='先前已自訂的名稱.pdf';await page.reload();await expect(name).toHaveValue('先前已自訂的名稱.pdf');
+});
+
+for (const goal of [false, true]) test(`creation saves the selected ${goal ? 'goal' : 'no goal'} before analysis`, async ({ page }, testInfo) => {
+ const state=await setup(page);
+ await page.goto('/upload');
+ const picker=page.getByLabel('選擇教材檔案',{exact:true});await expect(picker).toBeEnabled();await picker.setInputFiles(pdf);
+ await page.getByRole('button',{name:'上傳並確認來源',exact:true}).click();
+ const settings=page.getByRole('button',{name:'學習目標',exact:true});await expect(settings).toBeEnabled();await settings.click();
+ const dialog=page.getByRole('dialog',{name:'學習目標',exact:true});
+ if(goal){await dialog.getByRole('checkbox',{name:'設定學習目標（選填）'}).check();await expect(dialog.getByRole('button',{name:'套用設定'})).toBeDisabled();await dialog.getByLabel('目標日期',{exact:true}).fill('2026-11-30');await dialog.getByRole('radio',{name:/80%/}).check();}
+ for(const [width,height] of [[1440,900],[1300,900],[1200,900],[1024,768],[390,844]]){
+  await page.setViewportSize({width,height});await expect(dialog).toBeInViewport({ratio:1});
+  expect(await page.evaluate(()=>document.documentElement.scrollWidth<=innerWidth)).toBe(true);
+  await page.screenshot({path:testInfo.outputPath(`creation-settings-${goal?'goal':'skip'}-${width}.png`),animations:'disabled'});
+ }
+ await dialog.getByRole('button',{name:'套用設定'}).click();await expect(settings).toBeFocused();
+ const start=page.getByRole('button',{name:'開始分析教材',exact:true});
+ await page.setViewportSize({width:1440,height:900});await page.evaluate(()=>window.scrollTo(0,0));await expect(start).toBeInViewport({ratio:1});
+ await page.screenshot({path:testInfo.outputPath(`creation-confirm-${goal?'goal':'skip'}-1440.png`),animations:'disabled'});
+ state.settings!.failNext=true;await start.click();await expect(page.getByRole('alert')).toBeVisible();expect(state.starts).toHaveLength(0);
+ await start.click();await expect.poll(()=>state.starts.length).toBe(1);
+ expect(state.settings!.goal).toEqual(goal?{target_date:'2026-11-30',target_percent:80}:null);
+ expect(state.settings!.writes.map(write=>write.method)).toEqual([goal?'PUT':'DELETE',goal?'PUT':'DELETE']);
+});
+
+test('a saved draft goal can be skipped and published goal rejection prevents analysis',async({page})=>{
+ const state=await setup(page);state.settings!.goal={target_date:'2026-11-30',target_percent:60};
+ await page.goto('/upload');const picker=page.getByLabel('選擇教材檔案',{exact:true});await expect(picker).toBeEnabled();await picker.setInputFiles(pdf);
+ await page.getByRole('button',{name:'上傳並確認來源',exact:true}).click();
+ await page.getByRole('button',{name:'學習目標'}).click();const dialog=page.getByRole('dialog',{name:'學習目標'});
+ await expect(dialog.getByLabel('目標日期',{exact:true})).toHaveValue('2026-11-30');
+ await dialog.getByRole('checkbox',{name:'設定學習目標（選填）'}).uncheck();await dialog.getByRole('button',{name:'套用設定'}).click();
+ state.settings!.published=true;await page.getByRole('button',{name:'開始分析教材',exact:true}).click();
+ await expect(page.getByRole('alert')).toContainText('教材已建立，請回到教材頁更改學習目標。');expect(state.starts).toHaveLength(0);
+ state.settings!.published=false;await page.getByRole('button',{name:'開始分析教材',exact:true}).click();await expect.poll(()=>state.starts.length).toBe(1);expect(state.settings!.goal).toBeNull();
 });

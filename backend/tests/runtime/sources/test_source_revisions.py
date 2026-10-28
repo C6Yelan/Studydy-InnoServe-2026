@@ -14,10 +14,13 @@ from runtime.material_processing import (
     claim_next_material_processing_run, execute_claimed_material_processing_run,
     request_material_processing_cancellation,
 )
-from runtime.source_normalization import SourceError, create_draft, normalize_next, read_sources, upload_source
+from runtime.source_normalization import create_draft, normalize_next, read_sources, upload_source
+from runtime.errors import SourceError
 from runtime.source_revisions import create_revision
-from runtime.storage.knowledge_structures import read_knowledge_structure, resolve_evidence_source
-from runtime.storage.tables import KnowledgeStructure, Material, MaterialSourceSet, database_session
+from runtime.storage.knowledge_structures import read_knowledge_structure
+from runtime.storage.knowledge_reads import resolve_evidence_source
+from runtime.storage.tables import KnowledgeStructure, Material, MaterialSourceSet
+from runtime.storage.database import database_session
 
 
 
@@ -30,6 +33,9 @@ def pdf(text):
 @pytest.fixture
 def revisions(closed_loop, monkeypatch):
     learner, _, settings, _, dsn, _ = closed_loop
+    import json
+    from pathlib import Path
+    settings['runtime_lock']['material_semantics'] = json.loads((Path(__file__).parents[2]/'fixtures/legacy_material_semantics.json').read_text())
     from pdf_evidence import material_pipeline
     import runtime.material_processing as processing
     monkeypatch.setattr(processing, "runtime_preflight", lambda config: runtime_binding(config))
@@ -72,7 +78,7 @@ def revisions(closed_loop, monkeypatch):
         assert normalize_next(dsn=dsn)
         return next(
             source["normalization_id"]
-            for source in read_sources(learner.learner_id, material, dsn=dsn)
+            for source in read_sources(learner.learner_id, material, dsn=dsn)["sources"]
             if source["source_id"] == identity
         )
 
@@ -109,7 +115,7 @@ def test_append_uses_only_new_semantics_preserves_history_and_replays_after_prom
     newest=read_knowledge_structure(learner.learner_id,material,run_id=result.run_id,dsn=dsn).document
     assert newest['schema']=='knowledge-structure/v1' and 'source_sha256' not in newest
     assert newest['page_count']==2 and len(newest['input_binding']['manifest']['items'])==2
-    assert requests[-1]['existing_concepts']
+    assert 'existing_concepts' in requests[-1]  # 無相關舊概念時可為空；來源綁定仍須保留。
     assert {row[1] for section in requests[-1]['sections'] for row in section['evidence']}=={2}
     assert read_knowledge_structure(learner.learner_id,material,revision=old['revision'],dsn=dsn).document==snapshot
     assert start([second],'append',old['revision']).run_id==run.run_id
@@ -128,7 +134,7 @@ def test_initial_multiple_sources_freeze_order_and_then_allow_incremental_append
     def add(name,data,media):
         identity=upload_source(learner.learner_id,material,data,name,media,str(uuid4()),dsn=dsn)
         assert normalize_next(dsn=dsn)
-        return next(item['normalization_id'] for item in read_sources(learner.learner_id,material,dsn=dsn) if item['source_id']==identity)
+        return next(item['normalization_id'] for item in read_sources(learner.learner_id,material,dsn=dsn)["sources"] if item['source_id']==identity)
     a=add('A.pdf',pdf('A stack follows last in first out order.'),'application/pdf')
     b=add('B.txt',b'A queue follows first in first out order.','text/plain')
     start=lambda ids,key,base=None:create_revision(learner.learner_id,material,ids,key,settings,base_revision=base,dsn=dsn)
@@ -159,8 +165,8 @@ def test_initial_multiple_sources_reject_unready_or_foreign_members_without_part
     upload_source(learner.learner_id,material,pdf('A stack follows last in first out order.'),'A.pdf','application/pdf','a',dsn=dsn)
     assert normalize_next(dsn=dsn)
     upload_source(learner.learner_id,material,b'Queue uses FIFO.','B.txt','text/plain','b',dsn=dsn)
-    a,b=read_sources(learner.learner_id,material,dsn=dsn)
-    foreign=read_sources(learner.learner_id,other_material,dsn=dsn)[0]['normalization_id']
+    a,b=read_sources(learner.learner_id,material,dsn=dsn)["sources"]
+    foreign=read_sources(learner.learner_id,other_material,dsn=dsn)["sources"][0]['normalization_id']
     for member in (b['normalization_id'],foreign):
         with pytest.raises(SourceError,match='SOURCE_NOT_READY'):
             create_revision(learner.learner_id,material,[a['normalization_id'],member],str(uuid4()),settings,dsn=dsn)
@@ -186,6 +192,25 @@ def test_run_only_cancel_retains_head_and_unreferenced_old_map_is_pruned_on_succ
     assert start([second],'cancel',old['revision']).run_id==run.run_id
 
 
+def test_research_base_revision_is_retained_after_append(revisions):
+    from research_fixtures import create_confirmed_research
+    from runtime import research
+    from runtime.storage.knowledge_structures import _prune_unreferenced_structures
+    learner,material,settings,dsn,add,start,execute,_,old,_=revisions
+    work=create_confirmed_research(learner.learner_id,material,'補充佇列','keep-base',dsn=dsn)
+    second=add('B.pdf','A queue removes the first inserted element first.')
+    start([second],'append',old['revision']);result=execute()
+    assert result.status=='succeeded',result.error_code
+    assert read_knowledge_structure(learner.learner_id,material,revision=old['revision'],dsn=dsn).document==old
+    research.delete(learner.learner_id,work['research_id'],dsn=dsn)
+    with database_session(dsn) as session:
+        head=session.get(Material,material).head_revision
+        _prune_unreferenced_structures(session,learner.learner_id,material,head)
+        session.flush()
+        assert session.scalar(select(KnowledgeStructure).where(KnowledgeStructure.material_id==material,
+            KnowledgeStructure.structure_revision==old['revision'])) is None
+
+
 def test_late_upload_does_not_change_frozen_input_and_duplicate_bytes_are_rejected(revisions):
     learner,material,settings,dsn,add,start,execute,r1,old,_=revisions
     second=add('B.pdf','Queue content.')
@@ -197,9 +222,9 @@ def test_late_upload_does_not_change_frozen_input_and_duplicate_bytes_are_reject
     result=execute();assert result.status=='succeeded',result.error_code
     document=read_knowledge_structure(learner.learner_id,material,run_id=result.run_id,dsn=dsn).document
     assert [item['original_name'] for item in document['input_binding']['manifest']['items']]==['A.pdf','B.pdf']
-    assert next(s for s in read_sources(learner.learner_id,material,dsn=dsn) if s['normalization_id']==third)['included'] is False
-    from runtime.storage.source_artifacts import open_verified_artifact
-    original_id=next(s['original_artifact_id'] for s in read_sources(learner.learner_id,material,dsn=dsn) if s['original_name']=='B.pdf')
+    assert next(s for s in read_sources(learner.learner_id,material,dsn=dsn)["sources"] if s['normalization_id']==third)['included'] is False
+    from runtime.storage.artifacts import open_verified_artifact
+    original_id=next(s['original_artifact_id'] for s in read_sources(learner.learner_id,material,dsn=dsn)["sources"] if s['original_name']=='B.pdf')
     with open_verified_artifact(learner.learner_id,original_id,dsn=dsn) as stream: same_bytes=stream.file.read()
     with pytest.raises(SourceError,match='DUPLICATE_SOURCE'):
         upload_source(learner.learner_id,material,same_bytes,'renamed.pdf','application/pdf','duplicate-bytes',dsn=dsn)
@@ -288,7 +313,7 @@ def test_retry_without_usable_added_claims_reuses_evidence_but_retries_semantics
         document.new_page().insert_text((72,72),'A binary tree has left and right child nodes.')
         identity=upload_source(learner.learner_id,material,document.tobytes(),'B.pdf','application/pdf','two-pages',dsn=dsn)
     assert normalize_next(dsn=dsn)
-    second=next(item['normalization_id'] for item in read_sources(learner.learner_id,material,dsn=dsn) if item['source_id']==identity)
+    second=next(item['normalization_id'] for item in read_sources(learner.learner_id,material,dsn=dsn)["sources"] if item['source_id']==identity)
     monkeypatch.setattr(material_pipeline,'material_request_fits',lambda _client,_lock,request,**kwargs:sum(len(section['evidence']) for section in request['sections'])<=1)
     start([second],'no-added-claims',old['revision'])
     with monkeypatch.context() as patch:
@@ -313,7 +338,7 @@ def test_retry_api_reuses_exact_frozen_order_and_ignores_later_uploads(revisions
     def add(name,text):
         identity=upload_source(learner.learner_id,material,pdf(text),name,'application/pdf',name,dsn=dsn)
         assert normalize_next(dsn=dsn)
-        return next(s['normalization_id'] for s in read_sources(learner.learner_id,material,dsn=dsn) if s['source_id']==identity)
+        return next(s['normalization_id'] for s in read_sources(learner.learner_id,material,dsn=dsn)["sources"] if s['source_id']==identity)
     b=add('B.pdf','A queue removes the first inserted element first.')
     c=add('C.pdf','A binary tree has left and right child nodes.')
     original=create_revision(learner.learner_id,material,[c,b],'frozen-failed',settings,base_revision=old['revision'] if append else None,dsn=dsn)
@@ -356,7 +381,7 @@ def test_retry_continues_at_failed_block_then_cleans_checkpoints_and_keeps_call_
         page.insert_text((72,180),'A binary tree has left and right child nodes.')
         identity=upload_source(learner.learner_id,material,doc.tobytes(),'Two blocks.pdf','application/pdf','two-blocks',dsn=dsn)
     assert normalize_next(dsn=dsn)
-    source=next(item for item in read_sources(learner.learner_id,material,dsn=dsn) if item['source_id']==identity)
+    source=next(item for item in read_sources(learner.learner_id,material,dsn=dsn)["sources"] if item['source_id']==identity)
     monkeypatch.setattr(material_pipeline,'material_request_fits',lambda _client,_lock,request,**kwargs:sum(len(section['evidence']) for section in request['sections'])<=1)
     calls=[];fail_later=True
     def semantic(_client,**kwargs):
@@ -368,6 +393,8 @@ def test_retry_continues_at_failed_block_then_cleans_checkpoints_and_keeps_call_
                 'relations':[],'review_required':False}
     monkeypatch.setattr(processing,'analyze_material',lambda *args,**kwargs:material_pipeline.analyze_material(*args,**kwargs,semantic_call=semantic))
     start([source['normalization_id']],'mid-page-failure',old['revision'])
+    # 暫時性失敗先自動接續一次，第二次失敗才停下。
+    assert execute().status=='pending'
     failed=execute()
     assert failed.status=='failed' and failed.completed_pages==failed.total_pages==2
     completed_handle=calls[0];failed_handle=calls[-1]
@@ -414,7 +441,7 @@ def test_empty_update_never_replaces_head_even_with_a_review_flag(revisions,monk
 def test_model_review_flag_is_advisory_and_keeps_old_claims_and_learning(revisions,monkeypatch):
     from pdf_evidence import material_pipeline
     import runtime.material_processing as processing
-    from learning_adaptation.study_sessions import read_study_session
+    from product_fixtures import read_study_session
     learner,material,settings,dsn,add,start,execute,_,old,_=revisions
     study=create_study_session(learner,material,old['revision'],'before-review-notice',dsn=dsn)
     second=add('B.pdf','A queue removes the first inserted element first.')
@@ -447,7 +474,7 @@ def test_retry_reuses_previously_blocked_review_response_before_requesting_remai
         document.new_page().insert_text((72,72),'A graph contains vertices connected by edges.')
         source_id=upload_source(learner.learner_id,material,document.tobytes(),'B.pdf','application/pdf','review-replay-source',dsn=dsn)
     assert normalize_next(dsn=dsn)
-    source=next(item for item in read_sources(learner.learner_id,material,dsn=dsn) if item['source_id']==source_id)
+    source=next(item for item in read_sources(learner.learner_id,material,dsn=dsn)["sources"] if item['source_id']==source_id)
     monkeypatch.setattr(material_pipeline,'material_request_fits',lambda _client,_lock,request,**kwargs:sum(len(section['evidence']) for section in request['sections'])<=1)
     calls=[]
     def semantic(_client,**kwargs):
@@ -581,12 +608,12 @@ def test_worker_renews_lease_while_semantic_call_is_waiting(revisions,monkeypatc
 
 def test_failed_initial_source_can_be_removed_and_reuploaded_without_rewriting_history(revisions, monkeypatch):
     import psycopg
-    from pdf_evidence.material_pipeline import MaterialAnalysisError
+    from runtime.material_runtime import MaterialAnalysisError
     import runtime.material_processing as processing
     from runtime.source_normalization import remove_staged_source, retry_normalization
     from runtime.storage.database import connect_database
     from runtime.storage.materials import read_material_library
-    from runtime.storage.source_artifacts import open_verified_artifact
+    from runtime.storage.artifacts import open_verified_artifact
     from runtime.storage.tables import MaterialSource
 
     learner, _, settings, dsn, _, _, execute, _, _, _ = revisions
@@ -595,7 +622,7 @@ def test_failed_initial_source_can_be_removed_and_reuploaded_without_rewriting_h
     data = pdf('A stack removes the last inserted element first.')
     source = upload_source(owner, material, data, 'initial.pdf', 'application/pdf', 'first-file', dsn=dsn)
     assert normalize_next(dsn=dsn)
-    original, = read_sources(owner, material, dsn=dsn)
+    original, = read_sources(owner, material, dsn=dsn)["sources"]
     run = create_revision(owner, material, [original['normalization_id']], 'initial-run', settings, dsn=dsn)
     with pytest.raises(SourceError, match='SOURCE_IN_USE'):
         remove_staged_source(owner, material, source, dsn=dsn)
@@ -608,7 +635,7 @@ def test_failed_initial_source_can_be_removed_and_reuploaded_without_rewriting_h
         snapshot = deepcopy(session.get(MaterialSourceSet, run.input_source_set_id).manifest)
     remove_staged_source(owner, material, source, dsn=dsn)
     remove_staged_source(owner, material, source, dsn=dsn)
-    assert read_sources(owner, material, dsn=dsn) == []
+    assert read_sources(owner, material, dsn=dsn)["sources"] == []
     assert next(item for item in read_material_library(owner, dsn=dsn)
                 if item['material_id'] == material)['source_count'] == 0
     with open_verified_artifact(owner, original['original_artifact_id'], dsn=dsn) as stored:
@@ -630,7 +657,7 @@ def test_failed_initial_source_can_be_removed_and_reuploaded_without_rewriting_h
     replacement = upload_source(owner, material, data, 'initial.pdf', 'application/pdf', 'new-file', dsn=dsn)
     assert replacement != source
     assert normalize_next(dsn=dsn)
-    current, = read_sources(owner, material, dsn=dsn)
+    current, = read_sources(owner, material, dsn=dsn)["sources"]
     create_revision(owner, material, [current['normalization_id']], 'replacement-run', settings, dsn=dsn)
     assert execute().status == 'succeeded'
     with pytest.raises(SourceError, match='SOURCE_IN_USE'):
@@ -639,11 +666,11 @@ def test_failed_initial_source_can_be_removed_and_reuploaded_without_rewriting_h
 
 def test_staged_source_removal_is_owned_and_keeps_published_sources(revisions):
     from runtime.source_normalization import remove_staged_source
-    from runtime.storage.source_artifacts import open_verified_artifact
+    from runtime.storage.artifacts import open_verified_artifact
     from runtime.storage.artifacts import ArtifactError
     learner,material,settings,dsn,add,start,execute,r1,old,_=revisions
     addition=add('staged.pdf','Unsealed staging content.')
-    sources=read_sources(learner.learner_id,material,dsn=dsn)
+    sources=read_sources(learner.learner_id,material,dsn=dsn)["sources"]
     staged=next(source for source in sources if source['normalization_id']==addition)
     published=next(source for source in sources if source['included'])
     with pytest.raises(SourceError,match='RESOURCE_NOT_FOUND'):
@@ -654,5 +681,127 @@ def test_staged_source_removal_is_owned_and_keeps_published_sources(revisions):
     remove_staged_source(learner.learner_id,material,staged['source_id'],dsn=dsn)
     with pytest.raises(ArtifactError,match='ARTIFACT_NOT_AVAILABLE'):
         with open_verified_artifact(learner.learner_id,staged['original_artifact_id'],dsn=dsn):pass
-    assert len(read_sources(learner.learner_id,material,dsn=dsn))==1
+    assert len(read_sources(learner.learner_id,material,dsn=dsn)["sources"])==1
     assert read_knowledge_structure(learner.learner_id,material,revision=old['revision'],dsn=dsn).document==old
+
+
+def test_card_set_multisource_references_remain_exact_after_new_head(revisions):
+    """圖卡經正式發布的合成雙來源，分別回查檔案、原始頁與 Evidence 區塊。"""
+    from runtime.card_sets import create_card_set, read_card_set
+    from product_fixtures import product_snapshot
+
+    learner, material, _, dsn, add, start, execute, _, original, _ = revisions
+    second = add("B.pdf", "A queue removes the first inserted element first.")
+    start([second], "cards-two-sources", original["revision"])
+    result = execute()
+    assert result.status == "succeeded", result.error_code
+    structure = read_knowledge_structure(learner.learner_id, material, run_id=result.run_id, dsn=dsn)
+    saved = create_card_set(learner.learner_id, material, structure.document["revision"],
+                            "雙來源卡組", [c["concept_id"] for c in structure.view["concepts"]],
+                            "cards-multisource", dsn=dsn)
+    third = add("C.pdf", "A tree contains parent nodes and child nodes.")
+    start([third], "cards-new-head", structure.document["revision"])
+    assert execute().status == "succeeded"
+    before = product_snapshot(dsn)
+    deck = read_card_set(learner.learner_id, saved["card_set_id"], dsn=dsn)
+    assert not deck["is_current_revision"]
+    assert deck["cards"] == [{k: concept[k] for k in ("concept_id", "label", "claims")} for concept in structure.view["concepts"]]
+    locations = {}
+    for card in deck["cards"]:
+        for claim in card["claims"]:
+            for evidence in claim["evidence"]:
+                location = resolve_evidence_source(learner.learner_id, material,
+                                                  deck["knowledge_structure_revision"], evidence["evidence_id"], dsn=dsn)
+                assert location["normalized_page"] == evidence["normalized_page"] == 1
+                assert location["original_name"] == evidence["source_name"]
+                assert evidence["source_locator"]["block_id"]
+                locations[location["original_name"]] = location["preview_url"]
+    assert set(locations) == {"A.pdf", "B.pdf"}
+    assert locations["A.pdf"] != locations["B.pdf"]
+    assert product_snapshot(dsn) == before
+
+
+@pytest.mark.parametrize('failure_stage',['second_source','context'])
+def test_retry_reuses_evidence_before_semantic_checkpoint_and_preserves_bindings(revisions,monkeypatch,failure_stage):
+    import json
+    from pdf_evidence import material_pipeline
+    from runtime.api.models import project_material_run
+    from runtime.storage.analysis_archive import _material_directory
+    learner,material,settings,dsn,add,start,execute,_,old,requests=revisions
+    second=add('B.pdf','A queue removes the first inserted element first.')
+    third=add('C.pdf','A tree contains parent and child nodes.')
+    failed_run=start([second,third],'evidence-failure',old['revision'])
+    before_calls=len(requests);actual=material_pipeline.extract_page;extracted=[]
+    def extract(document,digest,number):
+        extracted.append(digest)
+        if failure_stage=='second_source' and len(extracted)==2:raise RuntimeError('synthetic process interruption')
+        return actual(document,digest,number)
+    with monkeypatch.context() as patch:
+        patch.setattr(material_pipeline,'extract_page',extract)
+        if failure_stage=='context':patch.setattr(material_pipeline,'build_document_context',lambda *a,**k:(_ for _ in ()).throw(ValueError('synthetic invalid context')))
+        failed=execute()
+    assert failed.status=='failed' and len(requests)==before_calls
+    assert failed.error_code==('DOCUMENT_EVIDENCE_INVALID' if failure_stage=='context' else 'MATERIAL_ANALYSIS_FAILED')
+    directory=_material_directory(learner.learner_id,material)/failed_run.run_id.hex
+    assert not (directory/'checkpoint.json').exists()
+    saved={p.name:json.loads(p.read_text())['data'] for p in (directory/'evidence').glob('page-*.json')}
+    assert len(saved)==(2 if failure_stage=='context' else 1)
+    assert project_material_run(failed).analysis_saved
+    retried=[]
+    monkeypatch.setattr(material_pipeline,'extract_page',lambda *args:(retried.append(args[1]),actual(*args))[1])
+    retry=start([second,third],'evidence-retry',old['revision']);complete=execute()
+    assert complete.status=='succeeded',complete.error_code
+    assert len(retried)==(0 if failure_stage=='context' else 1)
+    document=read_knowledge_structure(learner.learner_id,material,run_id=complete.run_id,dsn=dsn).document
+    assert len(document['input_binding']['manifest']['items'])==3
+    assert {e['page'] for e in document['evidence']}=={1,2,3}
+    for page in saved.values():
+        for block in page['evidence_blocks']:
+            assert any(e['exact_text']==block['text'] for e in document['evidence'])
+    finished=_material_directory(learner.learner_id,material)/retry.run_id.hex
+    assert not (directory/'evidence').exists() and not (finished/'evidence').exists()
+    assert json.loads((finished/'completion.json').read_text())['evidence_reused_from_runs']==[str(failed_run.run_id)]
+
+
+def test_corrupt_page_checkpoint_fails_closed_without_extraction(revisions,monkeypatch):
+    import json
+    from pdf_evidence import material_pipeline
+    from runtime.storage.analysis_archive import _material_directory
+    learner,material,settings,dsn,add,start,execute,_,old,requests=revisions
+    second=add('B.pdf','A queue removes the first inserted element first.')
+    failed_run=start([second],'cache-context-failure',old['revision'])
+    with monkeypatch.context() as patch:
+        patch.setattr(material_pipeline,'build_document_context',lambda *a,**k:(_ for _ in ()).throw(ValueError('invalid context')))
+        assert execute().status=='failed'
+    path=next((_material_directory(learner.learner_id,material)/failed_run.run_id.hex/'evidence').glob('*.json'))
+    saved=json.loads(path.read_text());saved['data']['page_number']=99;path.write_text(json.dumps(saved))
+    before=len(requests)
+    monkeypatch.setattr(material_pipeline,'extract_page',lambda *a:pytest.fail('corrupt cache must not trigger extraction'))
+    start([second],'cache-corrupt-retry',old['revision']);result=execute()
+    assert result.error_code=='ANALYSIS_CHECKPOINT_INVALID' and len(requests)==before
+
+
+def test_evidence_only_checkpoint_is_skipped_after_runtime_change(revisions,monkeypatch):
+    import json
+    from pdf_evidence import material_pipeline
+    from runtime.storage.analysis_archive import _material_directory
+    learner,material,settings,dsn,add,start,execute,_,old,requests=revisions
+    second=add('B.pdf','A queue removes the first inserted element first.')
+    failed_run=start([second],'runtime-cache-failure',old['revision'])
+    with monkeypatch.context() as patch:
+        patch.setattr(material_pipeline,'build_document_context',lambda *a,**k:(_ for _ in ()).throw(ValueError('invalid context')))
+        assert execute().status=='failed'
+    directory=_material_directory(learner.learner_id,material)/failed_run.run_id.hex
+    assert not (directory/'checkpoint.json').exists()
+    saved={p.relative_to(directory):p.read_bytes() for p in directory.rglob('*') if p.is_file()}
+    before=len(requests)
+    settings['runtime_lock']['material_semantics']['prompt'] += ' Changed analysis policy.'
+    actual=material_pipeline.extract_page;extracted=[]
+    monkeypatch.setattr(material_pipeline,'extract_page',lambda *args:(extracted.append(args[2]),actual(*args))[1])
+    retry=start([second],'runtime-cache-retry',old['revision']);result=execute()
+    assert result.status=='succeeded',result.error_code
+    assert len(requests)==before+1 and extracted==[1]
+    assert {p.relative_to(directory):p.read_bytes() for p in directory.rglob('*') if p.is_file()}==saved
+    completed=_material_directory(learner.learner_id,material)/retry.run_id.hex
+    receipt=json.loads((completed/'completion.json').read_text())
+    assert receipt['reused_from_run'] is None and receipt['evidence_reused_from_runs']==[]

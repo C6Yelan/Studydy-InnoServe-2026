@@ -1,4 +1,5 @@
 import { Icon, type IconName } from "./Icon";
+import { PageSkeleton, type SkeletonVariant } from "./Skeleton";
 import "./styles.css";
 
 type StateTone = "loading" | "empty" | "failure";
@@ -9,6 +10,7 @@ export function StateView({
   icon = "warning",
   image,
   live = false,
+  skeleton = "block",
   title,
   tone,
 }: {
@@ -17,9 +19,12 @@ export function StateView({
   icon?: IconName;
   image?: string;
   live?: boolean;
+  /** 讀取中顯示的骨架版型；頁面層級的讀取指定對應版型，區塊內預設為幾行佔位。 */
+  skeleton?: SkeletonVariant;
   title: string;
   tone: StateTone;
 }) {
+  if (tone === "loading") return <PageSkeleton variant={skeleton} label={title} live={live} />;
   const isFailure = tone === "failure";
   return (
     <section
@@ -34,7 +39,6 @@ export function StateView({
           <Icon name={icon} size={26} />
         </span>
       )}
-      {tone === "loading" && <span className="loading-ring" aria-hidden="true" />}
       <h1>{title}</h1>
       <p>{description}</p>
       {action && <div className="state-view__actions">{action}</div>}

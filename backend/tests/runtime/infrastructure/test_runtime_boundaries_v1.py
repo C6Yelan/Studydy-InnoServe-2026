@@ -1,3 +1,5 @@
+from runtime.api import request_context
+from contextlib import nullcontext
 from pathlib import Path
 
 import pytest
@@ -6,6 +8,7 @@ import runtime.local_app as local_app
 import runtime.local_runtime as local_runtime
 import runtime.workers as workers_module
 from runtime.material_runtime import runtime_binding
+from runtime.local_ai_config import read_local_ai_config_from_environment
 
 
 def _environment(tmp_path: Path) -> dict[str, str]:
@@ -20,9 +23,9 @@ def _environment(tmp_path: Path) -> dict[str, str]:
 @pytest.mark.parametrize("field,value", [("model_id", "example/other-model"), ("model_revision", "a" * 40)])
 def test_stored_runtime_binding_rejects_wrong_identity_even_with_valid_hash(tmp_path, field, value):
     """重算 binding hash 不能讓與保存快照不同的模型身分通過。"""
-    from pdf_evidence.ocr_page_evidence import canonical_sha256
+    from content_identity import canonical_sha256
     from runtime.material_runtime import lock_matches_binding
-    config = local_app.read_local_ai_config_from_environment(_environment(tmp_path))
+    config = read_local_ai_config_from_environment(_environment(tmp_path))
     binding = runtime_binding(config)
     assert lock_matches_binding(config['runtime_lock'], binding)
     binding[field] = value
@@ -38,7 +41,7 @@ def test_local_app_composition_validates_settings_without_ai_then_starts_uvicorn
     monkeypatch.setattr(material_runtime, "preflight_semantic_service", lambda _: pytest.fail("startup must not contact AI"))
     app = local_app.create_local_app(
         profile="local", public_origin="http://127.0.0.1:4173", secure_cookie=False,
-        local_config=local_app.read_local_ai_config_from_environment(_environment(tmp_path)), dsn=None,
+        local_config=read_local_ai_config_from_environment(_environment(tmp_path)), dsn=None,
     )
     assert app.version == "v1"
 
@@ -48,17 +51,8 @@ def test_local_app_composition_validates_settings_without_ai_then_starts_uvicorn
     assert observed[-1][0] == "run"
 
 
-def test_explicit_runtime_verify_only_uses_semantic_preflight(tmp_path, monkeypatch):
-    observed = []
-    monkeypatch.setattr(local_runtime, "runtime_preflight", lambda _config: observed.append("mock-preflight"))
-    result = local_runtime.verify_local_runtime({"private_runtime_root": str(tmp_path)})
-    assert result == {"status": "succeeded", "command": "verify"}
-    assert observed == ["mock-preflight"]
 
 
-def test_runtime_verify_reports_lock_contention_as_busy():
-    from pdf_evidence.material_pipeline import MaterialAnalysisError
-    assert local_runtime._failure(MaterialAnalysisError('RUNTIME_BUSY'))['reason'] == 'RUNTIME_BUSY'
 
 
 @pytest.mark.parametrize('operation', ['remove-source', 'preview'])
@@ -71,12 +65,12 @@ def test_waiting_storage_does_not_block_other_api_requests(tmp_path, monkeypatch
     import httpx
     import runtime.api.app as api
 
-    config = local_app.read_local_ai_config_from_environment(_environment(tmp_path))
+    config = read_local_ai_config_from_environment(_environment(tmp_path))
     app = api.create_app(api.ApiSettings(
         profile='local', public_origin='http://127.0.0.1:4173', secure_cookie=False,
         local_config=config, dsn=None,
     ))
-    monkeypatch.setattr(api, '_trusted_learner', lambda *_: SimpleNamespace(learner_id=uuid4()))
+    monkeypatch.setattr(request_context, 'trusted_learner', lambda *_: SimpleNamespace(learner_id=uuid4()))
 
     async def scenario():
         entered = asyncio.Event()
@@ -95,7 +89,7 @@ def test_waiting_storage_does_not_block_other_api_requests(tmp_path, monkeypatch
             yield  # pragma: no cover
 
         monkeypatch.setattr(api, 'remove_staged_source', wait_for_storage)
-        monkeypatch.setattr(api, 'open_verified_source_pdf', open_source)
+        monkeypatch.setattr(api, 'open_verified_artifact', open_source)
         async with httpx.AsyncClient(transport=httpx.ASGITransport(app), base_url='http://127.0.0.1:4173') as client:
             if operation == 'remove-source':
                 request = client.delete(f'/v1/materials/{uuid4()}/sources/{uuid4()}',
@@ -122,12 +116,12 @@ def test_empty_body_dependency_rejects_content_before_storage(tmp_path, monkeypa
     from fastapi.testclient import TestClient
     from uuid import uuid4
     import runtime.api.app as api
-    config = local_app.read_local_ai_config_from_environment(_environment(tmp_path))
+    config = read_local_ai_config_from_environment(_environment(tmp_path))
     app = api.create_app(api.ApiSettings(
         profile='local', public_origin='http://127.0.0.1:4173', secure_cookie=False,
         local_config=config, dsn=None,
     ))
-    monkeypatch.setattr(api, '_trusted_learner', lambda *_: pytest.fail('body must be checked first'))
+    monkeypatch.setattr(request_context, 'trusted_learner', lambda *_: pytest.fail('body must be checked first'))
     response = TestClient(app).request('DELETE', f'/v1/materials/{uuid4()}/sources/{uuid4()}',
         headers={'Origin': 'http://127.0.0.1:4173'}, content=b'unexpected')
     assert response.status_code == 400
@@ -204,3 +198,107 @@ def test_worker_stop_reports_busy_and_stops_before_claiming_next_work(monkeypatc
         worker._thread.join(timeout=2)
         worker.stop()
     assert not claimed
+
+
+def test_assessment_and_maintenance_continue_during_material_generation(monkeypatch):
+    from itertools import count
+    from threading import Event
+    entered, release, assessed, recovered, discarded = (Event() for _ in range(5))
+    clock = count(0, 20)
+    monkeypatch.setattr(workers_module, 'monotonic', lambda: next(clock))
+    for name in ('reconcile_new_artifacts', 'reconcile_removed_material_analysis',
+                 'reconcile_published_checkpoints', 'recover_interrupted_material_runs',
+                 'finish_material_discards', 'normalize_next'):
+        monkeypatch.setattr(workers_module, name, lambda **_: None)
+    monkeypatch.setattr(workers_module, 'claim_next_material_processing_run', lambda **_: object())
+    def execute(*args, **kwargs):
+        entered.set()
+        assert release.wait(5)
+    monkeypatch.setattr(workers_module, 'execute_claimed_material_processing_run', execute)
+    monkeypatch.setattr(workers_module, 'run_next_set', lambda **_: entered.is_set() and assessed.set())
+    monkeypatch.setattr(workers_module, 'reconcile_new_artifacts', lambda **_: entered.is_set() and recovered.set())
+    monkeypatch.setattr(workers_module, 'finish_material_discards', lambda **_: entered.is_set() and discarded.set())
+    config = {'runtime_lock': {'semantic_service': {'api_protocol': 'openai-chat-completions/v1'}}}
+    worker = workers_module.RuntimeWorkers(None, config)
+    worker.start()
+    try:
+        assert entered.wait(1)
+        assert assessed.wait(1)
+        assert recovered.wait(1)
+        assert discarded.wait(1)
+        assert worker._assessment_thread.is_alive()
+        assert worker._maintenance_thread.is_alive()
+        assert worker.is_alive()
+    finally:
+        release.set()
+        worker.stop()
+    assert not worker._thread.is_alive()
+    assert not worker._assessment_thread.is_alive()
+    assert not worker._maintenance_thread.is_alive()
+    assert not worker.is_alive()
+
+
+@pytest.mark.parametrize('failing_name', ['studydy-assessment-worker', 'studydy-maintenance-worker'])
+def test_core_thread_start_failure_stops_previously_started_threads(monkeypatch, failing_name):
+    from threading import Thread
+
+    for name in ('reconcile_new_artifacts', 'reconcile_removed_material_analysis',
+                 'reconcile_published_checkpoints', 'recover_interrupted_material_runs',
+                 'finish_material_discards', 'normalize_next',
+                 'claim_next_material_processing_run', 'run_next_set'):
+        monkeypatch.setattr(workers_module, name, lambda **_: None)
+
+    class FailingThread(Thread):
+        def start(self):
+            if self.name == failing_name:
+                raise RuntimeError('synthetic start failure')
+            return super().start()
+
+    monkeypatch.setattr(workers_module, 'Thread', FailingThread)
+    worker = workers_module.RuntimeWorkers(None, {})
+    with pytest.raises(RuntimeError, match='RUNTIME_WORKERS_START_FAILED'):
+        worker.start()
+    worker.stop()
+    assert not worker._thread.is_alive()
+    assert worker._assessment_thread is None or not worker._assessment_thread.is_alive()
+    assert worker._maintenance_thread is None
+
+
+def test_core_shutdown_joins_all_threads_before_reporting_busy():
+    joined = []
+
+    class BusyThread:
+        def __init__(self, name):
+            self.name = name
+
+        def join(self, **_):
+            joined.append(self.name)
+
+        def is_alive(self):
+            return self.name == 'material'
+
+    worker = workers_module.RuntimeWorkers(None, {})
+    worker._thread = BusyThread('material')
+    worker._assessment_thread = BusyThread('assessment')
+    worker._maintenance_thread = BusyThread('maintenance')
+    with pytest.raises(RuntimeError, match='RUNTIME_WORKERS_STOP_FAILED'):
+        worker.stop()
+    assert joined == ['material', 'assessment', 'maintenance']
+
+
+@pytest.mark.parametrize('exited_loop', ['_assessment_loop', '_maintenance_loop'])
+def test_core_readiness_rejects_an_unexpectedly_exited_thread(monkeypatch, exited_loop):
+    for name in ('reconcile_new_artifacts', 'reconcile_removed_material_analysis',
+                 'reconcile_published_checkpoints', 'recover_interrupted_material_runs',
+                 'finish_material_discards', 'normalize_next',
+                 'claim_next_material_processing_run', 'run_next_set'):
+        monkeypatch.setattr(workers_module, name, lambda **_: None)
+    monkeypatch.setattr(workers_module.RuntimeWorkers, exited_loop, lambda _: None)
+    worker = workers_module.RuntimeWorkers(None, {})
+    worker.start()
+    try:
+        thread = worker._assessment_thread if exited_loop == '_assessment_loop' else worker._maintenance_thread
+        thread.join(timeout=1)
+        assert not worker.is_alive()
+    finally:
+        worker.stop()

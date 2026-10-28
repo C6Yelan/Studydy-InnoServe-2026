@@ -10,15 +10,15 @@ import pymupdf
 import pytest
 import runtime.storage.artifacts as artifact_storage
 
-from runtime.storage.artifacts import ArtifactError, open_verified_source_pdf
-from runtime.source_normalization import SourceError
-from runtime.storage.migrations import run_migrations
+from runtime.storage.artifacts import ArtifactError, open_verified_artifact
+from runtime.errors import SourceError
+from runtime.storage.migrations import load_migrations, run_migrations
 from product_fixtures import seed_pdf
 
 
 @pytest.fixture
 def artifact_database_dsn(clean_database_dsn: str, migrations_dir: Path) -> str:
-    assert run_migrations(clean_database_dsn, migrations_dir=migrations_dir) == (1, 2, 3, 4, 5)
+    assert run_migrations(clean_database_dsn, migrations_dir=migrations_dir) == tuple(m.version for m in load_migrations(migrations_dir))
     return clean_database_dsn
 
 
@@ -57,8 +57,8 @@ def test_reconciliation_skips_active_writer_then_obeys_commit(
     artifact_database_dsn, artifact_root, commit,
 ):
     from runtime.source_normalization import create_draft
-    from runtime.storage.source_artifacts import write_blob, reconcile_new_artifacts
-    from runtime.storage.tables import database_session
+    from runtime.storage.artifacts import write_blob, reconcile_new_artifacts
+    from runtime.storage.database import database_session
     dsn = artifact_database_dsn
     owner = _learner(dsn)
     material = create_draft(owner, 'Synthetic', 'lock-test', dsn=dsn)
@@ -85,8 +85,8 @@ def test_reconciliation_skips_active_writer_then_obeys_commit(
 
 def test_reconciliation_skips_active_discard_then_restores_rollback(artifact_database_dsn, artifact_root):
     from runtime.source_normalization import create_draft
-    from runtime.storage.source_artifacts import write_blob
-    from runtime.storage.tables import database_session
+    from runtime.storage.artifacts import write_blob
+    from runtime.storage.database import database_session
     dsn = artifact_database_dsn
     owner = _learner(dsn)
     material = create_draft(owner, 'Synthetic', 'discard-lock-test', dsn=dsn)
@@ -101,11 +101,11 @@ def test_reconciliation_skips_active_discard_then_restores_rollback(artifact_dat
     with ThreadPoolExecutor(max_workers=1) as pool:
         with pytest.raises(Rollback):
             with database_session(dsn) as session:
-                artifact_storage.quarantine_source_pdf(session, artifact.artifact_id)
-                pool.submit(artifact_storage.reconcile_discarded_sources, dsn=dsn).result(timeout=2)
+                artifact_storage.quarantine_artifact(session, artifact.artifact_id)
+                pool.submit(artifact_storage.reconcile_discarded_artifacts, dsn=dsn).result(timeout=2)
                 assert trash.exists() and not path.exists()
                 raise Rollback()
-    artifact_storage.reconcile_discarded_sources(dsn=dsn)
+    artifact_storage.reconcile_discarded_artifacts(dsn=dsn)
     assert path.read_bytes() == b'synthetic'
     assert not trash.exists()
 
@@ -113,7 +113,8 @@ def test_reconciliation_skips_active_discard_then_restores_rollback(artifact_dat
 def test_database_lock_timeout_rolls_back_and_next_transaction_can_write(artifact_database_dsn):
     from sqlalchemy.exc import OperationalError
     from runtime.source_normalization import create_draft
-    from runtime.storage.tables import database_session, Material
+    from runtime.storage.tables import Material
+    from runtime.storage.database import database_session
     dsn = artifact_database_dsn
     owner = _learner(dsn)
     material = create_draft(owner, 'Before', 'timeout-test', dsn=dsn)
@@ -124,11 +125,11 @@ def test_database_lock_timeout_rolls_back_and_next_transaction_can_write(artifac
             row = session.get(Material, material)
             row.display_name = 'Must roll back'
             session.flush()
-            artifact_storage._lock_source_discard(session, identity)
+            artifact_storage._lock_artifact_discard(session, identity)
 
     with ThreadPoolExecutor(max_workers=1) as pool:
         with database_session(dsn) as session:
-            artifact_storage._lock_source_discard(session, identity)
+            artifact_storage._lock_artifact_discard(session, identity)
             with pytest.raises(OperationalError) as caught:
                 pool.submit(blocked).result(timeout=8)
             assert caught.value.orig.sqlstate == '55P03'
@@ -148,11 +149,11 @@ def test_source_publish_verified_read_and_owner_isolation(
     content = _pdf()
     published = _publish_source(owner, content, artifact_database_dsn)
     assert (artifact_root / "objects" / published.artifact_id.hex).stat().st_mode & 0o777 == 0o400
-    with open_verified_source_pdf(owner, published.artifact_id, dsn=artifact_database_dsn) as opened:
+    with open_verified_artifact(owner, published.artifact_id, dsn=artifact_database_dsn, kind="normalized_pdf") as opened:
         assert opened.file.read() == content
         assert opened.material_id == published.material_id
     with pytest.raises(ArtifactError, match="ARTIFACT_NOT_AVAILABLE"):
-        with open_verified_source_pdf(other, published.artifact_id, dsn=artifact_database_dsn):
+        with open_verified_artifact(other, published.artifact_id, dsn=artifact_database_dsn, kind="normalized_pdf"):
             pass
 
 
@@ -182,7 +183,7 @@ def test_verified_read_rejects_changed_object_hash(
     changed[-1] ^= 1
     path.write_bytes(changed)
     with pytest.raises(ArtifactError, match="ARTIFACT_NOT_AVAILABLE"):
-        with open_verified_source_pdf(learner, published.artifact_id, dsn=artifact_database_dsn):
+        with open_verified_artifact(learner, published.artifact_id, dsn=artifact_database_dsn, kind="normalized_pdf"):
             pass
 
 
@@ -229,6 +230,6 @@ def test_failed_normalization_retains_private_source_and_no_public_pdf(artifact_
     def reject(*args):raise NormalizationError('PDF_DAMAGED')
     monkeypatch.setattr(sources,'convert',reject)
     assert sources.normalize_next(dsn=artifact_database_dsn)
-    item=sources.read_sources(owner,material,dsn=artifact_database_dsn)[0]
+    item=sources.read_sources(owner,material,dsn=artifact_database_dsn)["sources"][0]
     assert item['status']=='failed' and item['normalized_artifact_id'] is None
     assert (artifact_root/'objects'/item['original_artifact_id'].hex).is_file()

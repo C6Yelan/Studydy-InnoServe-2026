@@ -1,3 +1,4 @@
+import { emptyCelebrationClaim, emptyLearningActivity } from "../fixtures/learning-activity";
 import { expect, test, type Page, type Route } from "@playwright/test";
 
 const origin = process.env.STUDYDY_E2E_BASE_URL ?? "http://127.0.0.1:4173";
@@ -41,6 +42,10 @@ test.beforeEach(async ({ page }) => {
   await page.route(/\/v[12]\//, (route) => {
     const request = route.request();
     const path = new URL(request.url()).pathname;
+    if (path === "/v1/learning-activity/celebrations/claim") {
+      expect(route.request().method()).toBe("POST");
+      return route.fulfill({ json: emptyCelebrationClaim });
+    }
     switch (path) {
       case "/v1/session":
       case "/v1/session/refresh":
@@ -57,7 +62,27 @@ test.beforeEach(async ({ page }) => {
       case "/v1/materials":
         expect(request.method()).toBe("GET");
         return route.fulfill({ json: { schema: "material-library/v1", materials: [] } });
+      // 首頁捷徑讀取概念卡與 Podcast 清單。
+      case "/v1/card-sets":
+        expect(request.method()).toBe("GET");
+        return route.fulfill({ json: { schema: "card-set-list/v1", card_sets: [] } });
+      case "/v1/podcasts":
+        expect(request.method()).toBe("GET");
+        return route.fulfill({ json: { schema: "podcast-list/v1", podcasts: [] } });
+      // 頁首帳號設定與首頁問候；新帳號沒有名稱。
+      case "/v1/profile":
+        expect(request.method()).toBe("GET");
+        return route.fulfill({ json: { schema: "learner-profile/v1", display_name: null } });
+      // 首頁會讀取已部署的教材目標；新帳號尚未設定目標。
+      case "/v1/learning-goals":
+        expect(request.method()).toBe("GET");
+        return route.fulfill({ json: { schema: "learning-goals/v1", today: "2026-10-25", goals: [] } });
+      // 頁首學習進度（等級與連續天數）；新帳號沒有學習紀錄。
+      case "/v1/learning-activity":
+        expect(request.method()).toBe("GET");
+        return route.fulfill({ json: emptyLearningActivity });
       default:
+        if (route.request().method() === "GET" && new URL(route.request().url()).pathname === "/v1/account/storage") return route.fulfill({ json: { schema: "account-storage/v2", used_bytes: 0, reserved_bytes: 0, limit_bytes: 5368709120, remaining_bytes: 5368709120, breakdown: { material_files_bytes: 0, podcast_audio_bytes: 0, podcast_video_bytes: 0, analysis_bytes: 0, reserved_bytes: 0 }, largest_materials: [] } });
         throw new Error(`Unexpected account mock request: ${request.method()} ${path}`);
     }
   });

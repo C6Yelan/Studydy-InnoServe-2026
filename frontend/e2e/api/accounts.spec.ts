@@ -31,7 +31,7 @@ test("real accounts survive new browser profiles; logout and back never reveal a
   await expect(page.getByRole("button", { name: "登出", exact: true })).toBeVisible();
   expect((await (await a.request.get(`${origin}/v1/session`)).json()).learner_id).toBe(learnerId);
   await expect(
-    page.getByRole("heading", { name: "歡迎回來！", level: 1, exact: true }),
+    page.getByRole("heading", { name: "歡迎回來！今天想探索哪座島？", level: 1, exact: true }),
   ).toBeVisible();
   await expect(page.getByRole("navigation", { name: "主要導覽", exact: true })).toBeVisible();
 
@@ -60,6 +60,8 @@ test("real accounts survive new browser profiles; logout and back never reveal a
       }),
     { times: 1 },
   );
+  // 從教材返回清單後使用全站登出。
+  await page.goto("/materials");
   await page.getByRole("button", { name: "登出", exact: true }).click();
   await expect(page.getByText(/登出尚未完成/)).toBeVisible();
   await expect(page.getByText("Stack", { exact: true })).toHaveCount(0);
@@ -109,7 +111,7 @@ test("real accounts survive new browser profiles; logout and back never reveal a
   expect((await fresh.request.get(`${origin}/v1/artifacts/${artifactId}`)).status()).toBe(200);
   await fresh.request.delete(`${origin}/v1/session`, { headers: { Origin: origin } });
   await freshPage.getByRole("button", { name: "教材概念：Stack", exact: true }).click();
-  await freshPage.getByRole("button", { name: "開始學習", exact: true }).click();
+  await freshPage.getByRole("button", { name: "檢測這個概念", exact: true }).click();
   await expect(freshPage.getByRole("heading", { name: "登入您的帳戶" })).toBeVisible();
   await expect(freshPage.getByText("Stack", { exact: true })).toHaveCount(0);
   expect((await fresh.request.get(`${origin}/v1/session`)).status()).toBe(401);

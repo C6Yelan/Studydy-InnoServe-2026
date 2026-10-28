@@ -17,17 +17,39 @@ import pytest
 
 import runtime.api.app as api_app
 from knowledge_map.structure import SemanticState, apply_semantic_response, build_document_context, build_structure_draft
-from pdf_evidence.ocr_page_evidence import canonical_sha256
+from content_identity import canonical_sha256
 from pdf_evidence.source_set import rebase_page
 from runtime import source_normalization as normalization
 from runtime.learner_session import TrustedLearner, register_account
 from runtime.material_processing import _record_progress, claim_next_material_processing_run
 from runtime.source_resolver import _input, bind_structure_input
 from runtime.source_revisions import create_revision
-from runtime.storage.knowledge_structures import publish_knowledge_structure
+from runtime.knowledge_publication import publish_knowledge_structure
 from runtime.storage.migrations import load_migrations, run_migrations
-from runtime.storage.tables import Material, MaterialProcessingRun, database_session
+from runtime.storage.tables import Material, MaterialProcessingRun
+from runtime.storage.database import database_session
 from structure_fixtures import build_knowledge_structure
+
+
+def read_answer_events(learner, study_session_id, *, dsn):
+    """測試查驗原始事件；產品讀取由 progress snapshot 擁有交易與 scope。"""
+    from learning_adaptation.answer_events import _read_events
+    from learning_adaptation.study_sessions import _learner, _row, _validate
+
+    with database_session(dsn) as session:
+        study = _row(session, _learner(learner), study_session_id)
+        _validate(session, study)
+        return _read_events(session, study)
+
+
+def read_study_session(learner, study_session_id, *, dsn):
+    """測試查驗保存前後的學習狀態，不增加產品的獨立讀取入口。"""
+    from learning_adaptation.study_sessions import _learner, _row, _stored, _validate
+
+    with database_session(dsn) as session:
+        study = _row(session, _learner(learner), study_session_id)
+        _validate(session, study)
+        return _stored(study)
 
 
 
@@ -36,7 +58,8 @@ def seed_pdf(owner, stream, key, *, dsn, display_name=None):
     name = display_name or "Synthetic.pdf"
     material = normalization.create_draft(owner, name, key, dsn=dsn)
 
-    def identity(source_bytes, *_):
+    def identity(source_bytes, *_, cancellation_check=None):
+        if cancellation_check: cancellation_check()
         with pymupdf.open(stream=source_bytes, filetype="pdf") as pdf:
             page_count = len(pdf)
         digest = sha256(source_bytes).hexdigest()
@@ -64,7 +87,7 @@ def seed_pdf(owner, stream, key, *, dsn, display_name=None):
         source_id = normalization.upload_source(owner, material, data, name, "application/pdf", key, dsn=dsn)
     with patch.object(normalization, "convert", side_effect=identity):
         while True:
-            sources = normalization.read_sources(owner, material, dsn=dsn)
+            sources = normalization.read_sources(owner, material, dsn=dsn)["sources"]
             source = next(item for item in sources if item["source_id"] == source_id)
             if source["status"] == "ready":
                 break
@@ -81,7 +104,7 @@ def seed_run(owner, material, key, settings, *, dsn):
     with database_session(dsn) as session:
         base_revision = session.get(Material, material).head_revision
     normalization_ids = (
-        [source["normalization_id"] for source in normalization.read_sources(owner, material, dsn=dsn)]
+        [source["normalization_id"] for source in normalization.read_sources(owner, material, dsn=dsn)["sources"]]
         if base_revision is None else []
     )
     config = deepcopy(settings)

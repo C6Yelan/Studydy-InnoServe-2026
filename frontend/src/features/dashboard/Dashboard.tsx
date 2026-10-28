@@ -1,187 +1,137 @@
-import { useEffect, useState } from "react";
-import { errorMessage, type StudydyApiClient } from "../../api/client";
-import type { MaterialLibraryItem } from "../../api/contracts";
-import { writeRoute } from "../../app/routes";
-import { Icon, type IconName } from "../../ui/Icon";
+import { useStudyStart } from "../study-session/useStudyStart";
+import { useEffect, useMemo, useState } from "react";
+import type { StudydyApiClient } from "../../api/client";
+import type { LearningGoalSummary, LearningGoalsView, LearningQuest } from "../../api/contracts";
+import { errorMessage } from "../../api/client";
+import { goalSummaryText } from "../learning-goals/goal-summary";
+import { useLearningActivity } from "../../app/LearningProgress";
+import { DailyQuests } from "./LearningCards";
+import { useProfile } from "../../app/HeaderTools";
+import { writeRoute, type AppRoute } from "../../app/routes";
+import { IslandArt, islandPalette } from "../../ui/art/Island";
+import { Icon } from "../../ui/Icon";
+import { Bone } from "../../ui/Skeleton";
+import { IslandMap } from "./IslandMap";
+import { QuickAccess, type QuickItem } from "./QuickAccess";
+import { headSession, islandState, openMaterial, statusText, useMaterialProgress } from "./islands";
 import "./styles.css";
 
-const features: { icon: IconName; title: string; description: string }[] = [
-  { icon: "map", title: "建立知識地圖", description: "分析你的教材，整理概念、關聯與原始依據。" },
-  {
-    icon: "learning",
-    title: "依循學習路徑",
-    description: "沿著教材的學習順序，逐步掌握重要概念。",
-  },
-  { icon: "book", title: "理解概念", description: "探索教材重點，隨時回到 PDF 查看來源。" },
-  { icon: "check", title: "練習與複習", description: "透過題目確認理解，接續原本的學習與回饋。" },
-];
-
 export function Dashboard({ apiClient }: { apiClient: StudydyApiClient }) {
-  const [materials, setMaterials] = useState<MaterialLibraryItem[] | null>(null);
-  const [error, setError] = useState<string | null>(null);
+  const launch = useStudyStart(apiClient);
   const [retry, setRetry] = useState(0);
+  const { materials, progress, error } = useMaterialProgress(apiClient, retry);
+  // 首頁一律重新計算，頁首共用同一份結果。
+  const activity = useLearningActivity(apiClient, { fresh: true });
+  const name = useProfile(apiClient)?.display_name;
+  const [goals, setGoals] = useState<LearningGoalsView | null>(null);
+  const [goalsError, setGoalsError] = useState<string | null>(null);
+  const [goalsReload, setGoalsReload] = useState(0);
   useEffect(() => {
     let cancelled = false;
-    setError(null);
-    void apiClient.listMaterials().then(
-      (library) => {
-        if (!cancelled) setMaterials(library.materials);
-      },
-      (failure) => {
-        if (!cancelled) setError(errorMessage(failure));
-      },
-    );
-    return () => {
-      cancelled = true;
-    };
-  }, [apiClient, retry]);
-  const studies = (materials ?? []).flatMap((material) => {
-    const structure =
-      material.available_structures.find(
-        (value) => value.knowledge_structure_revision === material.head_revision,
-      ) ?? material.available_structures[0];
-    const state =
-      structure &&
-      material.study_sessions.find(
-        (item) =>
-          item.run_id === structure.run_id &&
-          item.knowledge_structure_revision === structure.knowledge_structure_revision,
-      );
-    return state ? [{ material, session: state }] : [];
-  });
-  const ordered = [...studies].sort(
-    (a, b) => Date.parse(b.session.started_at) - Date.parse(a.session.started_at),
-  );
-  const recent =
-    ordered.find((item) => item.session.status === "active" || item.session.status === "no_safe") ??
-    ordered.find((item) => item.session.status === "completed");
-  const stats: { title: string; value: number | undefined; note: string; icon: IconName }[] = [
-    { title: "教材", value: materials?.length, note: "已保存的教材", icon: "book" },
-    {
-      title: "知識地圖",
-      value: materials?.filter((item) => item.available_structures.length > 0).length,
-      note: "可開啟地圖的教材",
-      icon: "map",
-    },
-    {
-      title: "已開始學習",
-      value: materials ? studies.length : undefined,
-      note: "有學習紀錄的教材",
-      icon: "learning",
-    },
-    {
-      title: "已完成",
-      value: materials
-        ? studies.filter((item) => item.session.status === "completed").length
-        : undefined,
-      note: "已完成學習的教材",
-      icon: "check",
-    },
-  ];
+    setGoals(null); setGoalsError(null);
+    const read = () => void apiClient.getLearningGoals().then(value => {
+      if (!cancelled) { setGoals(value); setGoalsError(null); }
+    }, failure => { if (!cancelled) { setGoals(null); setGoalsError(errorMessage(failure)); } });
+    read();
+    window.addEventListener("focus", read);
+    return () => { cancelled = true; window.removeEventListener("focus", read); };
+  }, [apiClient, goalsReload]);
+  const goalsByMaterial = useMemo(() => new Map(goals?.goals.map(goal => [goal.material_id, goal]) ?? []), [goals]);
+  const openGoal = (goal: LearningGoalSummary) => writeRoute({ name: "knowledge-map", materialId: goal.material_id,
+    runId: goal.run_id, structureRevision: goal.knowledge_structure_revision }, false,
+    { knowledgeMap: { revision: goal.knowledge_structure_revision, mode: "review" } });
+
+  // 依最近學習排序：有學習紀錄的教材在前，其餘依建立時間。
+  const ordered = useMemo(() => [...(materials ?? [])].sort((a, b) => {
+    const at = headSession(a)?.started_at ?? "", bt = headSession(b)?.started_at ?? "";
+    if (at !== bt) return bt.localeCompare(at);
+    return b.created_at.localeCompare(a.created_at);
+  }), [materials]);
+  // 優先接續學習中的教材，其次查看已完成成果，最後才是尚未開始的地圖。
+  const focus = (["learning", "completed", "ready"] as const).map((state) => ordered.find((item) => islandState(item) === state)).find(Boolean);
+
+  const focusSession = focus && headSession(focus);
+  const focusProgress = focus && progress.get(focus.material_id);
+  const continueRoute: AppRoute | null = focus && focusSession
+    ? { name: "study-session", materialId: focus.material_id, runId: focusSession.run_id, structureRevision: focusSession.knowledge_structure_revision, studySessionId: focusSession.study_session_id }
+    : null;
+  // 快速存取第一項：接續學習中的教材，其次查看已完成成果、開啟尚未開始的地圖。
+  const next: QuickItem = focus && continueRoute && focusSession?.status === "completed"
+    ? { icon: "check", kicker: "查看學習成果", title: focus.display_name, meta: "這份教材已完成學習", onOpen: () => writeRoute(continueRoute) }
+    : focus && continueRoute ? { icon: "learning", kicker: "繼續學習", title: focusProgress?.currentLabel ?? focus.display_name,
+      meta: focusProgress?.currentLabel ? `上次停在 · ${focus.display_name}` : "回來接續上次的學習", onOpen: () => void launch.start({ materialId: focus.material_id, runId: focusSession!.run_id, structureRevision: focusSession!.knowledge_structure_revision }) }
+    : focus ? { icon: "map", kicker: "開啟知識地圖", title: focus.display_name, meta: "從第一個概念開始", onOpen: () => openMaterial(focus) }
+    : materials?.length ? { icon: "process", kicker: "教材整理中", title: "完成後就能開始探索", meta: "整理進度可在我的教材查看" }
+    : { icon: "upload", kicker: "上傳教材", title: "建立你的第一座島嶼", meta: "上傳 PDF 或從主題建立教材", onOpen: () => writeRoute({ name: "upload" }) };
+  const openQuest = (quest: LearningQuest) => {
+    if (quest.kind === "mark_cards") {
+      writeRoute({ name: "concept-cards" });
+      return;
+    }
+    if (quest.kind === "finish_podcast_episode" && quest.podcast_id && quest.material_id) {
+      writeRoute({ name: "podcast", podcastId: quest.podcast_id, materialId: quest.material_id });
+      return;
+    }
+    const material = materials?.find((item) => item.material_id === quest.material_id);
+    const link = material?.study_sessions.find((item) => item.study_session_id === quest.study_session_id);
+    if (material && link) void launch.start({ materialId: material.material_id, runId: link.run_id, structureRevision: link.knowledge_structure_revision });
+    else if (material) openMaterial(material);
+    else writeRoute({ name: "materials" });
+  };
+  const now = new Date();
+  const hour = now.getHours();
+  const greeting = name ? `${hour >= 5 && hour < 11 ? "早安" : hour >= 11 && hour < 18 ? "午安" : "晚安"}，${name}！` : "歡迎回來！";
+
   return (
     <section className="dashboard">
+
+      {launch.error && <p className="form-error" role="alert">{launch.error}</p>}
       <header className="dashboard-greeting">
-        <h1>歡迎回來！</h1>
-        <p>讓我們一起繼續你的學習旅程。</p>
+        <div className="dashboard-hello">
+          <h1>{greeting}今天想探索哪座島？</h1>
+        </div>
+        <div className="dashboard-actions">
+          <button className="secondary-button" type="button" onClick={() => writeRoute({ name: "topics" })}><Icon name="sparkle" size={18} />從主題建立教材</button>
+          <button className="primary-button" type="button" onClick={() => writeRoute({ name: "upload" })}><Icon name="upload" size={18} />上傳教材</button>
+        </div>
       </header>
       <div className="dashboard-content">
-        <div className="dashboard-primary">
-          <section className="dashboard-hero" aria-label="建立你的知識地圖">
-            <div className="hero-copy">
-              <h2>建立你的知識地圖</h2>
-              <p>上傳你的學習教材，讓 AI 為你建立專屬的知識地圖。</p>
-              <button
-                className="primary-button"
-                type="button"
-                onClick={() => writeRoute({ name: "upload" })}
-              >
-                <Icon name="upload" size={18} />
-                上傳教材
-              </button>
+        <section className="archipelago surface" aria-labelledby="archipelago-title">
+          <header className="archipelago-head">
+            <div>
+              <h2 id="archipelago-title">我的學習群島</h2>
+              {materials && <span>{materials.length} 份教材</span>}
             </div>
-            <div className="hero-illustration">
-              <div className="hero-document" aria-hidden="true">
-                <Icon name="file" size={54} />
-                <span />
-                <span />
-                <span />
-              </div>
-              <img
-                src="/assets/Studydy_角色素材/引導/guide_present.png"
-                alt="Studydy 引導你建立知識地圖"
-              />
-            </div>
-          </section>
-          {error && (
+            <button className="text-button" type="button" onClick={() => writeRoute({ name: "materials" })}>看全部教材<Icon name="chevron-right" size={16} /></button>
+          </header>
+          {error ? (
             <div className="dashboard-error" role="alert">
               <p>{error}</p>
-              <button
-                className="secondary-button"
-                type="button"
-                onClick={() => setRetry((value) => value + 1)}
-              >
-                重新讀取
-              </button>
+              <button className="secondary-button" type="button" onClick={() => setRetry((value) => value + 1)}>重新讀取</button>
             </div>
-          )}
-          <section className="dashboard-overview" aria-label="學習總覽">
-            <h2>學習總覽</h2>
-            <div className="dashboard-stats" aria-busy={materials === null && !error}>
-              {stats.map((stat, index) => (
-                <article className={`dashboard-stat accent-${index}`} key={stat.title}>
-                  <span className="stat-icon">
-                    <Icon name={stat.icon} size={23} />
-                  </span>
-                  <span className="stat-copy">
-                    <span>{stat.title}</span>
-                    <strong>{error ? "—" : (stat.value ?? "—")}</strong>
-                    <small>{error ? "暫時無法讀取" : materials ? stat.note : "正在讀取…"}</small>
-                  </span>
-                </article>
-              ))}
-            </div>
-          </section>
-          {recent && !error && (
-            <section className="dashboard-resume surface">
-              <div>
-                <h2>繼續學習</h2>
-                <p>{recent.material.display_name}</p>
-              </div>
-              <button
-                className="primary-button"
-                type="button"
-                onClick={() =>
-                  writeRoute({
-                    name: "study-session",
-                    materialId: recent.material.material_id,
-                    runId: recent.session.run_id,
-                    structureRevision: recent.session.knowledge_structure_revision,
-                    studySessionId: recent.session.study_session_id,
-                  })
-                }
-              >
-                {recent.session.status === "completed" ? "查看學習成果" : "繼續學習"}
-                <Icon name="chevron-right" size={18} />
-              </button>
-            </section>
-          )}
-        </div>
-        <aside className="dashboard-help surface" aria-label="Studydy 學習協助">
-          <h2>Studydy 如何幫助你的學習</h2>
-          <div className="dashboard-features">
-            {features.map((feature, index) => (
-              <article className={`accent-${index}`} key={feature.title}>
-                <span className="stat-icon">
-                  <Icon name={feature.icon} size={22} />
-                </span>
-                <div>
-                  <h3>{feature.title}</h3>
-                  <p>{feature.description}</p>
-                </div>
-              </article>
-            ))}
-          </div>
+          ) : <IslandMap materials={materials} progress={progress} goals={goalsByMaterial} />}
+        </section>
+        {/* 右欄：今日任務與快速存取；等級在全站頁首，徽章與統計在「成就」頁。 */}
+        <aside className="dashboard-side">
+          {activity === undefined && <div className="dashboard-skeleton-card surface" aria-hidden="true"><Bone className="is-line is-title" style={{ width: "35%" }} /><Bone className="is-row" /><Bone className="is-row" /></div>}
+          {((activity?.quests.length ?? 0) > 0 || (goals?.goals.length ?? 0) > 0) && <DailyQuests quests={activity?.quests ?? []} goals={goals?.goals ?? []} onOpen={openQuest} onOpenGoal={openGoal} />}
+          {goalsError && <p role="alert" className="dashboard-goal-error">學習目標暫時無法讀取。{goalsError}<button className="text-button" onClick={() => setGoalsReload(value => value + 1)}>重新讀取目標</button></p>}
+          {materials && <QuickAccess apiClient={apiClient} next={next} />}
         </aside>
+        {/* 手機上地圖較小，在右欄之後另列全部教材方便直接點選。 */}
+        {materials && ordered.length > 1 && <ul className="archipelago-list" aria-label="全部教材島嶼">
+          {ordered.map((material) => {
+            const status = statusText(islandState(material), progress.get(material.material_id));
+            const goal = goalsByMaterial.get(material.material_id);
+            return <li key={material.material_id}>
+              <button type="button" onClick={() => openMaterial(material)}>
+                <span className="archipelago-list-thumb" aria-hidden="true"><IslandArt palette={islandPalette(material.material_id)} landmarks={false} /></span>
+                <span className="archipelago-list-text"><b>{material.display_name}</b><small>{status}</small>{goal && <small className="island-goal-summary">{goalSummaryText(goal)}</small>}</span>
+                <Icon name="chevron-right" size={16} />
+              </button>
+            </li>;
+          })}
+        </ul>}
       </div>
     </section>
   );

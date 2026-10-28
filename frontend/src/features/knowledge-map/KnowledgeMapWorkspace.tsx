@@ -1,3 +1,9 @@
+import { MapExports } from "../exports/MapExports";
+import { relationStyles } from "./map-appearance";
+import { DifficultyBadge, LearningDiagnosis, useLearningDiagnosis, useConceptDifficulty } from "../learning-diagnosis/LearningDiagnosis";
+import { LearningGoalPanel } from "../learning-goals/LearningGoalPanel";
+import { MaterialContentNav } from "../material-flow/MaterialContentNav";
+import type { AppRoute } from "../../app/routes";
 import { SourceButton, sourceLinks } from "../../ui/SourceButton";
 import { useEffect, useMemo, useRef, useState, type ReactNode, type KeyboardEvent } from "react";
 import {
@@ -20,40 +26,32 @@ import "@xyflow/react/dist/style.css";
 
 import type { StudydyApiClient } from "../../api/client";
 import type {
-  KnowledgeStructureView,
-  RelationType,
-  LearnerProgressView,
+  KnowledgeOutlineView,
+  KnowledgeRegionsView,
+  MapProgressView,
+  ConceptDifficultyView,
   StudySessionView,
 } from "../../api/contracts";
+import { useConceptContext } from "../material-flow/useConceptContext";
+import { errorMessage } from "../../api/client";
 import { ConceptContent } from "../../ui/ConceptContent";
 import { Icon } from "../../ui/Icon";
+import { Progress } from "../../ui/Progress";
+import { IslandArt, islandColors, islandPalette, regionPalette } from "../../ui/art/Island";
 import { StateView } from "../../ui/StateView";
-import { learningNavigationItems, focusGraph, initialFocusConceptId } from "./knowledge-map";
+import { learningNavigationItems, focusGraph, groupSlices, initialFocusConceptId, mapRegions, navigatorRange, NAVIGATOR_WINDOW, regionBasisText, regionColorIndex, type MapRegions, type NavigatorRange } from "./knowledge-map";
 
-type Concept = KnowledgeStructureView["concepts"][number];
+type Concept = KnowledgeOutlineView["concepts"][number];
 type Mode = "focus" | "review";
 type RestoreFocus = () => void;
-
-const modes: { id: Mode; label: string }[] = [
-  { id: "focus", label: "概念地圖" },
-  { id: "review", label: "複習重點" },
-];
-
-const relationStyles: Record<RelationType, { label: string; color: string; dashed: boolean }> = {
-  prerequisite: { label: "先備", color: "#5B8DEF", dashed: false },
-  part_of: { label: "組成", color: "#22C55E", dashed: false },
-  application: { label: "應用", color: "#06B6D4", dashed: true },
-  example: { label: "例子", color: "#F59E0B", dashed: false },
-  contrast: { label: "對照", color: "#EF4444", dashed: true },
-};
 
 const fitViewOptions = { padding: 0.18, minZoom: 0.001, maxZoom: 1.1 };
 
 const learningLabels = {
-  not_started: "尚未練習",
-  learning: "學習中",
-  needs_review: "需要複習",
-  mastered: "已掌握",
+  not_started: "尚未開始",
+  in_progress: "進行中",
+  needs_review: "需要加強",
+  completed: "已完成",
 } as const;
 
 function LearningBadge({
@@ -61,18 +59,12 @@ function LearningBadge({
   progress,
 }: {
   conceptId: string;
-  progress: LearnerProgressView | null;
+  progress: MapProgressView | null;
 }) {
   const state = progress?.concept_states.find((item) => item.concept_id === conceptId);
-  const cycle = progress?.assessment_cycles.find((item) => item.concept_id === conceptId);
-  const label =
-    cycle?.outcome === "passed" && state?.status !== "mastered"
-      ? "本輪檢測通過"
-      : cycle?.pending_count
-        ? "待補強"
-        : state
-          ? learningLabels[state.status]
-          : null;
+  const label = state?.status !== "completed" && state?.assessable === false
+    ? "此概念目前無法提供可靠檢測"
+    : state ? learningLabels[state.status] : null;
   return state && label ? (
     <span className={`map-learning-badge is-${state.status}`}>{label}</span>
   ) : null;
@@ -92,7 +84,8 @@ function DetailPanel({
   const ref = useRef<HTMLDialogElement>(null);
   useEffect(() => {
     const panel = ref.current!;
-    const mobile = window.matchMedia("(max-width: 900px)");
+    // 平板斷點（styles.css 共用斷點；與 knowledge-map/styles.css 的浮層詳情同一門檻）：詳情改用 modal 浮層。
+    const mobile = window.matchMedia("(max-width: 1024px)");
     const update = () => {
       if (panel.open) panel.close();
       if (mobile.matches) panel.showModal();
@@ -163,35 +156,47 @@ function ConceptDetail({
   view,
   progress,
   studyAction,
+  isLoadingProgress,
+  progressMessage,
+  region,
+  difficulty,
 }: {
-  view: KnowledgeStructureView;
-  progress: LearnerProgressView | null;
+  view: KnowledgeOutlineView;
+  progress: MapProgressView | null;
   apiClient: StudydyApiClient;
   concept: Concept;
+  region: string | null;
+  difficulty: ConceptDifficultyView | null;
   close: () => void;
   studyAction: ReactNode;
+  isLoadingProgress: boolean;
+  progressMessage: string | null;
 }) {
+  const read = useConceptContext(apiClient, view.material_id, view.knowledge_structure_revision, [concept.concept_id]);
+  const full = read.context?.concepts.find(c => c.concept_id === concept.concept_id);
   return (
     <DetailPanel label="概念詳情" focusKey={concept.concept_id} close={close}>
       <header>
         <div>
-          <span className="detail-kicker">教材概念</span>
+          <span className="detail-kicker">{region ? `教材概念 · ${region}` : "教材概念"}</span>
           <h2>{concept.label}</h2>
         </div>
         <button aria-label="關閉概念詳情" className="panel-close" type="button" onClick={close}>
           ×
         </button>
       </header>
-      <LearningBadge conceptId={concept.concept_id} progress={progress} />
-      {studyAction}
+      {progress ? <LearningBadge conceptId={concept.concept_id} progress={progress} /> : (
+        <span className="map-learning-badge">{isLoadingProgress ? "讀取學習狀態…" : progressMessage ? "學習狀態暫時無法讀取" : "尚未開始"}</span>
+      )}
+      <DifficultyBadge concept={difficulty?.concepts.find(item => item.concept_id === concept.concept_id)} detail />
+      {full?.uncertain === true && <p className="flow-notice">影片逐字稿可能有聽錯的詞，建議對照原影片</p>}
       <section>
         <h3>教材重點</h3>
-        <ConceptContent
-          claims={concept.claims}
-          apiClient={apiClient}
-          sourceResolver={view.source_resolver}
-        />
+        {read.error ? <p role="alert">{read.error}<button type="button" onClick={read.retry}>重新讀取</button></p>
+          : full ? <ConceptContent claims={full.claims} apiClient={apiClient} sourceResolver={view.source_resolver} />
+          : <p role="status">正在讀取概念與來源…</p>}
       </section>
+      {studyAction}
     </DetailPanel>
   );
 }
@@ -223,18 +228,51 @@ function ConceptMapNode({ data }: NodeProps<ConceptNode>) {
 }
 const nodeTypes = { concept: ConceptMapNode };
 
+function regionCountText(regions: MapRegions) {
+  if (regions.basis !== "chapters") return `${regions.regions.length} 個區域`;
+  return (regions.groups.length ? `${regions.groups.length} 個島群・` : "") + `${regions.regions.length} 個章節`;
+}
+
+/** 把範圍內的章節切片依島群合併；章節已依島群排列，同群相鄰。 */
+function islandGroups<T extends { index: number }, S>(regions: MapRegions, slices: { group: T; slice: S }[]) {
+  const result: { group: MapRegions["groups"][number]; slices: { group: T; slice: S }[] }[] = [];
+  for (const item of slices) {
+    const group = regions.groups.find((candidate) => candidate.index === regions.regions[item.group.index].group)!;
+    if (result.at(-1)?.group !== group) result.push({ group, slices: [] });
+    result.at(-1)!.slices.push(item);
+  }
+  return result;
+}
+
 function LearningNavigator({
   view,
   selectedConceptId,
   focusConcept,
   progress,
+  regions,
 }: {
-  progress: LearnerProgressView | null;
-  view: KnowledgeStructureView;
+  progress: MapProgressView | null;
+  regions: MapRegions | null;
+  view: KnowledgeOutlineView;
   selectedConceptId: string;
   focusConcept: (id: string) => void;
 }) {
   const items = useMemo(() => learningNavigationItems(view), [view]);
+  // 兩個以上區域才分組；組內維持教材順序。單次分桶，避免區域數×概念數的重複篩選。
+  const groups = useMemo(() => {
+    if (!regions || regions.regions.length <= 1) return null;
+    const buckets = regions.regions.map((region) => ({ ...region, items: [] as typeof items }));
+    for (const item of items) buckets[regions.byConcept.get(item.concept.concept_id)!]?.items.push(item);
+    return buckets;
+  }, [items, regions]);
+  // 顯示順序（分組時依區域攤平）；千頁教材有數千個概念，一次畫出全部列會讓手機卡住數秒，
+  // 因此只畫選取概念附近的一段，兩端可再展開；選取概念移出範圍時重新置中。
+  const ordered = useMemo(() => groups ? groups.flatMap((group) => group.items) : items, [groups, items]);
+  const positionOf = useMemo(() => new Map(ordered.map((item, index) => [item.concept.concept_id, index])), [ordered]);
+  const selectedIndex = positionOf.get(selectedConceptId) ?? 0;
+  const [range, setRange] = useState<NavigatorRange | null>(null);
+  const shown = navigatorRange(range, selectedIndex, ordered.length);
+  if (shown !== range && (range !== null || shown.end - shown.start < ordered.length)) setRange(shown);
   const states = useMemo(
     () => new Map(progress?.concept_states.map((state) => [state.concept_id, state])),
     [progress],
@@ -243,8 +281,8 @@ function LearningNavigator({
   const currentStep = view.initial_learning_path.find(
     (step) => step.concept_id === progress?.current_concept_id,
   );
-  const mastered =
-    progress?.concept_states.filter((state) => state.status === "mastered").length ?? 0;
+  const completed =
+    progress?.concept_states.filter((state) => state.status === "completed").length ?? 0;
   const nextId =
     progress && ["advance", "review_prerequisite", "resume"].includes(progress.next_action.action)
       ? progress.next_action.target_concept_id
@@ -257,19 +295,77 @@ function LearningNavigator({
       if (!selectedRow.current || !rail.clientHeight) return;
       const item = selectedRow.current.getBoundingClientRect();
       const bounds = rail.getBoundingClientRect();
-      if (item.top < bounds.top) rail.scrollTop += item.top - bounds.top;
-      else if (item.bottom > bounds.bottom) rail.scrollTop += item.bottom - bounds.bottom;
+      // 目前概念在可見範圍外時捲到清單中間，上下都看得到前後的概念。
+      if (item.top < bounds.top || item.bottom > bounds.bottom)
+        rail.scrollTop += item.top + item.height / 2 - (bounds.top + bounds.height / 2);
     };
     reveal();
     const observer = new ResizeObserver(reveal);
     observer.observe(rail);
     return () => observer.disconnect();
   }, [selectedConceptId]);
+  const renderItem = ({ concept, step }: (typeof items)[number]) => {
+    const selected = concept.concept_id === selectedConceptId;
+    const learningCurrent = concept.concept_id === progress?.current_concept_id;
+    const status = states.get(concept.concept_id)?.status;
+    const next = concept.concept_id === nextId && !learningCurrent;
+    const stateLabel =
+      status === "completed" ? "已完成" : status === "needs_review" ? "需要加強" : "";
+    const name = [
+      `第 ${step.position} 個，${concept.label}`,
+      learningCurrent && "目前學習",
+      stateLabel,
+      next && "下一步",
+    ]
+      .filter(Boolean)
+      .join("；");
+    return (
+      <li key={concept.concept_id}>
+        <button
+          ref={selected ? selectedRow : undefined}
+          type="button"
+          aria-label={name}
+          aria-current={selected ? "true" : undefined}
+          className={[
+            selected && "is-selected",
+            learningCurrent && "is-learning-current",
+            status === "completed" && "is-completed",
+            status === "needs_review" && "is-needs-review",
+            next && "is-next-suggested",
+          ]
+            .filter(Boolean)
+            .join(" ")}
+          onClick={() => focusConcept(concept.concept_id)}
+        >
+          <span className="navigator-position" aria-hidden="true">
+            {step.position}
+          </span>
+          <span className="navigator-concept">
+            <span className="navigator-label">{concept.label}</span>
+            {(learningCurrent || next) && (
+              <span className="navigator-notes">
+                {learningCurrent ? (
+                  <span className="navigator-current">目前學習</span>
+                ) : (
+                  <span>下一步</span>
+                )}
+              </span>
+            )}
+          </span>
+          {stateLabel && (
+            <span className="navigator-state" title={stateLabel} aria-hidden="true">
+              <Icon name={status === "completed" ? "check" : "warning"} size={15} />
+            </span>
+          )}
+        </button>
+      </li>
+    );
+  };
   return (
     <nav className="focus-navigator surface" aria-label="學習導覽">
       <header>
         <h2>學習導覽</h2>
-        <span>{view.concepts.length} 個概念</span>
+        <span>{groups ? `${regionCountText(regions!)} · ` : ""}{view.concepts.length} 個概念</span>
       </header>
       {(progress || firstStep) && (
         <p className="navigator-summary">
@@ -277,79 +373,97 @@ function LearningNavigator({
             <>
               {currentStep &&
                 `第 ${currentStep.position} / ${view.initial_learning_path.length} 個 · `}
-              已掌握 {mastered} 個
+              已完成 {completed} 個
             </>
           ) : (
-            `建議從第 ${firstStep!.position} 個概念開始`
+            `教材順序從第 ${firstStep!.position} 個概念開始`
           )}
         </p>
       )}
+      {groups && <p className="navigator-basis">{regionBasisText(regions!)}</p>}
+      {groups && regions!.groups.length > 0 && (
+        // 兩層時章節很多（千頁教材約 460 章），清單只畫目前位置附近；用選單跳到任一章的第一個概念。
+        <label className="navigator-jump">
+          <span>跳到章節</span>
+          <select
+            value=""
+            onChange={(event) => {
+              const region = regions!.regions[Number(event.target.value)];
+              const first = region && items.find((item) => regions!.byConcept.get(item.concept.concept_id) === region.index);
+              if (first) focusConcept(first.concept.concept_id);
+            }}
+          >
+            <option value="" disabled>選擇章節（{regions!.regions.length} 章）</option>
+            {regions!.groups.map((group) => (
+              <optgroup key={group.id} label={group.label}>
+                {group.regionIndexes.map((index) => (
+                  <option key={index} value={index}>{regions!.regions[index].label}</option>
+                ))}
+              </optgroup>
+            ))}
+          </select>
+        </label>
+      )}
       <div className="navigator-list" id="focus-concept-list" ref={list}>
-        <ul>
-          {items.map(({ concept, step }) => {
-            const selected = concept.concept_id === selectedConceptId;
-            const learningCurrent = concept.concept_id === progress?.current_concept_id;
-            const status = states.get(concept.concept_id)?.status;
-            const next = concept.concept_id === nextId && !learningCurrent;
-            const stateLabel =
-              status === "mastered" ? "已掌握" : status === "needs_review" ? "需要複習" : "";
-            const name = [
-              `第 ${step.position} 個，${concept.label}`,
-              learningCurrent && "目前學習",
-              stateLabel,
-              next && "下一步",
-            ]
-              .filter(Boolean)
-              .join("；");
-            return (
-              <li key={concept.concept_id}>
-                <button
-                  ref={selected ? selectedRow : undefined}
-                  type="button"
-                  aria-label={name}
-                  aria-current={selected ? "true" : undefined}
-                  className={[
-                    selected && "is-selected",
-                    learningCurrent && "is-learning-current",
-                    status === "mastered" && "is-mastered",
-                    status === "needs_review" && "is-needs-review",
-                    next && "is-next-suggested",
-                  ]
-                    .filter(Boolean)
-                    .join(" ")}
-                  onClick={() => focusConcept(concept.concept_id)}
-                >
-                  <span className="navigator-position" aria-hidden="true">
-                    {step.position}
-                  </span>
-                  <span className="navigator-concept">
-                    <span className="navigator-label">{concept.label}</span>
-                    {(learningCurrent || next) && (
-                      <span className="navigator-notes">
-                        {learningCurrent ? (
-                          <span className="navigator-current">目前學習</span>
-                        ) : (
-                          <span>下一步</span>
-                        )}
-                      </span>
-                    )}
-                  </span>
-                  {stateLabel && (
-                    <span className="navigator-state" title={stateLabel} aria-hidden="true">
-                      <Icon name={status === "mastered" ? "check" : "warning"} size={15} />
-                    </span>
-                  )}
-                </button>
+        {shown.start > 0 && (
+          <button type="button" className="navigator-more" onClick={() => setRange({ start: Math.max(0, shown.start - NAVIGATOR_WINDOW), end: shown.end })}>
+            顯示前 {Math.min(NAVIGATOR_WINDOW, shown.start)} 個概念
+          </button>
+        )}
+        {groups ? (
+          regions!.groups.length ? (
+            // 兩層：來源檔＝島群（h3），章節＝島（h4）；只畫目前範圍內的章節。
+            <ul className="navigator-regions">
+              {islandGroups(regions!, groupSlices(groups, shown)).map(({ group, slices }) => (
+                <li key={group.id} className="navigator-region navigator-island-group">
+                  <h3 title={group.label}>
+                    <i style={{ background: islandColors(regionPalette(view.material_id, group.index)).c2 }} aria-hidden="true" />
+                    <span>{group.label}</span>
+                    <small>{group.regionIndexes.length} 章 · {group.conceptCount} 個</small>
+                  </h3>
+                  <ul className="navigator-chapters">
+                    {slices.map(({ group: chapter, slice }) => (
+                      <li key={chapter.id} className="navigator-region">
+                        <h4 title={chapter.label}>
+                          <span>{chapter.label}</span>
+                          <small>{chapter.items.length} 個</small>
+                        </h4>
+                        <ul>{slice.map(renderItem)}</ul>
+                      </li>
+                    ))}
+                  </ul>
+                </li>
+              ))}
+            </ul>
+          ) : (
+          <ul className="navigator-regions">
+            {groupSlices(groups, shown).map(({ group, slice }) => (
+              <li key={group.id} className="navigator-region">
+                <h3 title={group.label}>
+                  <i style={{ background: islandColors(regionPalette(view.material_id, regionColorIndex(regions!, group.index))).c2 }} aria-hidden="true" />
+                  <span>{group.label}</span>
+                  <small>{group.items.length} 個</small>
+                </h3>
+                <ul>{slice.map(renderItem)}</ul>
               </li>
-            );
-          })}
-        </ul>
+            ))}
+          </ul>
+          )
+        ) : (
+          <ul>{ordered.slice(shown.start, shown.end).map(renderItem)}</ul>
+        )}
+        {shown.end < ordered.length && (
+          <button type="button" className="navigator-more" onClick={() => setRange({ start: shown.start, end: Math.min(ordered.length, shown.end + NAVIGATOR_WINDOW) })}>
+            顯示後 {Math.min(NAVIGATOR_WINDOW, ordered.length - shown.end)} 個概念
+          </button>
+        )}
       </div>
     </nav>
   );
 }
 
 function MapGraph({
+  apiClient,
   openConcept,
   selectedConceptId,
   view,
@@ -357,13 +471,21 @@ function MapGraph({
   progress,
   selectedRelationId,
   detail,
+  regions,
+  toolbar,
+  difficulty,
 }: {
+  apiClient: StudydyApiClient;
   detail: ReactNode;
+  difficulty: ConceptDifficultyView | null;
+  /** 浮在地圖左上的搜尋，和「學習導覽」排成同一列。 */
+  toolbar: ReactNode;
+  regions: MapRegions | null;
   selectedRelationId: string | null;
-  progress: LearnerProgressView | null;
+  progress: MapProgressView | null;
   openConcept: (id: string, restoreFocus?: RestoreFocus) => void;
   selectedConceptId: string;
-  view: KnowledgeStructureView;
+  view: KnowledgeOutlineView;
   openRelation: (id: string, restoreFocus?: RestoreFocus) => void;
 }) {
   const conceptById = useMemo(
@@ -382,6 +504,7 @@ function MapGraph({
     );
     (element ?? navigatorToggle.current)?.focus({ preventScroll: true });
   };
+  const [legendOpen, setLegendOpen] = useState(false);
   const [navigatorOpen, setNavigatorOpen] = useState(false);
   const navigatorToggle = useRef<HTMLButtonElement>(null);
   const graph = useReactFlow();
@@ -414,6 +537,8 @@ function MapGraph({
     [view, selected.concept_id],
   );
   const layout = projection.nodes;
+  const previewRead = useConceptContext(apiClient, view.material_id, view.knowledge_structure_revision, layout.map(node => node.id));
+
   const updateNodeInternals = useUpdateNodeInternals();
   const measuredLayout = useRef<typeof layout | null>(null);
   useEffect(() => {
@@ -425,7 +550,7 @@ function MapGraph({
   const { nodes, edges } = useMemo(() => {
     const layoutById = new Map(layout.map((node) => [node.id, node]));
     // 雙向關係共用連接點排序，讓平行連線的標籤與箭頭保持分離。
-    const pairRelations = new Map<string, KnowledgeStructureView["relations"]>();
+    const pairRelations = new Map<string, KnowledgeOutlineView["relations"]>();
     for (const relation of projection.relations) {
       const key = [relation.source_concept_id, relation.target_concept_id].sort().join("|");
       const group = pairRelations.get(key) ?? [];
@@ -461,6 +586,9 @@ function MapGraph({
         }
       });
     }
+    const palette = islandPalette(view.material_id);
+    const position = new Map(view.initial_learning_path.map((step) => [step.concept_id, step.position]));
+    const states = new Map(progress?.concept_states.map((state) => [state.concept_id, state.status]));
     const nodes: Node[] = layout.map((node) => {
       const concept = conceptById.get(node.id)!;
       const current = node.id === selected.concept_id;
@@ -486,13 +614,22 @@ function MapGraph({
           handles: handlesByNode.get(node.id) ?? [],
           label: (
             <>
-              <strong>{concept.label}</strong>
-              <p>{concept.claims[0]?.text}</p>
-              <LearningBadge conceptId={concept.concept_id} progress={progress} />
+              <span className="island-sign">
+                {position.has(node.id) && <em aria-hidden="true">{position.get(node.id)}</em>}
+                <span>
+                  <strong>{concept.label}</strong>
+                  <small>
+                    <LearningBadge conceptId={concept.concept_id} progress={progress} />
+                    <DifficultyBadge concept={difficulty?.concepts.find(item => item.concept_id === concept.concept_id)} />
+                    {concept.claim_count} 個重點
+                  </small>
+                </span>
+              </span>
+              <span className="island-node-art"><IslandArt palette={regions ? regionPalette(view.material_id, regionColorIndex(regions, regions.byConcept.get(node.id)!)) : palette} landmarks={current} /></span>
             </>
           ),
         },
-        className: `concept-flow-node${current ? " is-focus" : ""}${node.depth === 2 ? " is-secondary" : ""}`,
+        className: `concept-flow-node is-${states.get(node.id) ?? "not_started"}${current ? " is-focus" : ""}${node.depth === 2 ? " is-secondary" : ""}`,
         ariaLabel: `教材概念：${concept.label}`,
         ariaRole: "button",
         domAttributes: nodeKeyboardAction(
@@ -506,7 +643,7 @@ function MapGraph({
     const edges: Edge[] = projection.relations.map((relation) => {
       const source = layoutById.get(relation.source_concept_id)!;
       const target = layoutById.get(relation.target_concept_id)!;
-      const { label, color, dashed } = relationStyles[relation.type];
+      const { label, color } = relationStyles[relation.type];
       return {
         id: relation.relation_id,
         source: source.id,
@@ -519,18 +656,16 @@ function MapGraph({
         markerEnd: {
           type: MarkerType.ArrowClosed,
           color,
-          width: 18,
-          height: 18,
+          width: 16,
+          height: 16,
+          markerUnits: "userSpaceOnUse",
         },
-        style: {
-          stroke: color,
-          strokeWidth: 1.5,
-          strokeDasharray: dashed ? "6 4" : undefined,
-        },
-        labelStyle: { fill: color, fontSize: 11 },
-        labelBgPadding: [4, 2],
+        labelStyle: { fill: "#fff", fontSize: 11, fontWeight: 800 },
+        labelBgStyle: { fill: color },
+        labelBgPadding: [7, 3],
+        labelBgBorderRadius: 999,
         className: `concept-flow-edge is-relation is-${relation.type}`,
-        ariaLabel: `${label}：${relation.learner_reason}`,
+        ariaLabel: `${label}：${previewRead.context?.relations.find(r => r.relation_id === relation.relation_id)?.learner_reason ?? `${conceptById.get(relation.source_concept_id)?.label} → ${conceptById.get(relation.target_concept_id)?.label}`}`,
         focusable: true,
         domAttributes: {
           onKeyDown: (event: KeyboardEvent<SVGGElement>) => {
@@ -546,13 +681,17 @@ function MapGraph({
   }, [
     layout,
     projection.relations,
+    previewRead.context,
+    previewRead.error,
     selected.concept_id,
     highlightedRelation,
+    difficulty,
     conceptById,
     progress,
     openConcept,
     openRelation,
     measurements,
+    regions,
   ]);
   // resize 只保留世界座標中心；使用者按適應畫面才重新 fit。
   useEffect(() => {
@@ -584,17 +723,24 @@ function MapGraph({
     return () => observer.disconnect();
   }, [graph]);
   useEffect(() => {
-    if (!initialized || !canvasReady || fittedConcept.current === selected.concept_id) return;
+    if (!initialized || !canvasReady || (!previewRead.context && !previewRead.error)
+      || fittedConcept.current === selected.concept_id) return;
+    let secondFrame = 0;
     const frame = requestAnimationFrame(() => {
-      fittedConcept.current = selected.concept_id;
-      void graph.fitView(fitViewOptions);
+      // 按需文字到達後，先讓節點量測更新，再計算第一次視野。
+      secondFrame = requestAnimationFrame(() => {
+        fittedConcept.current = selected.concept_id;
+        // 畫布本身太窄（依畫布寬度而非視窗斷點），初次視野只框住中心與第一層，其餘可平移或縮小查看。
+        const narrow = graphElement.current!.clientWidth < 600;
+        void graph.fitView(narrow ? { ...fitViewOptions, minZoom: 0.5, nodes: layout.filter((node) => node.depth < 2).map((node) => ({ id: node.id })) } : fitViewOptions);
+      });
     });
-    return () => cancelAnimationFrame(frame);
-  }, [initialized, canvasReady, graph, selected.concept_id]);
+    return () => { cancelAnimationFrame(frame); cancelAnimationFrame(secondFrame); };
+  }, [initialized, canvasReady, graph, selected.concept_id, previewRead.context, previewRead.error, layout]);
   return (
     <section
       className={`focus-workspace${detail ? " has-inspector" : ""}`}
-      aria-label="概念地圖工作區"
+      aria-label="知識地圖工作區"
     >
       <div
         className="focus-graph surface"
@@ -624,7 +770,7 @@ function MapGraph({
           onNodeClick={(_, node) => openConcept(node.id, () => restoreGraphFocus(node.id))}
           onEdgeClick={(_, edge) => openRelation(edge.id, () => restoreGraphFocus(edge.id))}
         >
-          <Background color="var(--border)" gap={28} size={1} />
+
           <Controls
             aria-label="地圖縮放控制"
             showInteractive={false}
@@ -641,21 +787,26 @@ function MapGraph({
             }
           }}
         >
-          <button
-            ref={navigatorToggle}
-            className="secondary-button"
-            type="button"
-            aria-expanded={navigatorOpen}
-            aria-controls="map-navigator"
-            onClick={() => {
-              navigatorToggle.current?.focus();
-              setNavigatorOpen((value) => !value);
-            }}
-          >
-            學習導覽
-          </button>
+          <div className="map-toolbar">
+            {toolbar}
+            <button
+              ref={navigatorToggle}
+              className="secondary-button map-navigator-toggle"
+              type="button"
+              aria-expanded={navigatorOpen}
+              aria-controls="map-navigator"
+              onClick={() => {
+                navigatorToggle.current?.focus();
+                setNavigatorOpen((value) => !value);
+              }}
+            >
+              <Icon name="route" size={18} />
+              學習導覽
+            </button>
+          </div>
           <div id="map-navigator" hidden={!navigatorOpen}>
             <LearningNavigator
+              regions={regions}
               progress={progress}
               view={view}
               selectedConceptId={selected.concept_id}
@@ -666,19 +817,28 @@ function MapGraph({
             />
           </div>
         </div>
-        {(nodes.length < projection.totalNodes || edges.length < projection.totalRelations) && (
-          <p className="map-limit-note" role="status">
-            兩層範圍：{nodes.length}／{projection.totalNodes} 個概念、{edges.length}／
-            {projection.totalRelations} 條關係。 尚有其他相關內容，可用搜尋或學習導覽選取。
-          </p>
-        )}
-        <div className="relation-legend" aria-label="概念關係圖例">
-          {Object.entries(relationStyles).map(([type, { label, color, dashed }]) => (
-            <span key={type} style={{ color }}>
-              <i className={`relation-swatch${dashed ? " is-dashed" : ""}`} aria-hidden="true" />
-              {label}
-            </span>
-          ))}
+        <div className="map-export-corner"><MapExports api={apiClient} view={view} /></div>
+        <div className={`map-annotations map-corner-legend ${legendOpen ? "is-expanded" : ""}`}>
+          <button type="button" className="secondary-button map-legend-toggle" aria-label="顯示關係圖例" aria-expanded={legendOpen} onClick={() => setLegendOpen(value => !value)}>?</button>
+          <div className="relation-legend" aria-label="概念關係圖例">
+            {Object.entries(relationStyles).map(([type, { label, bridge, color }]) => (
+              <span key={type} style={{ color }}>
+                <i className={`relation-swatch is-${type}`} aria-hidden="true" />
+                {label}<small>{bridge}</small>
+              </span>
+            ))}
+          </div>
+          {projection.totalNodes <= 1 && view.concepts.length > 1 && (
+            <p className="map-limit-note" role="status">
+              這個概念目前沒有直接相連的概念。可從「學習導覽」選擇其他{regions && regions.regions.length > 1 ? "區域或" : ""}概念繼續探索。
+            </p>
+          )}
+          {(nodes.length < projection.totalNodes || edges.length < projection.totalRelations) && (
+            <p className="map-limit-note" role="status">
+              兩層範圍：{nodes.length}／{projection.totalNodes} 個概念、{edges.length}／
+              {projection.totalRelations} 條關係。 尚有其他相關內容，可用搜尋或學習導覽選取。
+            </p>
+          )}
         </div>
       </div>
       {detail && (
@@ -697,15 +857,15 @@ function RelationDetail({
   close,
   openConcept,
 }: {
-  relation: KnowledgeStructureView["relations"][number];
-  view: KnowledgeStructureView;
+  relation: KnowledgeOutlineView["relations"][number];
+  view: KnowledgeOutlineView;
   apiClient: StudydyApiClient;
   close: () => void;
   openConcept: (id: string) => void;
 }) {
-  const evidence = view.concepts
-    .flatMap((concept) => concept.claims.flatMap((claim) => claim.evidence))
-    .filter((item) => relation.evidence_refs.includes(item.evidence_id));
+  const read = useConceptContext(apiClient, view.material_id, view.knowledge_structure_revision, [relation.source_concept_id]);
+  const full = read.context?.relations.find(item => item.relation_id === relation.relation_id);
+  const evidence = (read.context?.relation_evidence ?? []).filter(item => full?.evidence_refs.includes(item.evidence_id));
   return (
     <DetailPanel label="關係詳情" focusKey={relation.relation_id} close={close}>
       <header>
@@ -730,7 +890,7 @@ function RelationDetail({
       </section>
       <section>
         <h3>為什麼有這個關係？</h3>
-        <p className="claim-text">{relation.learner_reason}</p>
+        <p className="claim-text">{full?.learner_reason ?? (read.error ? "暫時無法讀取關係說明。" : "正在讀取關係說明…")}</p>
       </section>
       <section>
         <h3>教材來源</h3>
@@ -742,169 +902,67 @@ function RelationDetail({
             evidence={item}
           />
         ))}
-        {evidence.length === 0 && <p>可從來源與目標概念查看相關教材。</p>}
+        {read.error ? <p role="alert">{read.error}<button type="button" onClick={read.retry}>重新讀取</button></p>
+          : !read.context ? <p role="status">正在讀取關係來源…</p>
+          : evidence.length === 0 && <p>可從來源與目標概念查看相關教材。</p>}
       </section>
     </DetailPanel>
   );
 }
 
-function ReviewView({
-  view,
-  progress,
-  startStudy,
-  busyLabel,
-  studyLabel,
-  selectedId,
-  onSelect,
-  showNavigator,
-  apiClient,
-  loading,
-}: {
-  view: KnowledgeStructureView;
-  progress: LearnerProgressView | null;
-  selectedId: string;
-  onSelect: (id: string) => void;
-  startStudy: (id: string) => void;
-  busyLabel: string | null;
-  studyLabel: string;
-  showNavigator: () => void;
-  apiClient: StudydyApiClient;
-  loading: boolean;
+function ReviewView({ apiClient, materialId, view, progress, difficulty, isLoadingProgress, progressMessage, onReloadProgress, isStartingStudy, onStartStudy }: {
+  apiClient: StudydyApiClient; materialId: string; view: KnowledgeOutlineView; progress: MapProgressView | null;
+  difficulty: ReturnType<typeof useConceptDifficulty>; isLoadingProgress: boolean; progressMessage: string | null;
+  onReloadProgress: () => void; isStartingStudy: boolean; onStartStudy: (id: string) => void;
 }) {
-  const conceptById = useMemo(
-    () => new Map(view.concepts.map((concept) => [concept.concept_id, concept])),
-    [view.concepts],
-  );
-  const weakStates =
-    progress?.concept_states.filter((state) => state.status === "needs_review") ?? [];
-  const selectedState =
-    weakStates.find((state) => state.concept_id === selectedId) ?? weakStates[0];
-  const concept = selectedState && conceptById.get(selectedState.concept_id);
-  const points =
-    concept?.claims.filter((claim) => selectedState.weak_claim_ids.includes(claim.claim_id)) ?? [];
-  return (
-    <section aria-labelledby="review-title">
-      <div className="view-heading">
-        <div>
-          <h2 id="review-title">複習重點</h2>
-          <p>依最近一次學習結果，以下是建議優先複習的概念。</p>
-        </div>
-      </div>
-      {loading && !progress ? (
-        <p role="status">正在讀取複習重點…</p>
-      ) : !concept ? (
-        <div className="review-empty">
-          <div>
-            <h3>{progress ? "目前沒有需要複習的概念" : "練習後，幫你找出複習方向"}</h3>
-            <p>
-              {progress
-                ? "可以回到學習導覽，繼續探索下一個概念。"
-                : "先學習一個概念並作答，這裡就會整理需要補強的重點。"}
-            </p>
-            <button className="secondary-button" type="button" onClick={showNavigator}>
-              查看學習導覽
-            </button>
-          </div>
-        </div>
-      ) : (
-        <div className="review-workspace">
-          <nav className="review-list" aria-label="需要複習的概念">
-            <h3>
-              需要複習 <small>{weakStates.length} 個概念</small>
-            </h3>
-            <ul>
-              {weakStates.map((state) => {
-                const item = conceptById.get(state.concept_id)!;
-                return (
-                  <li key={state.concept_id}>
-                    <button
-                      type="button"
-                      aria-current={state.concept_id === concept.concept_id ? "true" : undefined}
-                      onClick={() => onSelect(state.concept_id)}
-                    >
-                      <strong>{item.label}</strong>
-                      <Icon name="chevron-right" />
-                    </button>
-                  </li>
-                );
-              })}
-            </ul>
-          </nav>
-          <header className="review-context">
-            <h3>{concept.label}</h3>
-          </header>
-          <section
-            className="review-points"
-            aria-label="選中概念的複習重點"
-            key={concept.concept_id}
-          >
-            <h3>需要補強的重點</h3>
-            <ol>
-              {points.map((claim) => (
-                <li key={claim.claim_id}>
-                  <p>{claim.text}</p>
-                  <div className="review-claim-sources" role="group" aria-label="教材來源">
-                    {sourceLinks(claim.evidence).map((evidence) => (
-                      <SourceButton
-                        key={evidence.evidence_id}
-                        apiClient={apiClient}
-                        resolver={view.source_resolver}
-                        evidence={evidence}
-                      />
-                    ))}
-                  </div>
-                </li>
-              ))}
-            </ol>
-          </section>
-          <aside className="review-actions" aria-label="複習行動">
-            <h3>接下來怎麼做</h3>
-            <button
-              className="primary-button"
-              type="button"
-              disabled={!!busyLabel}
-              onClick={() => startStudy(concept.concept_id)}
-            >
-              {busyLabel ?? studyLabel}
-            </button>
-            <button className="text-button" type="button" onClick={showNavigator}>
-              查看學習導覽
-              <Icon name="chevron-right" />
-            </button>
-          </aside>
-        </div>
-      )}
-    </section>
-  );
+  const diagnosis = useLearningDiagnosis(apiClient, materialId, view.knowledge_structure_revision, difficulty, progress, view.concepts);
+  const nextLearningConcept = view.concepts.find(concept => concept.concept_id === (progress ? progress.learning_path[0] : view.initial_learning_path[0]?.concept_id));
+  return <div className="review-diagnosis">
+            <section className="review-next surface" aria-label="下一步">
+              <header><h2>下一步</h2></header>
+              {isLoadingProgress ? <p role="status">正在讀取學習進度…</p> : progressMessage ? <p>重新讀取進度後，即可接續學習。</p> : <>
+                <p>已完成 {progress?.concept_states.filter(state => state.status === "completed").length ?? 0}／{view.concepts.length} 個概念
+                  · {diagnosis.data ? `待加強 ${diagnosis.pending.length} 個` : diagnosis.error ? "待加強暫時無法讀取" : "正在讀取待加強概念…"}</p>
+                <Progress value={progress?.concept_states.filter(state => state.status === "completed").length ?? 0} max={view.concepts.length || 1} aria-label="概念學習進度" />
+                <p>{nextLearningConcept ? `接下來：${nextLearningConcept.label}` : progress ? "目前路線已完成，可展開紀錄再次練習。" : "從第一個概念開始學習。"}</p>
+                {(nextLearningConcept || (!progress && view.initial_learning_path[0])) && <button className="primary-button" type="button" disabled={isStartingStudy} onClick={() => onStartStudy(nextLearningConcept?.concept_id ?? view.initial_learning_path[0].concept_id)}>{isStartingStudy ? "正在接續學習…" : "繼續學習"}</button>}
+              </>}
+            </section>
+            <LearningGoalPanel key={materialId} api={apiClient} materialId={materialId} />
+            <LearningDiagnosis api={apiClient} materialId={materialId} revision={view.knowledge_structure_revision} onReview={onStartStudy} disabled={isStartingStudy || isLoadingProgress}
+              difficulty={difficulty} progress={progress} concepts={view.concepts} report={diagnosis} />
+          </div>;
 }
 
 export function KnowledgeMapWorkspace({
   apiClient,
   progress,
   isLoadingProgress,
-  learningStateStatus,
   progressMessage,
   onReloadProgress,
   isStartingStudy,
   onReturnToRun,
-  onAddSources,
+  mapRoute,
+  materialName,
   onStartStudy,
   startMessage,
   view,
 }: {
   apiClient: StudydyApiClient;
-  progress: LearnerProgressView | null;
+  progress: MapProgressView | null;
   learningStateStatus: StudySessionView["status"] | null;
   isLoadingProgress: boolean;
   progressMessage: string | null;
   onReloadProgress: () => void;
   isStartingStudy: boolean;
   onReturnToRun: () => void;
-  onAddSources: () => void;
+  mapRoute: Extract<AppRoute, { name: "knowledge-map" }>;
+  materialName: string;
   onStartStudy: (conceptId: string) => void;
   startMessage: string | null;
-  view: KnowledgeStructureView;
+  view: KnowledgeOutlineView;
 }) {
+  const difficulty = useConceptDifficulty(apiClient, mapRoute.materialId, view.knowledge_structure_revision);
   const initialConceptId = progress?.current_concept_id ?? initialFocusConceptId(view);
   // 只記住目前瀏覽器紀錄的呈現位置；登入、作答與 learner progress 仍由 API 管理。
   const [restored] = useState(() => {
@@ -928,9 +986,10 @@ export function KnowledgeMapWorkspace({
     };
   });
   const [mode, setMode] = useState<Mode>(restored?.mode ?? "focus");
+  const [searchOpen, setSearchOpen] = useState(false);
   const [searchQuery, setSearchQuery] = useState(restored?.search ?? "");
   const [selectedConceptId, setSelectedConceptId] = useState(restored?.concept ?? initialConceptId);
-  const [reviewConceptId, setReviewConceptId] = useState(restored?.review ?? initialConceptId);
+  const [reviewConceptId] = useState(restored?.review ?? initialConceptId);
   const [detailConceptId, setDetailConceptId] = useState<string | null>(restored?.detail ?? null);
   const [relationId, setRelationId] = useState<string | null>(restored?.relation ?? null);
   useEffect(() => {
@@ -977,17 +1036,35 @@ export function KnowledgeMapWorkspace({
   }, [progress?.study_session_id, progress?.current_concept_id, view.concepts]);
   const selectedRelation = view.relations.find((relation) => relation.relation_id === relationId);
   const query = searchQuery.trim().toLocaleLowerCase();
-  const searchResults = query
-    ? view.concepts.filter((concept) =>
-        [concept.label, ...concept.aliases, ...concept.claims.map((claim) => claim.text)].some(
-          (text) => text.toLocaleLowerCase().includes(query),
-        ),
-      )
-    : [];
+  const [searchState, setSearchState] = useState<{ query: string; ids: string[]; error: string | null }>({ query: "", ids: [], error: null });
+  useEffect(() => {
+    let cancelled = false;
+    if (!query) return;
+    const timer = window.setTimeout(() => {
+      void apiClient.searchConcepts({ materialId: mapRoute.materialId, structureRevision: mapRoute.structureRevision }, query)
+        .then(result => { if (!cancelled) setSearchState({ query, ids: result.concept_ids, error: null }); },
+          error => { if (!cancelled) setSearchState({ query, ids: [], error: errorMessage(error) }); });
+    }, 150);
+    return () => { cancelled = true; window.clearTimeout(timer); };
+  }, [apiClient, mapRoute.materialId, mapRoute.structureRevision, query]);
+  const matchedIds = new Set(searchState.query === query ? searchState.ids : []);
+  const searchResults = query ? view.concepts.filter(concept => matchedIds.has(concept.concept_id)) : [];
   const selectedConcept = useMemo(
     () => view.concepts.find((concept) => concept.concept_id === detailConceptId) ?? null,
     [detailConceptId, view.concepts],
   );
+  // 區域只是呈現分組；讀取失敗或與地圖不一致時維持不分區的地圖。
+  const [regionsView, setRegionsView] = useState<KnowledgeRegionsView | null>(null);
+  useEffect(() => {
+    let cancelled = false;
+    setRegionsView(null);
+    void apiClient.getKnowledgeRegions({ materialId: view.material_id, structureRevision: view.knowledge_structure_revision })
+      .then((value) => { if (!cancelled) setRegionsView(value); }, () => undefined);
+    return () => { cancelled = true; };
+  }, [apiClient, view.material_id, view.knowledge_structure_revision]);
+  const regions = useMemo(() => mapRegions(view, regionsView), [view, regionsView]);
+  const regionLabel = (id: string) =>
+    regions && regions.regions.length > 1 ? regions.regions[regions.byConcept.get(id)!].label : null;
 
   if (view.concepts.length === 0)
     return (
@@ -1063,18 +1140,11 @@ export function KnowledgeMapWorkspace({
   };
   const busyStudyLabel = isLoadingProgress ? "讀取學習進度…" : isStartingStudy ? "正在開始…" : null;
   const focusStudyConceptId = selectedConceptId;
-  const canResume = learningStateStatus === "active" || learningStateStatus === "no_safe";
-  const selectedIsCurrentSessionConcept =
-    canResume && progress?.current_concept_id === focusStudyConceptId;
   const focusStudyButtonLabel =
     busyStudyLabel ??
-    (learningStateStatus === "completed"
-      ? "查看學習成果"
-      : selectedIsCurrentSessionConcept
-        ? "繼續學習"
-        : canResume
-          ? "從這個概念繼續"
-          : "開始學習");
+    (progress?.concept_states.find(state => state.concept_id === focusStudyConceptId)?.status === "completed"
+      ? "再次練習"
+      : "檢測這個概念");
   const focusStudyAction = (
     <section className="concept-study-action" aria-label="學習入口">
       <button
@@ -1108,26 +1178,26 @@ export function KnowledgeMapWorkspace({
             concept={selectedConcept}
             studyAction={focusStudyAction}
             progress={progress}
+            isLoadingProgress={isLoadingProgress}
+            progressMessage={progressMessage}
+            region={regionLabel(selectedConcept.concept_id)}
+            difficulty={difficulty.data}
           />
         )}
       </>
     ) : null;
-  return (
-    <section
-      className={`map-workspace${mode === "focus" ? " is-focus-mode" : ""}${selectedConcept || selectedRelation ? " has-detail" : ""}`}
-    >
-      <header className="map-header">
-        <div>
-          <div className="map-title-row">
-            <h1>知識地圖</h1>
-          </div>
-        </div>
+  const mapToolbar = (
+    <>
         <form
-          className="map-search"
+          className={`map-search map-corner-search ${searchOpen ? "is-expanded" : ""}`}
           onKeyDown={(event) => {
             if (event.key === "Escape") {
+              // 只清空搜尋；不讓外層的學習導覽把焦點移走。
+              event.stopPropagation();
               setSearchQuery("");
-              searchInput.current?.focus();
+              setSearchOpen(false);
+              if (window.matchMedia("(max-width:720px)").matches) event.currentTarget.querySelector<HTMLButtonElement>(".map-search-toggle")?.focus();
+              else searchInput.current?.focus();
             }
           }}
           onBlur={(event) => {
@@ -1140,11 +1210,13 @@ export function KnowledgeMapWorkspace({
             if (searchResults[0]) chooseSearchResult(searchResults[0].concept_id);
           }}
         >
+          <button type="button" className="secondary-button map-search-toggle" aria-label="開啟概念搜尋" aria-expanded={searchOpen} onClick={() => { setSearchOpen(value => !value); requestAnimationFrame(() => searchInput.current?.focus()); }}><Icon name="search" size={18} /></button>
           <input
             ref={searchInput}
             type="search"
             aria-label="搜尋概念或關鍵字"
             placeholder="搜尋概念或關鍵字…"
+            maxLength={200}
             value={searchQuery}
             onChange={(event) => setSearchQuery(event.currentTarget.value)}
             onKeyDown={(event) => {
@@ -1158,7 +1230,7 @@ export function KnowledgeMapWorkspace({
           {query && (
             <div ref={searchResultsElement} className="map-search-results">
               <p role="status">
-                {searchResults.length
+                {searchState.query !== query ? "正在搜尋教材內容…" : searchState.error ? searchState.error : searchResults.length
                   ? `找到 ${searchResults.length} 個概念${searchResults.length > 8 ? "，顯示前 8 個，請輸入更多關鍵字縮小範圍" : ""}`
                   : "找不到符合的概念，試試其他關鍵字。"}
               </p>
@@ -1169,29 +1241,19 @@ export function KnowledgeMapWorkspace({
                   onClick={() => chooseSearchResult(concept.concept_id)}
                 >
                   <strong>{concept.label}</strong>
-                  <small>{concept.claims[0]?.text}</small>
+                  <small>{concept.claim_count} 個重點</small>
                 </button>
               ))}
             </div>
           )}
         </form>
-        <div className="map-header-actions">
-          <button className="secondary-button" type="button" onClick={onAddSources}>
-            新增教材
-          </button>
-          <div className="map-facts" aria-label="地圖摘要">
-            <span>
-              <strong>{view.concepts.length}</strong>概念
-            </span>
-            <span>
-              <strong>{view.document_tree.sections.length}</strong>段落
-            </span>
-            <span>
-              <strong>{view.relations.length}</strong>關係
-            </span>
-          </div>
-        </div>
-      </header>
+    </>
+  );
+  return (
+    <section
+      className={`map-workspace${mode === "focus" ? " is-focus-mode" : ""}${selectedConcept || selectedRelation ? " has-detail" : ""}`}
+    >
+      <MaterialContentNav apiClient={apiClient} materialId={mapRoute.materialId} mapRoute={mapRoute} materialName={materialName} current={mode === "review" ? "review" : "knowledge-map"} assessmentDisabled={isStartingStudy || isLoadingProgress} onMapModeChange={selectMode} onMapTabRef={(id, element) => { if (element) tabs.current.set(id, element); else tabs.current.delete(id); }}/>
       {progressMessage && (
         <div className="partial-banner" role="status">
           <span>{progressMessage}</span>
@@ -1205,39 +1267,6 @@ export function KnowledgeMapWorkspace({
           {startMessage}
         </p>
       )}
-      <div className="map-tabs" role="tablist" aria-label="知識地圖檢視">
-        {modes.map((item) => (
-          <button
-            ref={(element) => {
-              if (element) tabs.current.set(item.id, element);
-              else tabs.current.delete(item.id);
-            }}
-            aria-selected={mode === item.id}
-            aria-controls={`map-panel-${item.id}`}
-            className={mode === item.id ? "is-active" : undefined}
-            id={`map-tab-${item.id}`}
-            key={item.id}
-            role="tab"
-            tabIndex={mode === item.id ? 0 : -1}
-            type="button"
-            onClick={() => selectMode(item.id)}
-            onKeyDown={(event) => {
-              const currentIndex = modes.findIndex((entry) => entry.id === item.id);
-              let nextIndex = currentIndex;
-              if (event.key === "ArrowRight") nextIndex = (currentIndex + 1) % modes.length;
-              else if (event.key === "ArrowLeft")
-                nextIndex = (currentIndex - 1 + modes.length) % modes.length;
-              else if (event.key === "Home") nextIndex = 0;
-              else if (event.key === "End") nextIndex = modes.length - 1;
-              else return;
-              event.preventDefault();
-              selectMode(modes[nextIndex].id);
-            }}
-          >
-            {item.label}
-          </button>
-        ))}
-      </div>
       {view.excluded_pages.length > 0 && (
         <p className="form-error" role="status">
           第 {view.excluded_pages.map((item) => item.page).join("、")}{" "}
@@ -1255,6 +1284,7 @@ export function KnowledgeMapWorkspace({
           {mode === "focus" && (
             <ReactFlowProvider>
               <MapGraph
+                apiClient={apiClient}
                 selectedRelationId={relationId}
                 progress={progress}
                 openRelation={openRelation}
@@ -1262,34 +1292,14 @@ export function KnowledgeMapWorkspace({
                 selectedConceptId={selectedConceptId}
                 detail={detail}
                 view={view}
+                regions={regions}
+                toolbar={mapToolbar}
+                difficulty={difficulty.data}
               />
             </ReactFlowProvider>
           )}
-          {mode === "review" &&
-            (progressMessage ? (
-              <div className="review-empty">
-                <div>
-                  <h2>暫時無法顯示複習重點</h2>
-                  <p>重新讀取進度後，即可查看最近一次學習的複習方向。</p>
-                  <button className="primary-button" type="button" onClick={onReloadProgress}>
-                    重新讀取進度
-                  </button>
-                </div>
-              </div>
-            ) : (
-              <ReviewView
-                loading={isLoadingProgress}
-                view={view}
-                progress={progress}
-                startStudy={onStartStudy}
-                busyLabel={busyStudyLabel}
-                studyLabel={learningStateStatus === "completed" ? "查看學習成果" : "繼續這個概念"}
-                selectedId={reviewConceptId}
-                onSelect={setReviewConceptId}
-                showNavigator={() => selectMode("focus")}
-                apiClient={apiClient}
-              />
-            ))}
+          {mode === "review" && <ReviewView apiClient={apiClient} materialId={mapRoute.materialId} view={view} progress={progress} difficulty={difficulty}
+            isLoadingProgress={isLoadingProgress} progressMessage={progressMessage} onReloadProgress={onReloadProgress} isStartingStudy={isStartingStudy} onStartStudy={onStartStudy} />}
         </div>
       </div>
     </section>

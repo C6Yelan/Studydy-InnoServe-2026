@@ -10,13 +10,15 @@ import pymupdf
 import pytest
 
 from knowledge_map.structure import SemanticState, apply_semantic_response, build_document_context
+from learning_adaptation import assessment_state
 from learning_adaptation import assessment_sets as sets
 from learning_adaptation.study_sessions import create_study_session
-from pdf_evidence.ocr_page_evidence import canonical_sha256
+from content_identity import canonical_sha256
 from product_fixtures import closed_loop, library_materials, publish_fixture_structure, seed_pdf, seed_run
 from runtime.material_processing import _record_progress, claim_next_material_processing_run
 from runtime.semantic_service import SemanticServiceError
-from runtime.storage.tables import Assessment, database_session
+from runtime.storage.tables import Assessment
+from runtime.storage.database import database_session
 from structure_fixtures import build_knowledge_structure
 
 
@@ -27,7 +29,7 @@ def concept_fixture(closed_loop, count=3, *, facts=None, label="Signals", eviden
     count = len(points)
     evidence_texts = [*points, "Other topic uses EXTERNAL."]
     with pymupdf.open() as pdf:
-        page = pdf.new_page()
+        page = pdf.new_page(height=max(842, 100 + len(evidence_texts) * 22))
         for index, value in enumerate(evidence_texts):
             page.insert_text((72, 72 + index * 22), value)
         regions = [list(page.search_for(value)[0]) for value in evidence_texts]
@@ -180,7 +182,7 @@ def create(fixture, key="round"):
 
 
 def read(fixture, identity):
-    return sets.read_set(
+    return assessment_state.read_set(
         fixture["learner"], fixture["study"].study_session_id, identity, dsn=fixture["dsn"],
     )
 

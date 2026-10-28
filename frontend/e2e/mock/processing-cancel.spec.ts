@@ -6,6 +6,7 @@ import type {
 } from "../../src/api/contracts";
 
 import { run as publishedRun } from "../fixtures/knowledge-map";
+import { emptyCelebrationClaim, emptyLearningActivity } from "../fixtures/learning-activity";
 
 const materialId = "11111111-1111-4111-8111-111111111111";
 const runId = "22222222-2222-4222-8222-222222222222";
@@ -15,6 +16,8 @@ const runPath = `/materials/${materialId}/runs/${runId}`;
 const currentTime = new Date("2026-09-12T12:00:00Z");
 const runningRun: MaterialProcessingRunView = {
   schema: "material-processing-run/v1",
+  auto_retry_count: 0,
+  auto_retry_reason: null,
   run_id: runId,
   material_id: materialId,
   source_artifact_id: artifactId,
@@ -54,13 +57,36 @@ test.beforeEach(async ({ page }) => {
   await page.route(/\/v[12]\//, (route) => {
     const request = route.request();
     const path = new URL(request.url()).pathname;
+    if (path === "/v1/learning-activity/celebrations/claim") {
+      expect(route.request().method()).toBe("POST");
+      return route.fulfill({ json: emptyCelebrationClaim });
+    }
     expect(request.method()).toBe(path === "/v1/session/refresh" ? "POST" : "GET");
     switch (path) {
+      case "/v1/topics":
+        return route.fulfill({ json: { topics: [] } });
       case "/v1/session":
       case "/v1/session/refresh":
         return route.fulfill({ json: { schema: "learner-identity/v1", learner_id: learnerId } });
+      case `/v1/materials/${materialId}`:
+        return route.fulfill({json:{schema:'material-library-item/v1',material_id:materialId,source_artifact_id:artifactId,display_name:'合成測試教材',size_bytes:1000,created_at:runningRun.created_at,latest_attempt:runningRun,available_structures:[],study_sessions:[]}});
       case "/v1/materials":
         return route.fulfill({ json: { schema: "material-library/v1", materials: [] } });
+      // 處理頁依教材來源決定步驟列；這份是上傳的教材。
+      case `/v1/materials/${materialId}/sources`:
+        return route.fulfill({ json: { schema: "material-sources/v1", material_id: materialId, sources: [{
+        origin: "upload", source_id: "55555555-5555-4555-8555-555555555555", normalization_id: "55555555-5555-4555-8555-555555555555", original_artifact_id: artifactId,
+        original_name: "講義.pdf", media_type: "application/pdf", status: "ready",
+        normalized_artifact_id: artifactId, page_count: 8, error_code: null,
+      }] } });
+      // 頁首帳號設定讀取名稱；這些案例不涉及名稱。
+      case "/v1/profile":
+        return route.fulfill({ json: { schema: "learner-profile/v1", display_name: null } });
+      // 頁首學習進度；這些案例不涉及學習紀錄。
+      case "/v1/learning-activity":
+        return route.fulfill({ json: emptyLearningActivity });
+      case "/v1/account/storage":
+        return route.fulfill({ json: { schema: "account-storage/v2", used_bytes: 0, reserved_bytes: 0, limit_bytes: 5368709120, remaining_bytes: 5368709120, breakdown: { material_files_bytes: 0, podcast_audio_bytes: 0, podcast_video_bytes: 0, analysis_bytes: 0, reserved_bytes: 0 }, largest_materials: [] } });
       default:
         throw new Error(`Unexpected cancellation request: ${request.method()} ${path}`);
     }
@@ -87,6 +113,7 @@ async function mockDiscard(page: Page, respond: (route: Route, attempt: number) 
   let deletes = 0;
   await page.route(`**/v1/materials/${materialId}`, (route) => {
     const request = route.request();
+    if(request.method()==="GET")return route.fallback();
     expect(request.method()).toBe("DELETE");
     return respond(route, ++deletes);
   });
@@ -255,10 +282,11 @@ test("semantics DELETE 503 keeps processing and polling; confirmation can retry"
   expect(deletes()).toBe(2);
 });
 
-test("an ordinary GET 404 remains a read failure without accepted discard", async ({ page }) => {
+test("an ordinary GET 404 shows the not-found page without accepted discard", async ({ page }) => {
   await mockRun(page, () => null);
   await page.goto(runPath);
-  await expect(page.getByRole("heading", { name: "無法讀取處理狀態", exact: true })).toBeVisible();
+  // 不存在的處理紀錄顯示「找不到」頁並保留原網址，不當成刪除完成而導回我的教材。
+  await expect(page.getByRole("heading", { name: "找不到這次處理", exact: true })).toBeVisible();
   await expect(page).toHaveURL(new RegExp(`/runs/${runId}$`));
 });
 

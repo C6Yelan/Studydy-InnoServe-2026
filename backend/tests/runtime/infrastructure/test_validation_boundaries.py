@@ -8,11 +8,13 @@ import pytest
 
 from learning_adaptation import assessment_sets as sets, assessments
 from learning_adaptation.learner_progress import derive_learner_progress
-from pdf_evidence.ocr_page_evidence import canonical_sha256
+from content_identity import canonical_sha256
 from runtime import material_processing
-from runtime.storage import artifacts, source_artifacts
-from runtime.storage.knowledge_structures import read_knowledge_structure, KnowledgeStructureStoreError, resolve_evidence_source
-from runtime.storage.tables import Assessment, AssessmentSet, MaterialProcessingRun, database_session
+from runtime.storage import artifacts
+from runtime.storage.knowledge_structures import read_knowledge_structure, KnowledgeStructureStoreError
+from runtime.storage.knowledge_reads import resolve_evidence_source
+from runtime.storage.tables import Assessment, AssessmentSet, MaterialProcessingRun
+from runtime.storage.database import database_session
 from product_fixtures import closed_loop
 from assessment_fixtures import concept_fixture, create, read, model_for, finish, answer
 
@@ -77,8 +79,7 @@ def test_map_progress_and_set_reads_do_not_hash_source_files(closed_loop, monkey
     root = create(f); finish(f); answer(f, root)
     def unexpected(*_args, **_kwargs):
         pytest.fail('metadata read opened a source file')
-    for module in (artifacts, source_artifacts):
-        monkeypatch.setattr(module, '_verify_file', unexpected)
+    monkeypatch.setattr(artifacts, '_verify_file', unexpected)
     read_knowledge_structure(f['learner'].learner_id, f['source'].material_id,
                              revision=f['document']['revision'], dsn=f['dsn'])
     assert read(f, root)['answered_count'] == 2
@@ -88,16 +89,37 @@ def test_map_progress_and_set_reads_do_not_hash_source_files(closed_loop, monkey
 def test_evidence_locator_hashes_only_the_mapping_it_uses(closed_loop, monkeypatch):
     learner, source, _, document, dsn, _ = closed_loop
     checked = []
-    original = source_artifacts._verify_file
+    original = artifacts._verify_file
     def count(path, digest, size):
         checked.append(path.name)
         return original(path, digest, size)
-    monkeypatch.setattr(source_artifacts, '_verify_file', count)
+    monkeypatch.setattr(artifacts, '_verify_file', count)
     resolved = resolve_evidence_source(learner.learner_id, source.material_id,
                                        document['revision'], document['evidence'][0]['evidence_id'], dsn=dsn)
     assert resolved['normalized_page'] == 1
     mapping = document['input_binding']['manifest']['items'][0]['mapping_artifact_id']
     assert checked == [UUID(mapping).hex]
+
+
+@pytest.mark.parametrize('role', ['original', 'normalized', 'mapping'])
+def test_artifact_verification_reuses_publication_transaction_and_keeps_pdf_boundary(closed_loop, monkeypatch, role):
+    from runtime.source_resolver import verify_source_files
+    from runtime.storage.database import database_session
+
+    learner, _, _, document, dsn, _ = closed_loop
+    binding = document['input_binding']
+    identity = UUID(binding['manifest']['items'][0][role + '_artifact_id'])
+    with database_session(dsn) as db:
+        monkeypatch.setattr(artifacts, 'database_session', lambda *_:
+                            pytest.fail('Publication must not open a nested artifact session'))
+        verify_source_files(db, learner.learner_id, binding)
+        if role == 'normalized':
+            with artifacts.open_verified_artifact(learner.learner_id, identity, session=db, kind='normalized_pdf') as opened:
+                assert opened.file.read(5) == b'%PDF-'
+        else:
+            with pytest.raises(artifacts.ArtifactError, match='^ARTIFACT_NOT_AVAILABLE$'):
+                with artifacts.open_verified_artifact(learner.learner_id, identity, session=db, kind='normalized_pdf'):
+                    pytest.fail('The PDF preview must not expose original or mapping artifacts')
 
 
 @pytest.mark.parametrize('role', ['original', 'normalized', 'mapping'])
@@ -112,7 +134,7 @@ def test_file_tampering_fails_when_used_and_at_publication(closed_loop, role):
     assert read_knowledge_structure(learner.learner_id, source.material_id,
                                     revision=document['revision'], dsn=dsn).document == document
     with pytest.raises(artifacts.ArtifactError):
-        with source_artifacts.open_verified_artifact(learner.learner_id, identity, dsn=dsn):
+        with artifacts.open_verified_artifact(learner.learner_id, identity, dsn=dsn):
             pytest.fail('corrupt bytes were exposed')
     # 真正的發布入口也必須拒絕，而不是只測底層 hash helper。
     from product_fixtures import seed_run, publish_fixture_structure

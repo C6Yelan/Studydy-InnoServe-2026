@@ -28,7 +28,7 @@ async function openFocusRelation(page: Page) {
   return edge;
 }
 
-test("map opens concept details and source-backed learning on demand", async ({ page }) => {
+test("map opens concept details and preserves each source on demand", async ({ page }) => {
   await mockKnowledgeMapApi(page);
   await page.route("**/v1/study-sessions", (route) => {
     expect(route.request().postDataJSON()).toEqual({
@@ -73,8 +73,7 @@ test("map opens concept details and source-backed learning on demand", async ({ 
   );
   await page.keyboard.press("Escape");
   await openMapConcept(page, "Stack");
-  await page.getByRole("button", { name: "開始學習", exact: true }).click();
-  await expect(page).toHaveURL(new RegExp(`/study-sessions/${sessionId}$`));
+  await expect(page.getByRole("button", { name: "檢測這個概念", exact: true })).toBeEnabled();
 });
 
 test("mobile map has a modal detail drawer with keyboard focus and source links", async ({
@@ -83,7 +82,7 @@ test("mobile map has a modal detail drawer with keyboard focus and source links"
   await page.setViewportSize({ width: 390, height: 844 });
   await mockKnowledgeMapApi(page);
   await page.goto(mapPath);
-  await page.getByRole("tab", { name: "概念地圖" }).click();
+  await page.getByRole("tab", { name: "知識地圖" }).click();
   await openMapConcept(page);
   const dialog = page.getByRole("dialog", { name: "概念詳情" });
   await expect(dialog).toBeInViewport();
@@ -112,7 +111,7 @@ test("map errors can be retried and an empty map has an actionable explanation",
   empty.document_tree.sections = [];
   await mockKnowledgeMapApi(page, empty);
   await page.route(
-    `**${apiMapPath}`,
+    `**${apiMapPath}/outline`,
     (route) =>
       json(
         route,
@@ -186,7 +185,6 @@ test("parallel relations retain separate labels, paths and details in both direc
       .toBe(true);
   };
   await assertSeparate();
-  await expect(page.locator(".focus-context-content .relation-list")).toHaveCount(0);
   const relationDialog = page.getByRole("dialog", { name: "關係詳情", exact: true });
   for (const relation of view.relations) {
     await page.locator(`.concept-flow-edge.is-${relation.type} .react-flow__edge-textbg`).click();
@@ -263,7 +261,10 @@ for (const viewport of [
       view.relations[0].evidence_refs = evidence.map((item) => item.evidence_id);
       await mockKnowledgeMapApi(page, view);
       await page.goto(mapPath);
-      const search = page.getByRole("searchbox", { name: "搜尋概念或關鍵字" });
+      await expect(page.getByRole("search", { name: "搜尋教材概念" })).toBeVisible();
+    const searchToggle = page.getByRole("button", { name: "開啟概念搜尋" });
+    if (await searchToggle.isVisible()) await searchToggle.click();
+    const search = page.getByRole("searchbox", { name: "搜尋概念或關鍵字" });
       await search.fill("Host");
       await expect(page.locator(".map-search-results strong")).toHaveText(["主機"]);
       await search.press("Enter");
@@ -271,7 +272,7 @@ for (const viewport of [
       await expect(detail.getByRole("heading", { name: "主機", exact: true })).toBeVisible();
       await expect(detail.getByRole("heading", { name: "教材來源", exact: true })).toBeVisible();
       await expect(detail.getByRole("region", { name: /^教材重點 / })).toHaveCount(2);
-      await expect(detail.getByRole("button", { name: "開始學習", exact: true })).toBeEnabled();
+      await expect(detail.getByRole("button", { name: "檢測這個概念", exact: true })).toBeEnabled();
       await expect(detail).not.toContainText(
         /對照教材原文|教材中的其他名稱|延伸探索|Extraction text|Host|sha256/,
       );
@@ -285,12 +286,12 @@ for (const viewport of [
       for (const [index, representative] of representatives.entries()) {
         const resolution = page.waitForRequest((request) => {
           const path = new URL(request.url()).pathname;
-          return path.startsWith(`${apiMapPath}/evidence/`) && path.endsWith("/source");
+          return path.startsWith(`${decodeURIComponent(apiMapPath)}/evidence/`) && path.endsWith("/source");
         });
         await links.nth(index).click();
         const source = page.getByRole("dialog", { name: "教材來源", exact: true });
         expect(new URL((await resolution).url()).pathname).toBe(
-          `${apiMapPath}/evidence/${encodeURIComponent(representative.evidence_id)}/source`,
+          `${decodeURIComponent(apiMapPath)}/evidence/${encodeURIComponent(representative.evidence_id)}/source`,
         );
         await expect(
           source.getByRole("heading", {
@@ -338,7 +339,7 @@ for (const width of [1536, 390])
     const evidenceId = view.concepts[0].claims[0].evidence[0].evidence_id;
     let reads = 0;
     await page.route(
-      `**${apiMapPath}/evidence/${encodeURIComponent(evidenceId)}/source`,
+      `**${decodeURIComponent(apiMapPath)}/evidence/${encodeURIComponent(evidenceId)}/source`,
       (route) => {
         expect(route.request().method()).toBe("GET");
         reads++;
@@ -380,3 +381,18 @@ for (const width of [1536, 390])
     await expect(page.getByRole("button", { name: "查看第 1 頁來源", exact: true })).toBeFocused();
     expect(reads).toBe(1);
   });
+
+
+test("concept detail shows the transcript reminder only for its explicit uncertainty flag",async({page},testInfo)=>{
+ const view=structureView();Object.assign(view.concepts[0],{uncertain:true});Object.assign(view.concepts[1],{uncertain:false});
+ await mockKnowledgeMapApi(page,view);await page.goto(mapPath);await openMapConcept(page,'Stack');
+ const panel=page.getByRole('dialog',{name:'概念詳情',exact:true});
+ await expect(panel.getByText('影片逐字稿可能有聽錯的詞，建議對照原影片',{exact:true})).toBeVisible();
+ for(const [width,height] of [[1440,900],[1024,768],[390,844]]){
+  await page.setViewportSize({width,height});expect(await page.evaluate(()=>document.documentElement.scrollWidth<=innerWidth)).toBe(true);
+  await page.screenshot({path:testInfo.outputPath(`concept-uncertain-${width}.png`),animations:'disabled'});
+ }
+ await page.keyboard.press('Escape');await page.setViewportSize({width:1440,height:900});await openMapConcept(page,'Array');
+ await expect(panel.getByText('影片逐字稿可能有聽錯的詞，建議對照原影片',{exact:true})).toHaveCount(0);
+ await expect(panel.getByRole('heading',{name:'Array',exact:true})).toBeVisible();
+});

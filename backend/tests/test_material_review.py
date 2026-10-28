@@ -8,6 +8,26 @@ from knowledge_map.material_review import (
 from structure_fixtures import build_knowledge_structure
 
 
+def wire_proposal(value):
+    """模型以固定概念欄位回覆；儲存及整理仍使用已驗證的 canonical proposal。"""
+    result = deepcopy(value)
+    if isinstance(result, dict) and isinstance(result.get('assignments'), list):
+        rows = result['assignments']
+        assert len({row['concept'] for row in rows}) == len(rows)
+        result['assignments'] = {
+            str(row['concept']): {
+                'concept_source': row['evidence'][0],
+                'decision': {**{key: value for key, value in row.items() if key != 'concept'},
+                             'evidence': row['evidence'][1:]},
+            }
+            for row in rows
+        }
+        for edit in result.get('alias_edits', []):
+            refs = edit['evidence']
+            edit['concept_source'], edit['evidence'] = refs[0], refs[1:]
+    return result
+
+
 def view():
     labels = ["角色分類", "角色甲", "角色乙", "授課教師", "效率"]
     texts = [
@@ -111,13 +131,14 @@ def test_complete_unit_grouping_preserves_individual_points_sources_and_original
     group = result["learning_units"][0]
     assert group["member_concept_ids"] == ["c0", "c1", "c2"]
     assert group["claim_ids"] == ["q0", "q1", "q2"]
-    assert len(result["internalized_relations"]) == 2
+    assert result["internalized_relations"] == []
+    assert [(r['source_concept_id'], r['target_concept_id']) for r in result['relations']] == [('c1', 'c0'), ('c2', 'c0')]
     assert result["preserved_claim_ids"] == [f"q{index}" for index in range(5)]
     assert result["preserved_evidence_ids"] == [f"e{index}" for index in range(5)]
     assert result["publication_authorized"] is False
 
 
-def test_applied_groups_are_valid_canonical_claims_with_new_ids_and_unchanged_evidence():
+def test_applied_groups_preserve_canonical_owners_and_literal_guard():
     from test_knowledge_structure_v1 import _block, _page
     from knowledge_map.structure import (SemanticState, build_document_context, apply_semantic_response,
                                          validate_knowledge_structure)
@@ -145,11 +166,73 @@ def test_applied_groups_are_valid_canonical_claims_with_new_ids_and_unchanged_ev
                     'evidence': [0], 'reason': '嘗試補正，但未保留原引用的英文名稱。'}], 'relation_edits': []}
     applied, audit = apply_review(doc, view, unit, response)
     assert doc == before and applied['evidence'] == doc['evidence']
-    assert validate_knowledge_structure(applied) and len(applied['concepts']) == 1
-    assert len(applied['concepts'][0]['claims']) == 3
+    assert validate_knowledge_structure(applied) and applied['concepts'] == doc['concepts']
+    assert len(audit['learning_units']) == 1
     assert applied['revision'] != doc['revision']
     assert set(audit['claim_mapping']) == {q['claim_id'] for c in doc['concepts'] for q in c['claims']}
-    assert any(e['reason'] == 'CANONICAL_LITERAL_GUARD' for e in audit['blocked_changes'])
+    assert any(e['reason'] == 'CLAIM_CORRECTION_NOT_SUPPORTED' for e in audit['blocked_changes'])
+
+
+def test_review_context_keeps_the_whole_page_of_a_cross_page_citation():
+    from test_knowledge_structure_v1 import _block, _page
+    from knowledge_map.structure import SemanticState, build_document_context, apply_semantic_response
+    from runtime.material_review import review_inputs
+    context = build_document_context([
+        _page(1, [_block(1, 0, 'paragraph', '停止條件由下一頁定義。')]),
+        _page(2, [_block(2, 0, 'paragraph', '資源不足時停止。'),
+                  _block(2, 1, 'paragraph', '停止前須先保存已驗證結果。')]),
+    ], page_count=2)
+    state = SemanticState()
+    apply_semantic_response({'concepts': [{'k': 'a', 'l': '停止條件', 'a': [], 'c': [{'m': None, 's': [0, 1]}]}], 'relations': []},
+        context=context, bundle={'evidence': context['evidence'], 'sections': context['sections']}, state=state)
+    doc = build_knowledge_structure(context, state, source_sha256='1' * 64,
+        run_id='00000000-0000-4000-8000-000000000001', produced_at='2026-10-17T00:00:00+00:00',
+        runtime_lock_sha256='2' * 64, model_id='synthetic', model_revision='synthetic', semantic_calls=1, ocr_calls=0)
+    _, units = review_inputs(doc)
+    assert len(units) == 1
+    assert {e['evidence_id'] for e in units[0].evidence} == {e['evidence_id'] for e in doc['evidence']}
+
+
+def test_local_translation_issue_preserves_original_without_blocking_other_review_edits(tmp_path, monkeypatch):
+    from test_knowledge_structure_v1 import _block, _page
+    from test_review_parallel_feasibility import Archive
+    from knowledge_map.structure import SemanticState, build_document_context, apply_semantic_response, validate_knowledge_structure
+    from runtime.material_review import review_structure
+    context = build_document_context([_page(1, [
+        _block(1, 0, 'paragraph', 'The system may stop or handoff.'),
+        _block(1, 1, 'paragraph', 'The limit is 5.'),
+    ])], page_count=1)
+    state = SemanticState()
+    meanings = ['系統可以停止或交接。', '限制為5。']
+    apply_semantic_response({'concepts': [
+        {'k': str(i), 'l': label, 'a': [], 'c': [{'m': meanings[i], 's': [i]}]}
+        for i, label in enumerate(['停止與交接', '資源限制'])
+    ], 'relations': []}, context=context, bundle={'evidence': context['evidence'], 'sections': context['sections']}, state=state)
+    doc = build_knowledge_structure(context, state, source_sha256='1' * 64,
+        run_id='00000000-0000-4000-8000-000000000001', produced_at='2026-10-17T00:00:00+00:00',
+        runtime_lock_sha256='2' * 64, model_id='synthetic', model_revision='synthetic', semantic_calls=1, ocr_calls=0)
+    calls = []
+    def model(client, **kwargs):
+        request = kwargs['request']; calls.append(request)
+        return wire_proposal({'assignments': [
+            {'concept': c['h'], 'action': 'keep', 'target': None, 'issue': 'none', 'reason': '來源支持。', 'evidence': c['evidence']}
+            for c in request['concepts']], 'alias_edits': [], 'relation_edits': [],
+            'claim_edits': [
+                {'claim': 0, 'meaning': '系統可 stop or handoff。', 'evidence': [0], 'reason': '整理說明。'},
+                {'claim': 1, 'meaning': '上限為5。', 'evidence': [1], 'reason': '整理說明。'},
+            ]})
+    monkeypatch.setattr('runtime.material_review.request_semantics', model)
+    archive = Archive(tmp_path / 'archive'); archive.review_reuses = []
+    lock = {'material_review': {'prompt': 'synthetic'},
+            'material_semantics': {'localization_policy': 'traditional-chinese-literals/v1'},
+            'semantic_service': {'api_protocol': 'openai-chat-completions/v1'}}
+    result = review_structure(doc, lock, archive, lambda: None, lambda *args: None)
+    assert len(calls) == 1
+    assert validate_knowledge_structure(result)
+    assert [q['text'] for c in result['concepts'] for q in c['claims']] == [meanings[0], '上限為5。']
+    assert result['evidence'] == doc['evidence']
+    assert result['status']['quality'] == 'needs_review'
+    assert 'LOCALIZATION_RETAINED_ORIGINAL' in (archive.root / 'result.json').read_text()
 
 
 def test_examples_remain_attached_and_metadata_does_not_remove_source_content():
@@ -261,6 +344,23 @@ def test_claim_correction_cannot_change_source_number():
     assert len(project_review(view(), prepare(), response)["claim_changes"]) == 1
 
 
+def test_claim_edit_checks_retained_sources_without_claiming_model_selected_them():
+    document = view()
+    claim = document['concepts'][4]['claims'][0]
+    formula = deepcopy(claim['evidence'][0])
+    formula.update(evidence_id='e5', quote='函式 f(x) 是範例。', block_order=5)
+    claim['evidence'].append(formula)
+    claim['text'] += ' 函式 f(x) 是範例。'
+    value = proposal()
+    value['claim_edits'] = [{'claim': 4, 'meaning': '效率 Efficiency 使用8個資源單位，並保留函式 f(x)。',
+                           'reason': '整理敘述。', 'evidence': [4]}]
+    projected = project_review(document, prepare(document), value)
+    assert len(projected['claim_changes']) == 1
+    assert projected['claim_changes'][0]['evidence_ids'] == ['e4']
+    value['claim_edits'][0]['meaning'] = '效率 Efficiency 使用9個資源單位，並保留函式 f(x)。'
+    assert project_review(document, prepare(document), value)['claim_changes'] == []
+
+
 def test_claim_correction_cannot_introduce_an_uncited_other_concept():
     response = proposal()
     response["claim_edits"] = [{
@@ -289,7 +389,7 @@ def test_claim_can_name_its_existing_owner_without_repeating_the_heading_citatio
 @pytest.mark.parametrize("source,meaning,kind,allowed", [
     ("管理循環(PDCA) 包含 Plan Do Check Action", "管理循環（PDCA）包含 Plan、Do、Check、Action。", "paragraph", True),
     ("呼叫 f(x)", "改為 f(y)", "paragraph", False),
-    ("f(x)", "呼叫 f(x)", "code", False),
+    ("f(x)", "呼叫 f(x)", "code", True),
     ("公式(x)", "公式改為x", "paragraph", False),
     ("效率(Efficiency)", "效率（Effectiveness）", "paragraph", False),
 ])
@@ -330,6 +430,60 @@ def test_relation_reverse_and_prerequisite_integrity():
     assert result["relations"][0]["target_concept_id"] == "c0"
     assert result["blocked_changes"][0]["reason"] == "PREREQUISITE_ENDPOINT_KEPT"
     assert any(unit["concept_id"] == "c1" for unit in result["learning_units"])
+
+
+@pytest.mark.parametrize('action', ['reverse', 'retype', 'blocked', 'unchanged', 'unrelated'])
+def test_applied_relation_keeps_original_and_new_review_evidence(action):
+    from test_knowledge_structure_v1 import _block, _page
+    from knowledge_map.structure import SemanticState, build_document_context, apply_semantic_response, validate_knowledge_structure
+    from knowledge_map.material_review import apply_review
+    from runtime.material_review import review_inputs
+    context = build_document_context([
+        _page(page, [_block(page, 0, 'heading', title), _block(page, 1, 'paragraph', text)])
+        for page, title, text in [(1, '組成', '元件屬於系統的一部分。'), (2, '用途', '系統使用元件完成資料處理。'), (3, '其他', '天氣觀測記錄溫度。')]
+    ], page_count=3)
+    state = SemanticState()
+    original_type = 'prerequisite' if action == 'blocked' else 'part_of'
+    apply_semantic_response({'concepts': [
+        {'k': key, 'l': label, 'a': [], 'c': [{'m': None, 's': [handle]}]}
+        for key, label, handle in [('a', '元件', 1), ('b', '系統', 3), ('c', '天氣', 5)]
+    ], 'relations': [{'s': 'a', 't': 'b', 'k': original_type, 'r': '元件支持系統的運作。', 'e': [1], 'c': 0.8}]},
+        context=context, bundle={'evidence': context['evidence'], 'sections': context['sections']}, state=state)
+    document = build_knowledge_structure(context, state, source_sha256='1'*64,
+        run_id='00000000-0000-4000-8000-000000000001', produced_at='2026-10-19T00:00:00+00:00',
+        runtime_lock_sha256='2'*64, model_id='synthetic', model_revision='synthetic', semantic_calls=1, ocr_calls=0)
+    before = deepcopy(document)
+    view, units = review_inputs(document)
+    unit = units[0]
+    selected = next(i for i, item in enumerate(unit.evidence) if item['page'] == (3 if action == 'unrelated' else 2) and item['kind'] == 'paragraph')
+    response = {'assignments': [
+        {'concept': c['h'], 'action': 'keep', 'target': None, 'issue': 'none', 'reason': '保留來源支持的概念。', 'evidence': c['evidence']}
+        for c in unit.payload['concepts']
+    ], 'alias_edits': [], 'claim_edits': [], 'relation_edits': []}
+    if action != 'unchanged':
+        response['relation_edits'] = [{'relation': 0, 'action': 'reverse' if action in ('reverse', 'unrelated') else 'retype',
+            'relation_type': None if action in ('reverse', 'unrelated') else 'application',
+            'reason': '依第二頁的系統用途修正關係。', 'evidence': [selected]}]
+    if action == 'unrelated':
+        with pytest.raises(ReviewError, match='REVIEW_RELATION_EDIT_INVALID'):
+            apply_review(document, view, unit, response)
+        assert document == before
+        return
+    result, audit = apply_review(document, view, unit, response)
+    assert document == before and result['evidence'] == before['evidence']
+    assert validate_knowledge_structure(result)
+    relation = result['relations'][0]
+    original = document['relations'][0]
+    if action in ('reverse', 'retype'):
+        selected_evidence = unit.evidence[selected]
+        assert relation['evidence_refs'] == [*original['evidence_refs'], selected_evidence['evidence_id']]
+        assert relation['context_refs'] == [*original['context_refs'], selected_evidence['section_id']]
+        assert relation['relation_id'] != original['relation_id']
+        assert audit['relations'][0]['evidence_ids'] == [selected_evidence['evidence_id']]
+        assert relation['source_concept_id'] == original['target_concept_id'] if action == 'reverse' else relation['type'] == 'application'
+    else:
+        assert relation == original
+        assert audit['relations'][0]['evidence_ids'] == []
 
 
 def test_removing_wrong_parent_can_use_same_page_heading_context_but_not_unrelated_page():
@@ -401,3 +555,113 @@ def test_combining_disjoint_units_remaps_handles_and_rejects_overlapping_opinion
     assert result["learning_units"][-1]["aliases"] == ["Efficiency"]
     with pytest.raises(ReviewError, match="SCOPES_OVERLAP"):
         combine_reviews(document, [(first, first_response), (first, first_response)])
+
+
+@pytest.mark.parametrize('conflicting', [False, True])
+def test_cross_unit_shared_claim_edits_are_coordinated_without_overwriting_source(conflicting):
+    from test_knowledge_structure_v1 import _block, _page
+    from knowledge_map.structure import SemanticState, build_document_context, apply_semantic_response, validate_knowledge_structure
+    from knowledge_map.material_review import apply_review
+    from runtime.material_review import review_inputs
+    text = '介面甲與介面乙共用同一份資訊。'
+    context = build_document_context([_page(1, [_block(1, 0, 'paragraph', text)])], page_count=1)
+    state = SemanticState()
+    apply_semantic_response({'concepts': [
+        {'k': key, 'l': label, 'a': [], 'c': [{'m': None, 's': [0]}]}
+        for key, label in [('a', '介面甲'), ('b', '介面乙')]
+    ], 'relations': []}, context=context, bundle={'sections': context['sections'], 'evidence': context['evidence']}, state=state)
+    doc = build_knowledge_structure(context, state, source_sha256='1' * 64,
+        run_id='00000000-0000-4000-8000-000000000001', produced_at='2026-10-07T00:00:00+00:00',
+        runtime_lock_sha256='2' * 64, model_id='google/gemma-4-31B-it-qat-w4a16-ct',
+        model_revision='52f3f65bc7a02d555763bc923bd1d9094898219d', semantic_calls=1, ocr_calls=0)
+    before = deepcopy(doc)
+    source_view, original_units = review_inputs(doc)
+    evidence = original_units[0].evidence
+    reviews = []
+    for index, concept in enumerate(source_view['concepts']):
+        unit = _pack_review(source_view, [concept], evidence, f'Part {index}')
+        response = {'assignments': [{'concept': 0, 'action': 'keep', 'target': None, 'issue': 'none',
+            'evidence': [0], 'reason': '保留原概念。'}], 'alias_edits': [], 'relation_edits': [],
+            'claim_edits': [{'claim': 0, 'meaning': '介面乙另有一份資訊。' if conflicting and index else text,
+                            'evidence': [0], 'reason': f'候選說明 {index}'}]}
+        reviews.append((unit, response))
+    merged, proposal = combine_reviews(source_view, reviews)
+    assert len(proposal['claim_edits']) == (0 if conflicting else 1)
+    assert len(merged.conflicting_claim_ids) == int(conflicting)
+    applied, audit = apply_review(doc, source_view, merged, proposal)
+    assert validate_knowledge_structure(applied)
+    assert applied['evidence'] == doc['evidence'] and doc == before
+    assert {q['text'] for c in applied['concepts'] for q in c['claims']} == {text}
+    if conflicting:
+        assert applied['status']['quality'] == 'needs_review'
+        assert applied['status']['processing'] == 'partial'
+        assert any(x['reason'] == 'CONFLICTING_REVIEW_EDITS_PRESERVED_ORIGINAL' for x in audit['blocked_changes'])
+
+
+def test_proposed_prerequisite_protects_endpoints_from_simultaneous_grouping():
+    original = view()
+    before = deepcopy(original)
+    response = proposal()
+    response['assignments'][1].update(action='group', target=0, issue='fragment', evidence=[0, 1])
+    response['relation_edits'] = [{'relation': 0, 'action': 'retype', 'relation_type': 'prerequisite',
+                                  'evidence': [0, 1], 'reason': '來源要求先理解甲再理解分類。'}]
+    result = project_review(original, prepare(original), response)
+    assert original == before
+    assert any(x.get('concept_id') == 'c1' and x['reason'] == 'PREREQUISITE_ENDPOINT_KEPT'
+               for x in result['blocked_changes'])
+    relation = next(x for x in result['relations'] if x['original_relation_id'] == 'r0')
+    assert relation['type'] == 'prerequisite'
+    assert relation['source_concept_id'] != relation['target_concept_id']
+
+
+@pytest.mark.parametrize('opposed', [False, True])
+def test_retyped_relation_collision_preserves_all_support_or_rejects_direction_conflict(opposed):
+    from test_material_consolidation import document
+    from knowledge_map.material_review import apply_review
+    from knowledge_map.structure_validation import validate_knowledge_structure
+    from runtime.material_review import review_inputs
+
+    original = document(relations=[
+        {'s': '0', 't': '1', 'k': 'part_of', 'r': '第一頁的關係說明。', 'e': [0], 'c': .8},
+        {'s': '1' if opposed else '0', 't': '0' if opposed else '1',
+         'k': 'example', 'r': '第二頁的既有例子說明。', 'e': [1], 'c': .6},
+    ])
+    before = deepcopy(original)
+    source_view, units = review_inputs(original)
+    unit = units[0]
+    response = {'assignments': [
+        {'concept': c['h'], 'action': 'keep', 'target': None, 'issue': 'none',
+         'reason': '保留原概念。', 'evidence': c['evidence']}
+        for c in unit.payload['concepts']
+    ], 'alias_edits': [], 'claim_edits': [], 'relation_edits': [
+        {'relation': 0, 'action': 'retype', 'relation_type': 'example',
+         'reason': '第一頁支持此例子。', 'evidence': [0]},
+    ]}
+    if opposed:
+        with pytest.raises(ReviewError, match='REVIEW_RELATION_CONFLICT'):
+            apply_review(original, source_view, unit, response)
+        assert original == before
+        return
+    result, _ = apply_review(original, source_view, unit, response)
+    assert original == before and result['evidence'] == original['evidence']
+    assert validate_knowledge_structure(result) and len(result['relations']) == 1
+    relation = result['relations'][0]
+    assert set(relation['evidence_refs']) == {ref for row in original['relations'] for ref in row['evidence_refs']}
+    assert set(relation['context_refs']) == {ref for row in original['relations'] for ref in row['context_refs']}
+    assert relation['confidence'] == .6
+    assert relation['learner_reason'] == '第一頁支持此例子。；第二頁的既有例子說明。'
+    assert relation['relation_id'] not in {row['relation_id'] for row in original['relations']}
+
+
+
+@pytest.mark.parametrize("prefix", ["9. ", "9.1. ", "9、"])
+def test_numbered_section_topic_is_not_removed_as_layout(prefix):
+    source = view()
+    source["document_tree"]["sections"][0]["title"] = prefix + "角色分類"
+    response = proposal()
+    response["assignments"][0].update(action="metadata", issue="layout")
+    result = project_review(source, prepare(source), response)
+    assert len(result["learning_units"]) == 5
+    assert "c0" not in result["metadata_concept_ids"]
+    assert result["blocked_changes"][0]["reason"] == "PROTECTED_TOPIC_OR_PREREQUISITE"
+    assert source["document_tree"]["sections"][0]["title"] == prefix + "角色分類"

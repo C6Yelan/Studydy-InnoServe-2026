@@ -1,6 +1,7 @@
 """以真 API、DB、轉檔及 worker 驗證來源流程，語意回應使用受控 fixture。"""
 
 import httpx
+import psycopg
 from uuid import uuid4
 
 import runtime.api.app as api
@@ -11,7 +12,7 @@ from test_source_revisions import pdf, revisions
 from runtime import material_processing as processing
 from runtime.source_normalization import create_draft, upload_source, normalize_next, read_sources
 from runtime.source_revisions import create_revision
-from pdf_evidence.material_pipeline import MaterialAnalysisError
+from runtime.material_runtime import MaterialAnalysisError
 
 
 def test_failed_initial_source_can_be_replaced_in_browser(revisions, monkeypatch, tmp_path):
@@ -20,7 +21,7 @@ def test_failed_initial_source_can_be_replaced_in_browser(revisions, monkeypatch
     upload_source(learner.learner_id, material, pdf('Initial readable source.'), 'Initial.pdf',
                   'application/pdf', str(uuid4()), dsn=dsn)
     assert normalize_next(dsn=dsn)
-    source, = read_sources(learner.learner_id, material, dsn=dsn)
+    source, = read_sources(learner.learner_id, material, dsn=dsn)["sources"]
     create_revision(learner.learner_id, material, [source['normalization_id']], str(uuid4()), settings, dsn=dsn)
     with monkeypatch.context() as patch:
         def fail(*args, **kwargs):
@@ -58,6 +59,11 @@ def test_real_initial_multiple_sources_browser(revisions, monkeypatch, tmp_path)
         raise AssertionError("MODEL_NOT_ALLOWED")
 
     monkeypatch.setattr(httpx.HTTPTransport, "handle_request", reject)
+    # 發布後自動排入的重點整理另由筆記測試驗證；這裡只驗教材分析不外呼模型。
+    from runtime import knowledge_publication
+    monkeypatch.setattr(knowledge_publication, "enqueue_notes", lambda *args: None)
+    with psycopg.connect(dsn) as connection:
+        connection.execute("DELETE FROM material_notes")
     monkeypatch.setenv("STUDYDY_E2E_INITIAL_REAL", "true")
     monkeypatch.setenv("STUDYDY_E2E_INITIAL_PDF", str(source))
     before = len(requests)
