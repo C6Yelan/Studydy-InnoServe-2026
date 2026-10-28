@@ -162,6 +162,28 @@ def organize(workflow, candidates):
     workflow["stage"] = "complete"
 
 
+def _validate_response(value, schema):
+    """核對研究任務現有的結構契約；HTTP 的 structured output 仍是外部候選。"""
+    kind = schema["type"]
+    if type(value) is not {"object": dict, "array": list, "string": str, "integer": int}[kind]:
+        raise SourceError("RESEARCH_REVIEW_FAILED")
+    if "enum" in schema and value not in schema["enum"]:
+        raise SourceError("RESEARCH_REVIEW_FAILED")
+    if kind == "object":
+        if set(value) != set(schema["properties"]):
+            raise SourceError("RESEARCH_REVIEW_FAILED")
+        for key, field in schema["properties"].items():
+            _validate_response(value[key], field)
+    elif kind == "array":
+        if len(value) < schema.get("minItems", 0) or len(value) > schema.get("maxItems", len(value)):
+            raise SourceError("RESEARCH_REVIEW_FAILED")
+        for item in value:
+            _validate_response(item, schema["items"])
+    elif kind == "integer":
+        if value < schema.get("minimum", value) or value > schema.get("maximum", value):
+            raise SourceError("RESEARCH_REVIEW_FAILED")
+
+
 def _call(call, task, instruction, payload, schema):
     result = call(
         "/semantics",
@@ -173,8 +195,7 @@ def _call(call, task, instruction, payload, schema):
             "schema": schema,
         },
     )
-    if not isinstance(result, dict):
-        raise SourceError("RESEARCH_REVIEW_FAILED")
+    _validate_response(result, schema)
     return result
 
 
