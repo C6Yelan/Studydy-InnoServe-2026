@@ -124,7 +124,10 @@ def test_source_api_origin_owner_download_and_no_model(closed_loop,monkeypatch):
     assert capabilities.status_code==200
     formats=capabilities.json()['formats']
     assert {item['extension'] for item in formats if item['kind']=='document'}==set(MIME)
-    assert {item['extension'] for item in formats if item['kind']!='document'}=={'.mp3','.m4a','.wav','.mp4'}
+    assert {(item['kind'],item['extension']) for item in formats if item['kind']!='document'}=={
+        ('image','.png'),('image','.jpg'),('image','.jpeg'),('image','.webp'),
+        ('audio','.mp3'),('audio','.m4a'),('audio','.wav'),('video','.mp4'),
+    }
     assert capabilities.json()['youtube'] is True
     with monkeypatch.context() as missing_tools:
         missing_tools.setattr('document_normalization.converter.shutil.which',lambda _:None)

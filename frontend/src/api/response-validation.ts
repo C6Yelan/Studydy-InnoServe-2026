@@ -465,7 +465,7 @@ function cardEvidence(value: unknown): boolean {
             && (evidence.source_name === undefined || typeof evidence.source_name === "string")
             && (evidence.normalized_page === undefined ||
               (Number.isInteger(evidence.normalized_page) && Number(evidence.normalized_page) > 0))
-            && evidence.source === "native_text"
+            && ["native_text", "tesseract", "gemma_visual"].includes(String(evidence.source))
             && typeof evidence.quote === "string" && locator(evidence.source_locator);
 }
 

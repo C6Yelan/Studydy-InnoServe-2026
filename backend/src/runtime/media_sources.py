@@ -66,7 +66,7 @@ _SIMPLIFIED = ("zh-Hans", "zh-CN", "zh-SG", "zh")
 def upload_limit(name, media):
     """依副檔名與宣告型別決定可接收的大小；YouTube 參照不能由上傳建立。"""
     extension = PurePath(name).suffix.lower()
-    if MIME.get(extension) == media:
+    if MIME.get(extension) == media or (extension == ".zip" and media == IMAGE_SET_MIME):
         return MAX_FILE_BYTES
     if AUDIO_MIME.get(extension) == media:
         return MAX_AUDIO_BYTES

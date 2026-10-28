@@ -253,7 +253,7 @@ export type EvidenceView = {
   page: number;
   block_order: number;
   kind: string;
-  source: "native_text";
+  source: "native_text" | "tesseract" | "gemma_visual";
   source_locator: SourceLocatorView;
   quote: string;
   quote_start?: number;

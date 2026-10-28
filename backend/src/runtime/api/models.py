@@ -320,7 +320,7 @@ class EvidenceView(_Closed):
     page: int
     block_order: int
     kind: str
-    source: Literal["native_text"]
+    source: Literal["native_text", "tesseract", "gemma_visual"]
     source_locator: SourceLocatorView
     quote: str
 
