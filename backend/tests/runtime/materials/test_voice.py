@@ -20,6 +20,60 @@ def setup(f):
     return owner.learner_id,source.material_id,c['conversation_id'],dsn
 
 
+@pytest.mark.parametrize('invalid_attempts', [1, 2])
+def test_answer_validation_retries_once_and_keeps_private_diagnostics(closed_loop, monkeypatch, tmp_path, invalid_attempts):
+    import json
+    import stat
+    owner, _, cid, dsn = setup(closed_loop)
+    monkeypatch.setenv('STUDYDY_ARTIFACT_ROOT', str(tmp_path))
+    calls = []
+    candidate = {'segments': [{'text': '被擋下的候選回答', 'citations': [99999]}], 'queries': [], 'missing': ''}
+
+    def provider(path, body):
+        calls.append(deepcopy(body))
+        if len(calls) <= invalid_attempts:
+            return deepcopy(candidate)
+        return qa_model(body)
+
+    monkeypatch.setattr(voice, 'provider', provider)
+    voice.add_turn(owner, cid, 'automatic-retry', 'Stack 是什麼？', dsn=dsn)
+    assert voice.step(dsn=dsn)
+    turn = voice.read(owner, cid, dsn=dsn)['turns'][0]
+    assert turn['status'] == ('ready' if invalid_attempts == 1 else 'failed')
+    assert len(calls) == (3 if invalid_attempts == 1 else 2)
+    assert turn['error_code'] == (None if invalid_attempts == 1 else 'VOICE_ANSWER_INVALID')
+    paths = list((tmp_path / 'failures').glob('*.json'))
+    assert len(paths) == invalid_attempts
+    for path in paths:
+        saved = json.loads(path.read_text())
+        assert saved['candidates'][0]['candidate'] == candidate
+        assert 'segment_text_or_citations_invalid' in saved['rejections']
+        assert saved['tags']['feature'] == 'voice'
+        assert stat.S_IMODE(path.stat().st_mode) == 0o600
+    assert stat.S_IMODE((tmp_path / 'failures').stat().st_mode) == 0o700
+    assert 'candidates' not in turn and 'rejections' not in turn
+
+
+@pytest.mark.parametrize('cancel', [False, True])
+def test_answer_retry_does_not_replay_provider_errors_or_cancelled_work(closed_loop, monkeypatch, cancel):
+    owner, _, cid, dsn = setup(closed_loop)
+    turn = voice.add_turn(owner, cid, 'no-replay', 'Stack 是什麼？', dsn=dsn)
+    calls = []
+
+    def provider(path, body):
+        calls.append(path)
+        if cancel:
+            voice.action(owner, cid, turn['turn_id'], 'cancel', dsn=dsn)
+            return {'segments': [None], 'queries': [], 'missing': ''}
+        raise SourceError('VOICE_PROVIDER_FAILED')
+
+    monkeypatch.setattr(voice, 'provider', provider)
+    assert voice.step(dsn=dsn)
+    saved = voice.read(owner, cid, dsn=dsn)['turns'][0]
+    assert saved['status'] == ('cancelled' if cancel else 'failed')
+    assert calls == ['/semantics']
+
+
 def test_conversation_reads_do_not_wait_for_another_material_reader(closed_loop):
     from runtime.storage.materials import require_material
     owner, material, identity, dsn = setup(closed_loop)

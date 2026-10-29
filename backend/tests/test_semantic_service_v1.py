@@ -384,5 +384,6 @@ def test_truncation_archives_only_safe_phase_and_token_metadata(monkeypatch):
         'task': 'material_review', 'input_tokens': 12000, 'max_tokens': 20768,
         'finish_reason': 'length', 'prompt_tokens': 12000,
         'completion_tokens': 20768, 'total_tokens': 32768,
+        'response_validation': 'candidate_output_truncated',
     }
     assert secret not in json.dumps(saved)

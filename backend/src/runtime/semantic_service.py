@@ -42,6 +42,16 @@ class SemanticServiceError(RuntimeError):
         self.request_metadata: dict[str, Any] | None = None
 
 
+def _invalid_candidate(error, content, reason):
+    if isinstance(content, str):
+        from . import model_calls
+
+        model_calls.capture(content)
+        model_calls.rejected(reason, candidate=content)
+        error.request_metadata = {**(error.request_metadata or {}), "response_validation": reason}
+    return error
+
+
 def _output_budget(task: str, ceiling: int, input_tokens: int, context: int) -> int:
     # 輸出可使用剩餘上下文；輸入打包仍須保留各任務的最低輸出空間。
     budget = min(ceiling, context - input_tokens)
@@ -373,6 +383,7 @@ def request_semantics(
         raise SemanticServiceError("SEMANTIC_SERVICE_UNAVAILABLE") from error
     if not response.content or len(response.content) > MAX_RESPONSE_BYTES:
         raise SemanticServiceError("SEMANTIC_RESPONSE_INVALID")
+    content = None
     try:
         api_body = json.loads(
             response.content.decode("utf-8"),
@@ -389,6 +400,7 @@ def request_semantics(
                 }
             )
         choice = api_body["choices"][0]
+        content = choice["message"]["content"]
         if choice.get("finish_reason") != "stop":
             error = SemanticServiceError("SEMANTIC_OUTPUT_TRUNCATED")
             finish_reason = choice.get("finish_reason")
@@ -419,19 +431,24 @@ def request_semantics(
                         if type(usage.get(key)) is int and usage[key] >= 0
                     }
                 )
-            raise error
-        content = choice["message"]["content"]
+            raise _invalid_candidate(error, content, "candidate_output_truncated")
         result = json.loads(
             content,
             object_pairs_hook=_unique_object,
             parse_constant=_reject_constant,
         )
-    except SemanticServiceError:
+    except SemanticServiceError as error:
+        if error.reason_code == "SEMANTIC_RESPONSE_INVALID":
+            raise _invalid_candidate(error, content, "candidate_json_invalid")
         raise
     except (IndexError, KeyError, TypeError, UnicodeError, ValueError) as error:
-        raise SemanticServiceError("SEMANTIC_RESPONSE_INVALID") from error
+        raise _invalid_candidate(
+            SemanticServiceError("SEMANTIC_RESPONSE_INVALID"), content, "candidate_json_invalid"
+        ) from error
     if not isinstance(result, dict):
-        raise SemanticServiceError("SEMANTIC_RESPONSE_INVALID")
+        raise _invalid_candidate(
+            SemanticServiceError("SEMANTIC_RESPONSE_INVALID"), content, "candidate_not_object"
+        )
     return result
 
 

@@ -24,7 +24,7 @@ from .storage.tables import (
 )
 from .storage.database import database_session
 from .audio import validate_audio
-from .generation_jobs import cancellable_job, lease_is_current
+from .generation_jobs import cancellable_job, lease_is_current, check_job, JobCancelled
 from . import retrieval, material_qa
 
 
@@ -591,9 +591,11 @@ def _save_answer(db, turn, state, result):
         or type(supported) is not bool
         or (supported and not citations)
     ):
+        model_calls.rejected("answer_text_supported_or_citations_invalid")
         raise SourceError("VOICE_ANSWER_INVALID")
     for citation in citations:
         if not isinstance(citation, dict):
+            model_calls.rejected("citation_not_object")
             raise SourceError("VOICE_ANSWER_INVALID")
         passage = state["retrieved"].get(citation.get("passage_id"))
         if (
@@ -606,6 +608,7 @@ def _save_answer(db, turn, state, result):
                 for reference in citation["evidence"]
             )
         ):
+            model_calls.rejected("citation_not_bound_to_retrieved_source")
             raise SourceError("VOICE_ANSWER_INVALID")
     turn.answer = {**result, "schema": "material-answer/v3"}
     memory = state.get("memory_update")
@@ -672,73 +675,87 @@ def step(*, dsn=None):
     state = claim(dsn=dsn)
     if not state:
         return False
-    trace = model_calls.start("voice", state["turn_id"], state["lease_token"],
-        state["material_id"], state["owner"], enabled=state["status"] == "answering")
-    try:
-        with cancellable_job(
-            Turn,
-            state["turn_id"],
-            state["lease_token"],
-            dsn=dsn,
-            statuses=(state["status"],),
-        ) as job:
-            if state["status"] == "transcribing":
-                result = provider(
-                    "/transcribe",
-                    {
-                        **job,
-                        "audio": base64.b64encode(state["recording"]).decode(),
-                        "hints": state["stt_hints"],
-                    },
-                )
-            elif state["status"] == "answering":
-                _record_stage(state, "retrieval", dsn=dsn)
-                context = None
-                if state["context"]:
-                    with database_session(dsn) as db:
-                        row, _ = _conversation(
-                            db, state["owner"], state["conversation_id"]
-                        )
-                        _, context = podcast_context(db, row, state["context"])
-
-                def retrieve(queries):
-                    with database_session(dsn) as db:
-                        passages = retrieval.search(
-                            db,
-                            state["owner"],
-                            state["material_id"],
-                            state["revision"],
-                            queries,
-                        )
-                    state["retrieved"].update({p["passage_id"]: p for p in passages})
-                    return passages
-
-                with database_session(dsn) as db:
-                    catalog = retrieval.catalog(
-                        db, state["owner"], state["material_id"], state["revision"]
+    for attempt in range(2 if state["status"] == "answering" else 1):
+        trace = model_calls.start("voice", state["turn_id"], f"{state['lease_token']}:{attempt + 1}",
+            state["material_id"], state["owner"], enabled=state["status"] == "answering")
+        try:
+            with cancellable_job(
+                Turn,
+                state["turn_id"],
+                state["lease_token"],
+                dsn=dsn,
+                statuses=(state["status"],),
+            ) as job:
+                if state["status"] == "transcribing":
+                    result = provider(
+                        "/transcribe",
+                        {
+                            **job,
+                            "audio": base64.b64encode(state["recording"]).decode(),
+                            "hints": state["stt_hints"],
+                        },
                     )
-                result = material_qa.answer(
-                    state["question"],
-                    state["history"],
-                    context,
-                    retrieve=retrieve,
-                    call=lambda path, body: provider(path, {**job, **body}),
-                    catalog=catalog,
-                    memory=state["memory"],
-                    user_history=state["user_history"],
-                    voice_input=state.get("transcription") is not None,
-                    recognition=state.get("transcription"),
-                    on_stage=lambda stage: _record_stage(state, stage, dsn=dsn),
-                )
+                elif state["status"] == "answering":
+                    _record_stage(state, "retrieval", dsn=dsn)
+                    context = None
+                    if state["context"]:
+                        with database_session(dsn) as db:
+                            row, _ = _conversation(
+                                db, state["owner"], state["conversation_id"]
+                            )
+                            _, context = podcast_context(db, row, state["context"])
+
+                    def retrieve(queries):
+                        with database_session(dsn) as db:
+                            passages = retrieval.search(
+                                db,
+                                state["owner"],
+                                state["material_id"],
+                                state["revision"],
+                                queries,
+                            )
+                        state["retrieved"].update({p["passage_id"]: p for p in passages})
+                        return passages
+
+                    with database_session(dsn) as db:
+                        catalog = retrieval.catalog(
+                            db, state["owner"], state["material_id"], state["revision"]
+                        )
+                    result = material_qa.answer(
+                        state["question"],
+                        state["history"],
+                        context,
+                        retrieve=retrieve,
+                        call=lambda path, body: provider(path, {**job, **body}),
+                        catalog=catalog,
+                        memory=state["memory"],
+                        user_history=state["user_history"],
+                        voice_input=state.get("transcription") is not None,
+                        recognition=state.get("transcription"),
+                        on_stage=lambda stage: _record_stage(state, stage, dsn=dsn),
+                    )
+                    _record_stage(state, None, dsn=dsn)
+                    state["memory_update"] = result.pop("_memory_update")
+                if state["status"] == "answering":
+                    model_calls.capture(deepcopy(result))
+                finish(state, result, dsn=dsn)
+            break
+        except Exception as error:
+            if state.get("_stage"):
                 _record_stage(state, None, dsn=dsn)
-                state["memory_update"] = result.pop("_memory_update")
-            finish(state, result, dsn=dsn)
-    except Exception as error:
-        if state.get("_stage"):
-            _record_stage(state, None, dsn=dsn)
-        model_calls.rejected(str(error))
-        code = str(error) if isinstance(error, SourceError) else "VOICE_PROVIDER_FAILED"
-        finish(state, error=code, dsn=dsn)
-    finally:
-        model_calls.close(trace)
+            model_calls.rejected(str(error))
+            code = str(error) if isinstance(error, SourceError) else "VOICE_PROVIDER_FAILED"
+            if state["status"] == "answering" and code == "VOICE_ANSWER_INVALID" and attempt == 0:
+                try:
+                    check_job(Turn, state["turn_id"], state["lease_token"], dsn=dsn, statuses=("answering",))
+                except JobCancelled:
+                    break
+                model_calls.completed("failed", code)
+                state["retrieved"] = {}
+                state.pop("memory_update", None)
+                continue
+            finish(state, error=code, dsn=dsn)
+            break
+        finally:
+            model_calls.close(trace)
     return True

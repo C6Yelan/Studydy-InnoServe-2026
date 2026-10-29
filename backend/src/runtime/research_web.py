@@ -276,6 +276,11 @@ def html_document(data, final, media):
             policy.get("license_url"),
         )
     metadata = extract_metadata(tree, default_url=final)
+    # Wikipedia 將 MathML 藏在無障礙 span，畫面改用 SVG；擷取不收圖片，須先保留原公式。
+    for node in tree.xpath(
+        '//span[contains(concat(" ", normalize-space(@class), " "), " mwe-math-mathml-a11y ") and .//math]'
+    ):
+        node.drop_tag()
     # 移除網頁編輯與引註標記，保留一般數學上標與程式碼字面值。
     for node in tree.xpath(
         '//*[contains(concat(" ", normalize-space(@class), " "), " mw-editsection ")]'

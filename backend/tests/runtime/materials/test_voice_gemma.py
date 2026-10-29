@@ -40,9 +40,10 @@ def gemma_http(monkeypatch):
             result = replacements.pop(0)
         else:
             result = qa_model(call, "堆疊採用後進先出。")
-        if "speech_terms" in schema["properties"]:
+        if isinstance(result, dict) and "speech_terms" in schema["properties"]:
             result.setdefault("speech_terms", ["堆疊", "後進先出"])
-        return httpx.Response(200, json={"choices": [{"finish_reason": "stop", "message": {"content": json.dumps(result, ensure_ascii=False)}}]})
+        content = result if isinstance(result, str) else json.dumps(result, ensure_ascii=False)
+        return httpx.Response(200, json={"choices": [{"finish_reason": "stop", "message": {"content": content}}]})
 
     monkeypatch.setattr(semantic_service, "semantic_client", lambda **kwargs: httpx.Client(transport=httpx.MockTransport(respond)))
     return calls, replacements
@@ -103,12 +104,35 @@ def test_gemma_compresses_and_reuses_persisted_conversation_memory(closed_loop, 
 def test_gemma_candidate_with_foreign_citation_is_not_published(closed_loop, gemma_http):
     owner, _, conversation, dsn = setup(closed_loop)
     _, replacements = gemma_http
-    replacements.append({"segments": [{"text": "無法回查的候選。", "citations": [999]}], "queries": [], "missing": ""})
+    replacements.extend([{"segments": [{"text": "無法回查的候選。", "citations": [999]}], "queries": [], "missing": ""}] * 2)
     voice.add_turn(owner, conversation, "bad-citation", "Stack LIFO", dsn=dsn)
     assert voice.step(dsn=dsn)
     saved = voice.read(owner, conversation, dsn=dsn)["turns"][0]
     assert saved["status"] == "failed" and saved["error_code"] == "VOICE_ANSWER_INVALID"
     assert saved["answer"] is None
+    assert not replacements
+
+
+@pytest.mark.parametrize('raw,reason', [('[]', 'candidate_not_object'), ('not JSON', 'candidate_json_invalid'), ('{"a":1,"a":2}', 'candidate_json_invalid')])
+@pytest.mark.parametrize('invalid_attempts', [1, 2])
+def test_gemma_invalid_json_candidate_retries_and_is_diagnosable(closed_loop, gemma_http, monkeypatch, tmp_path, raw, reason, invalid_attempts):
+    owner, _, conversation, dsn = setup(closed_loop)
+    monkeypatch.setenv('STUDYDY_ARTIFACT_ROOT', str(tmp_path))
+    monkeypatch.setenv('VLLM_API_KEY', 'private-test-credential')
+    calls, replacements = gemma_http
+    replacements.extend([raw] * invalid_attempts)
+    voice.add_turn(owner, conversation, 'invalid-json', 'Stack LIFO', dsn=dsn)
+    assert voice.step(dsn=dsn)
+    saved = voice.read(owner, conversation, dsn=dsn)['turns'][0]
+    assert saved['status'] == ('ready' if invalid_attempts == 1 else 'failed')
+    assert len(calls) == (3 if invalid_attempts == 1 else 2)
+    paths = list((tmp_path / 'failures').glob('*.json'))
+    assert len(paths) == invalid_attempts
+    for path in paths:
+        document = json.loads(path.read_text())
+        assert any(item['candidate'] == raw for item in document['candidates'])
+        assert reason in document['rejections']
+        assert 'private-test-credential' not in path.read_text()
 
 
 def test_cancelling_gemma_http_wait_keeps_turn_cancelled(closed_loop, monkeypatch):
