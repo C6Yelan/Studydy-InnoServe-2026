@@ -15,6 +15,8 @@
 | UTF-8 TXT | 有界換行排版；保存原行號及 PDF 頁碼 |
 | Markdown | 限制 HTML 排版；raw HTML 顯示為文字、不載入圖片，保存 block 及 PDF 頁碼 |
 
+文字轉檔政策為第 4 版；72 欄軟換行保留 LaTeX 指令、英文單字與數字，避免回讀 PDF 時拆成不同字面值。已完成的來源快照不重寫；失敗來源重試依既有流程採用現行政策。
+
 原檔、PDF 與 mapping 各自保存 hash。下載使用原 MIME 與 attachment，PDF 預覽使用獨立入口。解析在無網路 Bubblewrap 子程序內執行，唯讀掛載 runtime 及輸入，僅輸出／暫存可寫。資源限制、版本檢查與禁止的主動內容見 [converter.py](../backend/src/document_normalization/converter.py) 及 [renderer.py](../backend/src/document_normalization/renderer.py)。
 
 ## 草稿與來源快照
@@ -41,7 +43,7 @@ Evidence 保留教材、1-based 頁碼、區塊、定位及技術字面值。換
 
 補充研究依使用者確認的範圍執行規劃、篩選、來源類型核對、定位、閱讀與補查，各模型階段共用 Gemma HTTP。研究邊界先核對回應欄位、型別、列舉與索引範圍，再進行原文引用及涵蓋檢查；非法候選記為失敗，可重試或取消。
 
-搜尋保留 SearXNG 的 Wikipedia 管道與學術論文來源。來源身分及授權由取得流程核對；模型不能自行授權匯入。已核對正文保存為快照，使用者選取後沿用同一份內容交接教材處理。Wikipedia 的數學專用隱藏外層會先移除，使其中的 MathML 公式與行內變數保留為文字；一般圖片仍不納入正文，原始位元組與授權快照 hash 不變。
+搜尋保留 SearXNG 的 Wikipedia 管道與學術論文來源。來源身分及授權由取得流程核對；模型不能自行授權匯入。已核對正文保存為快照，使用者選取後沿用同一份內容交接教材處理。Wikipedia 數學元素以 MathML 的完整 alttext 保存原始 LaTeX，正文擷取後才還原，避免截斷的 annotation、外溢殘文或 Markdown 轉義損壞公式；每個公式只保留一次。一般圖片仍不納入正文，原始位元組與授權快照 hash 不變。
 
 追加只分析新增來源，再整合檢核；發布同交易更新知識結構、run 與教材 head。教材庫開目前 head，學習依 exact revision 恢復。被學習或活動工作引用的結構保留，其餘完整結構可清理；來源檔跨版本重用。
 

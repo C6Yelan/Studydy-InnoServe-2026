@@ -276,11 +276,22 @@ def html_document(data, final, media):
             policy.get("license_url"),
         )
     metadata = extract_metadata(tree, default_url=final)
-    # Wikipedia 將 MathML 藏在無障礙 span，畫面改用 SVG；擷取不收圖片，須先保留原公式。
+    # Wikipedia 的 annotation 可能截斷且殘文落在 MathML 外；以完整 alttext 取代整個數學元素，避免正文擷取轉義公式。
+    digest = sha256(data).hexdigest()
+    formulas = {}
     for node in tree.xpath(
-        '//span[contains(concat(" ", normalize-space(@class), " "), " mwe-math-mathml-a11y ") and .//math]'
+        '//span[contains(concat(" ", normalize-space(@class), " "), " mwe-math-element ")]'
     ):
-        node.drop_tag()
+        math = node.find('.//math[@alttext]')
+        if math is None or not math.get("alttext"):
+            continue
+        token = f"STUDYDYFORMULA{digest[:16]}N{len(formulas)}END"
+        latex = math.get("alttext")
+        formulas[token] = (
+            f"\n$$\n{latex}\n$$\n" if math.get("display") == "block" else f"${latex}$"
+        )
+        node.clear(keep_tail=True)
+        node.text = token
     # 移除網頁編輯與引註標記，保留一般數學上標與程式碼字面值。
     for node in tree.xpath(
         '//*[contains(concat(" ", normalize-space(@class), " "), " mw-editsection ")]'
@@ -303,6 +314,8 @@ def html_document(data, final, media):
     )
     if not text or not text.strip():
         raise SourceError("RESEARCH_FORMAT_UNSUPPORTED")
+    for token, formula in formulas.items():
+        text = text.replace(token, formula)
     page_title = title
     title = (metadata.title if metadata else None) or title
     # 擷取結果若只有頁面題名，代表尚未取得正文；不以字數門檻判斷短文。
@@ -322,7 +335,6 @@ def html_document(data, final, media):
     author = (
         None if wikipedia_article(final) else metadata.author if metadata else None
     ) or urlsplit(final).hostname
-    digest = sha256(data).hexdigest()
     return {
         "url": final,
         "title": title,

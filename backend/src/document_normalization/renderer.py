@@ -10,6 +10,7 @@ import json
 import mimetypes
 from pathlib import Path, PurePosixPath
 import posixpath
+import re
 import socket
 import ssl
 import subprocess
@@ -84,13 +85,14 @@ def wrap_text(line):
     parts = []
     current = ""
     width = 0
-    for char in line:
-        advance = 2 if unicodedata.east_asian_width(char) in ("W", "F") else 1
+    # PDF 軟換行不能拆開 LaTeX 指令、英文單字或數字，否則回讀後會變成不同字面值。
+    for token in re.findall(r"\\(?:[A-Za-z]{1,71}|.)|[A-Za-z0-9_.'’\-]{1,72}|.", line):
+        advance = sum(2 if unicodedata.east_asian_width(char) in ("W", "F") else 1 for char in token)
         if width + advance > 72:
             parts.append(current)
             current = ""
             width = 0
-        current += char
+        current += token
         width += advance
     return [*parts, current]
 
