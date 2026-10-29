@@ -89,3 +89,5 @@ PYTEST
 - 真轉檔、頁碼／區塊定位，以及瀏覽器恢復。
 
 記錄實際命令、範圍、結果與限制。合成測試提供程式回歸證據；模型品質須另以指定素材及標準，透過產品流程生成並人工核對。
+
+摘要跨批沿用回歸：`backend/tests/test_material_notes.py` 核對前文來源投影、沿用時新來源支持及正文涵蓋、失敗不保存批次；`backend/tests/runtime/study/test_note_queue.py` 核對重試契約與排程。`test_assessment_safety_v1.py` 保護 v1／v2 封存題與 v3 新題讀取。這些受控測試不代替 Gemma 真實內容驗收。

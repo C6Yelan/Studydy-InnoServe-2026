@@ -266,14 +266,14 @@ def test_same_answer_to_a_different_attribute_is_not_automatically_duplicate():
     assert selected["compared_assessment_revisions"] == [prior[0].assessment_revision]
 
 
-@pytest.mark.parametrize("policy", ["source-span-single-choice/v1", "source-span-single-choice/v2"])
+@pytest.mark.parametrize("policy", ["source-span-single-choice/v1", "source-span-single-choice/v2", "source-span-single-choice/v3"])
 def test_saved_policy_keeps_generation_and_stored_answers_readable(policy):
     from learning_adaptation.assessments import (
         _fingerprint, _normalized, _stored, assessment_response_schema,
     )
     lock = json.loads((Path(__file__).parents[2] / "local_ai/runtime-lock.json").read_text())
     lock["assessment"]["policy"] = policy
-    translated = policy.endswith("/v2")
+    translated = policy in {"source-span-single-choice/v2", "source-span-single-choice/v3"}
     proposal = _proposal()
     if translated:
         proposal.update(
@@ -315,3 +315,14 @@ def test_saved_policy_keeps_generation_and_stored_answers_readable(policy):
     else:
         assert "source_quote" not in private
         assert private["rationale"] == _claim().evidence[0].quote
+
+    from learning_adaptation.answer_events import _feedback
+    event = SimpleNamespace(
+        answer_event_id=uuid4(), study_session_id=study.study_session_id,
+        assessment_revision=public["assessment_revision"], question_id=public["question_id"],
+        selected_option_id=private["correct_option_id"], is_correct=True,
+        event_number=1, created_at=datetime.now(UTC),
+    )
+    for include_answer_key in (False, True):
+        feedback = _feedback(event, row, include_answer_key=include_answer_key)
+        assert feedback.rationale == ("教材指出陣列大小為 8 位元組。" if translated else "")
