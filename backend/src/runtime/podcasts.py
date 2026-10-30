@@ -3,13 +3,20 @@
 from .storage.materials import require_material, validate_concept_selection
 from copy import deepcopy
 from datetime import UTC, datetime
+from hashlib import sha256
+import math
 import secrets
 from uuid import UUID, uuid4
 
 from sqlalchemy import delete, or_, select, update
 
 from content_identity import canonical_sha256
-from .storage.artifacts import _key_digest, quarantine_artifact, reconcile_discarded_artifacts
+from .storage.artifacts import (
+    _key_digest,
+    quarantine_artifact,
+    reconcile_discarded_artifacts,
+    write_blob,
+)
 from .storage.tables import KnowledgeStructure
 from .storage.knowledge_structures import (
     _prune_unreferenced_structures,
@@ -23,7 +30,15 @@ from .podcast_access import _locked
 from .podcast_sources import plan_episodes, source_context, _context_pages
 from . import retrieval, model_calls
 from .errors import SourceError, PodcastError
-from .storage_usage import lock_account, release, reserve_videos
+from .audio import FLAC_MEDIA_TYPE, validate_audio, wav_to_flac
+from .storage_usage import (
+    episode_estimates,
+    lock_account,
+    release,
+    require_room,
+    reserve,
+    reserve_videos,
+)
 
 
 from .generation_jobs import WORKER_LEASE_TTL, lease_is_current
@@ -108,7 +123,7 @@ def _summary(row, material, child_statuses):
         "created_at": row.created_at,
         "episode_count": len(row.episodes),
         "generation": generation,
-        "completed_episodes": sum(bool(e.get("script")) for e in row.episodes),
+        "completed_episodes": sum(bool(e.get("audio")) for e in row.episodes),
         # 全部分集的音訊都完成後才給總時長；生成中不顯示會變動的數字。
         "duration_seconds": sum(e["audio"]["duration_seconds"] for e in row.episodes)
         if row.status == "ready" and all(e.get("audio") for e in row.episodes) else None,
@@ -130,7 +145,7 @@ def create_podcast(
     dsn=None,
 ):
     name = validate_concept_selection(name, concept_ids)
-    if delivery not in {"solo", "dialogue"} or video is not False:
+    if delivery not in {"solo", "dialogue"} or type(video) is not bool:
         raise PodcastError("REQUEST_INVALID")
     digest = _key_digest(key)
     selection = {
@@ -188,6 +203,12 @@ def create_podcast(
         if (existing := replay(db, material)) is not None:
             return existing
         retrieval._scope(db, owner, material_id, revision)
+        estimate = episode_estimates(db)
+        require_room(
+            db,
+            owner,
+            len(episodes) * (estimate["audio"] + (estimate["video"] if video else 0)),
+        )
         # 舊模式欄位保留歷史資料；新建固定儲存值，不再參與 API 或生成決策。
         row = Podcast(
             podcast_id=uuid4(),
@@ -203,10 +224,21 @@ def create_podcast(
             created_at=datetime.now(UTC),
             idempotency_key_sha256=digest,
             request_fingerprint=fingerprint,
-            video_enabled=False,
+            video_enabled=video,
         )
         db.add(row)
         db.flush()
+        for index in range(len(episodes)):
+            for kind in ("podcast_audio", "podcast_video") if video else ("podcast_audio",):
+                reserve(
+                    db,
+                    owner,
+                    material_id,
+                    kind,
+                    estimate["audio" if kind == "podcast_audio" else "video"],
+                    podcast_id=row.podcast_id,
+                    episode_index=index,
+                )
         return _summary(row, material, _child_statuses(db, [row.podcast_id]))
 
 
@@ -412,7 +444,7 @@ def claim_step(*, dsn=None):
             row.status, row.lease_token = "running", uuid4()
             row.lease_expires_at = now + WORKER_LEASE_TTL
             row.version += 1
-            index = next(i for i, e in enumerate(row.episodes) if not e.get("script"))
+            index = next(i for i, e in enumerate(row.episodes) if not e.get("audio"))
             if row.episodes[index]["script"] is None and "hosts" not in row.episodes[index]:
                 # 節目化前建立、尚未寫完的 Podcast：補一組主持人給還沒有名字的集數，已完成集數不改。
                 hosts = _pick_hosts(row.episodes[index]["delivery"])
@@ -423,7 +455,7 @@ def claim_step(*, dsn=None):
                     for e in row.episodes
                 ]
             episodes = deepcopy(row.episodes)
-            step = "script"
+            step = "audio" if episodes[index]["script"] else "script"
             episodes[index].setdefault("step_times", {})[step] = {"started_at": now.isoformat(), "finished_at": None}
             row.episodes = episodes
             episode = deepcopy(row.episodes[index])
@@ -474,6 +506,9 @@ def finish_step(
     *,
     script=None,
     title=None,
+    audio=None,
+    audio_provider=None,
+    audio_mastering=None,
     error=None,
     dsn=None,
 ):
@@ -489,7 +524,7 @@ def finish_step(
             return False
         episodes = deepcopy(row.episodes)
         episode = episodes[claim["index"]]
-        step = "script"
+        step = "audio" if claim["episode"]["script"] else "script"
         timing = episode.setdefault("step_times", {}).setdefault(step, {})
         timing["finished_at"] = datetime.now(UTC).isoformat()
         if error:
@@ -501,10 +536,82 @@ def finish_step(
                 episode["omitted_content"] = episode["script"].pop("omitted_content", [])
                 if title:
                     episode["title"] = title
+            elif audio is not None and episode["script"]:
+                if (
+                    not isinstance(audio_provider, str)
+                    or not audio_provider.strip()
+                    or len(audio_provider) > 300
+                ):
+                    raise PodcastError("PODCAST_AUDIO_INVALID")
+                if audio_mastering is not None:
+                    try:
+                        if not (
+                            set(audio_mastering)
+                            == {
+                                "policy",
+                                "integrated_lufs",
+                                "true_peak_dbtp",
+                                "loudness_range_lu",
+                            }
+                        ):
+                            raise ValueError()
+                        if not (audio_mastering["policy"] == "podcast-mastering/v1"):
+                            raise ValueError()
+                        if not (
+                            all(
+                                type(audio_mastering[k]) in (int, float)
+                                and math.isfinite(audio_mastering[k])
+                                for k in (
+                                    "integrated_lufs",
+                                    "true_peak_dbtp",
+                                    "loudness_range_lu",
+                                )
+                            )
+                        ):
+                            raise ValueError()
+                    except (ValueError, KeyError, TypeError):
+                        raise PodcastError("PODCAST_AUDIO_INVALID") from None
+                duration = validate_audio(audio)
+                # 無損 FLAC 保存；sha256 仍記發布時的 WAV，影片與對齊的音訊身分不變。
+                artifact = write_blob(
+                    db,
+                    row.learner_id,
+                    row.material_id,
+                    wav_to_flac(audio),
+                    "podcast_audio",
+                    FLAC_MEDIA_TYPE,
+                )
+                # 成品與釋放保留在同一交易：改計實際大小。
+                release(
+                    db,
+                    podcast_id=row.podcast_id,
+                    kind="podcast_audio",
+                    episode_index=claim["index"],
+                )
+                episode["audio"] = {
+                    "artifact_id": str(artifact.artifact_id),
+                    "sha256": sha256(audio).hexdigest(),
+                    "duration_seconds": duration,
+                    "provider": audio_provider,
+                    **(
+                        {"mastering": audio_mastering}
+                        if audio_mastering is not None
+                        else {}
+                    ),
+                }
+
             else:
                 raise PodcastError("PODCAST_SCRIPT_INVALID")
             row.episodes = episodes
-            row.status = "ready" if all(e.get("script") for e in episodes) else "pending"
+            if audio is not None:
+                if row.video_enabled:
+                    from .podcast_videos import enqueue
+
+                    enqueue(db, row, claim["index"])
+                from .podcast_scenes import enqueue as enqueue_alignment
+
+                enqueue_alignment(db, row, claim["index"])
+            row.status = "ready" if all(e.get("audio") for e in episodes) else "pending"
         row.lease_token = row.lease_expires_at = None
         row.version += 1
     if script is not None or error:

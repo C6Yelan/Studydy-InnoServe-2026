@@ -14,7 +14,7 @@ from runtime.learner_session import register_account
 from runtime.material_discard import request_material_discard
 from runtime.storage.database import database_session
 from runtime.storage.tables import Podcast
-from test_podcasts import complete_media as complete, create
+from test_podcasts import complete, create
 
 TAIPEI = ZoneInfo("Asia/Taipei")
 

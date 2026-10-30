@@ -1,0 +1,9 @@
+# 競賽展示用 XTTS 語音環境；不安裝 Coqui 的中文或 all extras（不含 jieba／pypinyin）。
+# PyTorch／torchaudio 另由 https://download.pytorch.org/whl/cu128 安裝 2.8.0。
+coqui-tts==0.27.2
+transformers==4.55.4
+ckip-transformers==0.3.4
+cmudict==1.1.1
+wordninja==2.0.0
+unicode-rbnf==2.4.1
+imageio-ffmpeg==0.7.0

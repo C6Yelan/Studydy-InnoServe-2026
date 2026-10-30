@@ -54,7 +54,7 @@ Progress 與 resume 使用同一 DB snapshot，核對 session、run、知識結�
 
 概念卡使用側邊清單選卡，匯出以教材名稱與卡片順序命名；知識地圖只匯出概念大綱 Markdown。卡組與 Podcast 名稱上限為 40 字，既有資料由 0031_content_names_40.sql 處理，原 0030 保留。
 
-Podcast 的 ready 與 completed_episodes 依已完成講稿計算。只有講稿時提供閱讀及 Markdown 匯出，不請求不存在的音訊、影片、時間軸或收聽進度；已有媒體保留原播放與時間軸能力。本版不新增配音或教學影片生成。
+Podcast 的 ready 與 completed_episodes 依已完成音訊計算；講稿完成後排入配音，音訊完成後排入字幕對齊，勾選影片時另排影片。先前只產講稿的 ready 節目提供閱讀及 Markdown 匯出，不請求不存在的音訊、影片、時間軸或收聽進度。
 
 ## 學習回饋
 

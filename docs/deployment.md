@@ -31,14 +31,16 @@ Access 非必要。每次切換須先完成本機驗收與部署核准；啟動 
 舊帳號不自動轉入新 DB；以已授權帳密透過 `/v1/accounts` 重新註冊，再執行登入檢查。舊檔保留供回復使用。
 回復時使用舊 images、設定與經驗證的 DB dump，搭配原地保留的 artifact 目錄；不把新 SQL 套到舊資料，也不清除 volume。
 
-語音辨識由本機獨立 `ops/podcast/provider.py` 提供 `/transcribe`、`/media-transcribe`、`/align`。
+語音辨識與合成由本機獨立 `ops/podcast/provider.py` 提供 `/audio`、`/transcribe`、`/media-transcribe`、`/align`。
 以獨立 Python 環境安裝 `ops/podcast/stt-requirements.txt`，設定 `STUDYDY_STT_PYTHON`、`STUDYDY_STT_MODEL_DIR`、`STUDYDY_PODCAST_PROVIDER_TOKEN`；模型由本機目錄載入，不在請求時下載。
+語音合成另建 Python 3.12 環境：先由 PyTorch cu128 index 安裝 torch／torchaudio 2.8.0，再安裝 `ops/podcast/xtts-requirements.txt`（不裝 Coqui 中文 extras、jieba、pypinyin）。設定 `STUDYDY_PODCAST_TTS_PYTHON`（該環境的 python）、`STUDYDY_XTTS_MODEL_DIR`（[coqui/XTTS-v2@6c2b0d75](https://huggingface.co/coqui/XTTS-v2/tree/6c2b0d75eae4b7047358e3b6bd9325f857d43f77) 的 config.json、vocab.json、model.pth、speakers_xtts.pth）、`STUDYDY_XTTS_CKIP_MODEL_DIR`（[ckiplab/bert-base-chinese-ws@60c22ced](https://huggingface.co/ckiplab/bert-base-chinese-ws)）、`STUDYDY_XTTS_CKIP_TOKENIZER_DIR`（[google-bert/bert-base-chinese@8f23c25b](https://huggingface.co/google-bert/bert-base-chinese) 的 tokenizer 檔）、`STUDYDY_XTTS_CEDICT`（[CC-CEDICT](https://www.mdbg.net/chinese/dictionary?page=cc-cedict) 的 `cedict_1_0_ts_utf-8_mdbg.txt.gz`）、`STUDYDY_XTTS_UNIHAN`（[Unicode Unihan.zip](https://www.unicode.org/Public/UCD/latest/ucd/Unihan.zip)），並設 `HF_HUB_OFFLINE=1`。
+XTTS-v2 權重採 Coqui Public Model License，不得商用，只用於競賽展示。`/audio` 與 `/media-transcribe` 共用 GPU 鎖；每次請求啟動子程序載入模型，結束釋放 GPU。
 服務預設 `127.0.0.1:18091`。容器使用主機服務時，須由部署者設定可達的監聽位址與存取邊界。
-短錄音與對齊使用 CPU；影音轉寫使用 GPU，部署前須與同機其他工作安排資源使用時段。
+短錄音與對齊使用 CPU；影音轉寫與語音合成使用 GPU，部署前須與同機其他工作安排資源使用時段。
 SearXNG 由競賽 project 的 `research-search` 提供，不使用正式站的 provider 或搜尋服務。
 
 文字模型執行參數需符合 runtime lock，包含 `--max-model-len 65536`。
-Podcast 完成結果是可閱讀講稿；語音問答接受錄音，回答以文字與引用呈現。
+Podcast 完成結果是講稿與音訊（可選影片）；語音問答接受錄音，回答以文字與引用呈現並逐句配音。影片分鏡由設定的文字模型生成。
 
 不需 AI 的驗證包含 auth、ownership、上傳、normalization／download、private no-store
 與公開 HTTPS。真 AI generation／retry／map generation 標記 DEFERRED_AI_VALIDATION。

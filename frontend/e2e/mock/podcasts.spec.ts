@@ -82,7 +82,7 @@ test("management menu renames with conflict recovery; deletion needs confirmatio
   await page.getByRole("button", { name: "刪除 Podcast", exact: true }).click();
   await page.getByRole("button", { name: "確認刪除 Podcast" }).click();
   await expect(page.getByRole("heading", { name: "讓教材說給你聽" })).toBeVisible();
-  await expect(page.getByText("挑選概念，選擇雙人對談或單人解說。生成講稿後保存在你的帳號，隨時可以閱讀。")).toBeVisible();
+  await expect(page.getByText("挑選概念，選擇雙人對談或單人解說，也可勾選教學影片。生成後保存在你的帳號，隨時可以再聽。")).toBeVisible();
   expect(fixture.deletes()).toBe(1);
   expect(await page.evaluate(key => localStorage.getItem(key), positionKey)).toBeNull();
 });
@@ -224,11 +224,15 @@ test("podcast creation keeps manual selection and settings without recommendatio
     return json(route, fixture.view, 201);
   });
   await controls.getByRole('button', { name: '講解設定', exact: true }).click();
-  await expect(page.locator('.cards-create-summary')).toContainText('講稿');
+  // 影片預設不勾；勾選後才隨音訊生成。
+  const videoOption = page.getByRole('checkbox', { name: /同時生成教學影片/ });
+  await expect(videoOption).not.toBeChecked();
+  await expect(page.locator('.cards-create-summary')).toContainText('只有音訊');
+  await videoOption.check();
   await page.getByRole('button', { name: '開始生成 Podcast' }).click();
   await expect(page).toHaveURL(new RegExp(`/materials/${materialId}/podcasts/${podcastId}$`));
   expect(body.concept_ids).toEqual([first.concept_id]); expect(body.delivery).toBe('solo'); expect(body).not.toHaveProperty('mode');
-  expect(body.video).toBe(false);
+  expect(body.video).toBe(true);
   await expect(page.getByRole('tablist', { name: '教材學習內容' })).toBeVisible();
 });
 

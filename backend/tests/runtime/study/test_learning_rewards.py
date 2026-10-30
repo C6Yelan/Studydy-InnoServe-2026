@@ -46,7 +46,7 @@ def ready_podcast(fixture):
         owner, fixture["source"].material_id, fixture["document"]["revision"], "合成教學",
         [c["concept_id"] for c in fixture["document"]["concepts"]], "podcast", delivery="solo", dsn=dsn,
     )["podcast_id"]
-    from test_podcasts import complete_media as complete
+    from test_podcasts import complete
 
     complete(dsn)
     with database_session(dsn) as db:
@@ -178,7 +178,7 @@ def test_podcast_quest_reads_episode_lists_saved_with_nul_text(closed_loop):
 
 
 def test_transcript_only_podcast_is_not_a_quest(closed_loop):
-    """競賽版只有講稿、沒有音訊的節目無法收聽，不可出現在今日任務。"""
+    """先前只產講稿、沒有音訊的節目無法收聽，不可出現在今日任務。"""
     fixture = concept_fixture(closed_loop, 2)
     podcast = ready_podcast(fixture)
     with database_session(fixture["dsn"]) as db:

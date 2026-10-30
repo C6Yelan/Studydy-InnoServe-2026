@@ -8,7 +8,7 @@ import pytest
 from fastapi.testclient import TestClient
 from sqlalchemy import select, func, text
 from product_fixtures import closed_loop, seed_run, _structure, publish_fixture_structure
-from materials.test_podcasts import create, complete_media as complete, wav, seed_saved_audio
+from materials.test_podcasts import create, complete, wav
 from materials.test_podcast_videos import bundle
 from runtime import podcasts, podcast_scenes as scenes, podcast_videos as videos, voice
 from runtime.api.app import create_app, ApiSettings
@@ -36,7 +36,7 @@ def beats(fixture, *, spoken=None):
             script={'schema':SCHEMA,'provider':'synthetic','segments':[{'beat_id':'beat-0','title':'整合教學重點','turns':turns}],
                 'review':{k:{'passed':True,'reason':'synthetic'} for k in ('correctness','teaching_quality')}}
             podcasts.finish_step(state,script=script,dsn=dsn)
-        seed_saved_audio(dsn, saved['podcast_id'], state['index'])
+        else:podcasts.finish_step(state,audio=wav(),audio_provider='synthetic',audio_mastering=MASTERING,dsn=dsn)
     return podcasts.read_podcast(owner.learner_id,saved['podcast_id'],dsn=dsn)
 
 

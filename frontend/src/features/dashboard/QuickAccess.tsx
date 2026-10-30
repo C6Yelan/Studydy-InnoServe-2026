@@ -14,7 +14,7 @@ function useLastPodcast(apiClient: StudydyApiClient): LastPodcast | null {
   useEffect(() => {
     let cancelled = false;
     void apiClient.listPodcasts().then(async ({ podcasts }) => {
-      // 競賽版只產生講稿，沒有音訊就沒有收聽進度可讀（伺服器回 404）。
+      // 先前只產講稿的節目沒有音訊，也就沒有收聽進度可讀（伺服器回 404）。
       const ready = podcasts.filter((item) => item.status === "ready" && item.duration_seconds !== null);
       const read = await Promise.all(ready.map((podcast) => apiClient.getPodcastProgress(podcast.podcast_id).then(
         (progress) => ({ podcast, progress }), () => null)));

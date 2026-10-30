@@ -67,7 +67,8 @@ def test_gemma_answers_keep_verified_sources_for_each_input(closed_loop, gemma_h
     assert voice.step(dsn=dsn)
     view = voice.read(owner, conversation, dsn=dsn)
     saved = view["turns"][0]
-    assert saved["turn_id"] == turn["turn_id"] and saved["status"] == "ready"
+    # 語音模式的已核對回答接著逐句配音；文字模式直接完成。
+    assert saved["turn_id"] == turn["turn_id"] and saved["status"] == ("ready" if input_kind == "text" else "speaking")
     assert saved["answer"]["text"] == "堆疊採用後進先出。" and saved["answer"]["supported"]
     assert saved["answer"]["provider"] == "vllm:" + configured_lock()["semantic_service"]["model_id"]
     assert all(reference["page"] >= 1 and reference["evidence_id"] for citation in saved["answer"]["citations"] for reference in citation["evidence"])

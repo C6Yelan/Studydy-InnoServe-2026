@@ -121,7 +121,7 @@ def test_existing_records_are_derived_retroactively(closed_loop, tmp_path, monke
     # 兩集節目（單人主持）都在凌晨 3 點聽完。
     identity = podcasts.create_podcast(owner, material, revision, "合成教學",
         [c["concept_id"] for c in f["document"]["concepts"]], "podcast", delivery="solo", dsn=dsn)["podcast_id"]
-    from test_podcasts import complete_media as complete
+    from test_podcasts import complete
 
     complete(dsn)
     night = datetime.combine(now.date(), datetime.min.time(), TAIPEI) + timedelta(hours=3)

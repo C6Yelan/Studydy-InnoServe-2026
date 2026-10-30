@@ -8,7 +8,7 @@ import pytest
 from sqlalchemy import select
 
 from product_fixtures import closed_loop
-from materials.test_podcasts import create, script, wav, seed_saved_audio
+from materials.test_podcasts import create, script, wav
 from runtime import podcasts, podcast_process
 from functools import partial
 from runtime.podcast_worker import step
@@ -54,7 +54,8 @@ def test_cancel_or_delete_running_text_job_unblocks_next(closed_loop, monkeypatc
                 podcasts.change_podcast(owner.learner_id, identity, 'cancel', view['version'], dsn=dsn)
             else:
                 podcasts.delete_podcast(owner.learner_id, identity, dsn=dsn)
-            wait_until(lambda: podcasts.read_podcast(owner.learner_id, next_id, dsn=dsn)['status'] == 'ready', timeout=8)
+            # 下一筆的講稿完成即表示 worker 已解鎖；配音不在此案例範圍。
+            wait_until(lambda: podcasts.read_podcast(owner.learner_id, next_id, dsn=dsn)['episodes'][0]['script'], timeout=8)
             with database_session(dsn) as db:
                 row = db.get(Podcast, identity)
                 assert row.status == 'deleted' and row.lease_token is None
@@ -80,9 +81,10 @@ def test_cancel_deletes_completed_media_and_all_child_jobs_but_keeps_material(cl
         segments.append({'beat_id': f'beat-{index}', 'title': '合成重點', 'turns': [
             {'speaker': 'host', 'text': text, 'parts': [{'text': text, 'source_refs': [ref]}]}]})
     podcasts.finish_step(claimed, script={'schema':'podcast-script/v2','provider':'synthetic','segments':segments}, dsn=dsn)
-    seed_saved_audio(dsn, identity, claimed['index'])
+    claimed = podcasts.claim_step(dsn=dsn)
+    podcasts.finish_step(claimed, audio=wav(), audio_provider='synthetic', dsn=dsn)
     if all_audio_ready:
-        from materials.test_podcasts import complete_media as complete
+        from materials.test_podcasts import complete
         complete(dsn)
     view = podcasts.read_podcast(owner.learner_id, identity, dsn=dsn)
     assert view['generation']['active'] is True
@@ -100,10 +102,60 @@ def test_cancel_deletes_completed_media_and_all_child_jobs_but_keeps_material(cl
     assert podcasts.list_podcasts(owner.learner_id, dsn=dsn)['podcasts'] == []
 
 
-@pytest.mark.parametrize('expired', [False, True])
-def test_script_lease_tracks_worker_liveness_not_generation_duration(closed_loop, provider_server, expired):
+@pytest.mark.parametrize('action', ['cancel', 'delete'])
+def test_cancel_or_delete_running_audio_kills_child_and_unblocks_next(closed_loop, provider_server, monkeypatch, tmp_path, action):
+    from runtime import podcast_worker
     owner, _, _, _, dsn, _ = closed_loop
     identity = create(closed_loop)['podcast_id']
+    claimed = podcasts.claim_step(dsn=dsn)
+    podcasts.finish_step(claimed, script=script(claimed), dsn=dsn)
+    next_id = create(closed_loop, key='next-job')['podcast_id']
+    marker = tmp_path / 'started'
+    blocked = False
+
+    def generate_audio(body, *, cancelled=None):
+        nonlocal blocked
+        if not blocked:
+            blocked = True
+            podcast_process.run([sys.executable, '-c',
+                'import os,time,pathlib,sys;pathlib.Path(sys.argv[1]).write_text(str(os.getpid()));time.sleep(60)', str(marker)],
+                timeout=65, cancelled=cancelled)
+        return wav(), None
+
+    monkeypatch.setattr(provider, 'audio', generate_audio)
+    monkeypatch.setattr(podcast_worker, 'script', lambda body: script({'episode': {'claims': body['claims']}}))
+    monkeypatch.setattr(podcast_worker.podcast_titles, 'generate', lambda *args, **kwargs: None)
+    worker = BackgroundWorker(partial(step, dsn=dsn), name='test-podcast', error_code='PODCAST_WORKER_FAILED').start()
+    try:
+        wait_until(lambda: marker.exists() and marker.stat().st_size)
+        pid = int(marker.read_text())
+        view = podcasts.read_podcast(owner.learner_id, identity, dsn=dsn)
+        if action == 'cancel':
+            podcasts.change_podcast(owner.learner_id, identity, 'cancel', view['version'], dsn=dsn)
+        else:
+            podcasts.delete_podcast(owner.learner_id, identity, dsn=dsn)
+        wait_until(lambda: not alive(pid), timeout=4)
+        wait_until(lambda: podcasts.read_podcast(owner.learner_id, next_id, dsn=dsn)['status'] == 'ready', timeout=8)
+        with database_session(dsn) as db:
+            row = db.get(Podcast, identity)
+            assert row.status == 'deleted' and row.lease_token is None
+            assert not any(episode.get('audio') for episode in row.episodes)
+    finally:
+        with database_session(dsn) as db:
+            for row in db.scalars(select(Podcast).where(Podcast.status.in_(['pending', 'running']))):
+                row.status = 'cancelled'
+                row.lease_token = row.lease_expires_at = None
+        worker.stop()
+        worker.thread.join(timeout=7)
+        assert not worker.thread.is_alive()
+
+
+@pytest.mark.parametrize('expired', [False, True])
+def test_audio_lease_tracks_worker_liveness_not_generation_duration(closed_loop, provider_server, expired):
+    owner, _, _, _, dsn, _ = closed_loop
+    identity = create(closed_loop)['podcast_id']
+    claimed = podcasts.claim_step(dsn=dsn)
+    podcasts.finish_step(claimed, script=script(claimed), dsn=dsn)
     claimed = podcasts.claim_step(dsn=dsn)
     old_expiry = datetime.now(UTC) + timedelta(seconds=-1 if expired else 4)
     with database_session(dsn) as db:
@@ -132,7 +184,7 @@ def test_script_lease_tracks_worker_liveness_not_generation_duration(closed_loop
 
 @pytest.mark.parametrize('model', [PodcastVideo, PodcastScenes])
 def test_child_lease_renews_and_delete_still_cancels(closed_loop, provider_server, model):
-    from materials.test_podcasts import complete_media as complete
+    from materials.test_podcasts import complete
     from uuid import UUID, uuid4
     owner, _, _, _, dsn, _ = closed_loop
     identity = create(closed_loop, video=True)['podcast_id']
@@ -161,7 +213,7 @@ def test_child_lease_renews_and_delete_still_cancels(closed_loop, provider_serve
 
 
 def test_preview_requires_all_media_and_retry_preserves_ready_episodes(closed_loop):
-    from materials.test_podcasts import complete_media as complete
+    from materials.test_podcasts import complete
     owner, _, _, _, dsn, _ = closed_loop
     identity = create(closed_loop, video=True)['podcast_id']
     with database_session(dsn) as db:

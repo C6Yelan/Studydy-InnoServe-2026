@@ -5,6 +5,7 @@ from contextvars import ContextVar
 from http.client import HTTPConnection, HTTPSConnection
 from io import BytesIO
 import json
+import math
 import os
 from socket import SHUT_RDWR
 from threading import Lock
@@ -131,7 +132,7 @@ def provider_error_code(error):
         return None
 
 
-def provider(path, body):
+def provider(path, body, *, timings=None):
     if path == "/scene-check":
         from .podcast_script_generation import object_schema
         from .semantic_service import generate
@@ -156,6 +157,15 @@ def provider(path, body):
     try:
         with generation_response(request) as response:
             data = response.read(20 * 1024 * 1024 + 1)
+            if timings is not None:
+                try:
+                    measured = json.loads(response.headers.get("X-Studydy-Audio-Timings", ""))
+                    if (set(measured) != {"tts_queue_ms", "tts_synthesis_ms"}
+                        or any(type(value) not in (int,float) or not math.isfinite(value) or value < 0 for value in measured.values())):
+                        raise ValueError()
+                except (TypeError, ValueError):
+                    raise SourceError("VOICE_PROVIDER_FAILED") from None
+                timings.update(measured)
     except HTTPError as error:
         code = provider_error_code(error)
         if code in {
@@ -171,5 +181,5 @@ def provider(path, body):
         ) from None
     if len(data) > 20 * 1024 * 1024:
         raise SourceError("VOICE_PROVIDER_FAILED")
-    result = json.loads(data)
+    result = data if path == "/audio" else json.loads(data)
     return result

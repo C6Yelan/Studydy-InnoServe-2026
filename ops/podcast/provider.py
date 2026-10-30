@@ -1,4 +1,4 @@
-"""獨立語音辨識與對齊服務。"""
+"""獨立語音合成、辨識與對齊服務。"""
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from hmac import compare_digest
 import json
@@ -7,9 +7,43 @@ from pathlib import Path
 import sys
 import tempfile
 from threading import Lock
+import time
 sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "backend/src"))
 from runtime import podcast_process
 ASR_LOCK = Lock()
+# 語音合成與教材辨識都使用顯示卡，共用同一把 GPU 鎖。
+GPU_LOCK = Lock()
+AUDIO_PROVIDER = "XTTS-v2@6c2b0d75;official-speakers;ckip-cc-cedict-pinyin/v1;spoken-input/v15;dynamic-pauses/v2;podcast-mastering/v1"
+
+
+def audio(body, *, cancelled=None):
+    # Podcast 由使用者取消或程序結果結束，不用固定秒數終止長音訊。
+    with tempfile.TemporaryDirectory(prefix="studydy-podcast-audio-") as directory:
+        output = Path(directory) / "audio.wav"
+        result = podcast_process.run(
+            [
+                os.environ["STUDYDY_PODCAST_TTS_PYTHON"],
+                str(Path(__file__).with_name("synthesize.py")),
+                str(output),
+            ],
+            input=json.dumps(body, ensure_ascii=False),
+            timeout=None,
+            cancelled=cancelled,
+            env={
+                k: v
+                for k, v in os.environ.items()
+                if k != "STUDYDY_PODCAST_PROVIDER_TOKEN"
+            },
+        )
+        if result.returncode != 0 or not output.is_file():
+            raise RuntimeError("PODCAST_AUDIO_INVALID")
+        data = output.read_bytes()
+        if len(data) < 44 or data[:4] != b"RIFF" or data[8:12] != b"WAVE":
+            raise RuntimeError("PODCAST_AUDIO_INVALID")
+        metadata = None
+        if body.get("purpose") == "podcast":
+            metadata = json.loads(output.with_suffix(".json").read_text())
+        return data, metadata
 
 
 def transcribe(body, *, cancelled=None):
@@ -137,7 +171,7 @@ class Handler(BaseHTTPRequestHandler):
         if not compare_digest(self.headers.get("Authorization", ""), expected):
             self.send_error(401)
             return
-        routes = {"/transcribe": transcribe, "/media-transcribe": media_transcribe, "/align": align_audio}
+        routes = {"/audio": audio, "/transcribe": transcribe, "/media-transcribe": media_transcribe, "/align": align_audio}
         if self.path not in {*routes, "/jobs/cancel", "/jobs/progress"}:
             self.send_error(404)
             return
@@ -152,21 +186,40 @@ class Handler(BaseHTTPRequestHandler):
             elif self.path == "/jobs/progress":
                 result = podcast_process.progress(body)
             else:
+                lock = GPU_LOCK if self.path in {"/audio", "/media-transcribe"} else ASR_LOCK
                 with podcast_process.job(body) as cancelled:
-                    with podcast_process.tracked_lock(ASR_LOCK, cancelled, body, self.path):
+                    queued = time.monotonic()
+                    with podcast_process.tracked_lock(lock, cancelled, body, self.path):
+                        started = time.monotonic()
                         result = routes[self.path](body, cancelled=cancelled)
+                    podcast_process.check(cancelled)
+                if self.path == "/audio":
+                    data, metadata = result
+                    headers = {
+                        "X-Studydy-Audio-Timings": json.dumps({
+                            "tts_queue_ms": (started - queued) * 1000,
+                            "tts_synthesis_ms": (time.monotonic() - started) * 1000,
+                        }),
+                        "X-Studydy-Audio-Provider": AUDIO_PROVIDER,
+                    }
+                    if metadata:
+                        headers["X-Studydy-Audio-Mastering"] = json.dumps(metadata, separators=(",", ":"))
+                    self.respond(data, media="audio/wav", headers=headers)
+                    return
             self.respond(result)
         except Exception as error:
             code = str(error)
-            if code not in {"REQUEST_INVALID", "VOICE_TRANSCRIPT_INVALID", "MEDIA_TRANSCRIPT_FAILED", "SCENE_ALIGNMENT_FAILED", "PODCAST_CANCELLED"}:
+            if code not in {"REQUEST_INVALID", "VOICE_TRANSCRIPT_INVALID", "PODCAST_AUDIO_INVALID", "MEDIA_TRANSCRIPT_FAILED", "SCENE_ALIGNMENT_FAILED", "PODCAST_CANCELLED"}:
                 code = "VOICE_PROVIDER_FAILED"
             self.respond({"error_code": code}, 502)
 
-    def respond(self, result, status=200):
-        data = json.dumps(result, ensure_ascii=False).encode()
+    def respond(self, result, status=200, *, media="application/json", headers=None):
+        data = result if media != "application/json" else json.dumps(result, ensure_ascii=False).encode()
         self.send_response(status)
-        self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Type", media)
         self.send_header("Content-Length", str(len(data)))
+        for key, value in (headers or {}).items():
+            self.send_header(key, value)
         self.end_headers()
         self.wfile.write(data)
 
