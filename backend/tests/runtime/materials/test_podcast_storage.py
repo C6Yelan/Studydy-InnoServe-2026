@@ -14,7 +14,7 @@ from sqlalchemy import select
 
 import runtime.api.app as api
 from product_fixtures import closed_loop  # noqa: F401
-from materials.test_podcasts import create, complete_media as complete, script, seed_saved_audio
+from materials.test_podcasts import create, complete, script
 from materials.test_podcast_videos import bundle
 from runtime import (
     media_sources,
@@ -63,7 +63,8 @@ def client_for(fixture):
 def finish_audio(dsn, audio):
     state = podcasts.claim_step(dsn=dsn)
     assert podcasts.finish_step(state, script=script(state), dsn=dsn)
-    seed_saved_audio(dsn, state["podcast_id"], state["index"], audio)
+    state = podcasts.claim_step(dsn=dsn)
+    assert podcasts.finish_step(state, audio=audio, audio_provider="synthetic-test", dsn=dsn)
 
 
 def test_flac_codec_restores_exact_wav_and_rejects_damage():
@@ -243,25 +244,25 @@ def test_full_account_blocks_new_files_but_replays_reading_and_deletion_continue
     single = {"Origin": ORIGIN, "Content-Type": "text/plain", "X-Material-Name": "note.txt", "Idempotency-Key": "note"}
     first = client.post(f"/v1/materials/{draft}/sources", content="一二三四".encode(), headers=single)
     assert first.status_code == 202, first.text
-    body = {"schema": "podcast-create/v1", "name": "節目", "delivery": "solo", "video": False,
+    body = {"schema": "podcast-create/v1", "name": "節目", "delivery": "solo", "video": True,
             "knowledge_structure_revision": document["revision"],
             "concept_ids": [c["concept_id"] for c in document["concepts"]]}
     url = f"/v1/materials/{source.material_id}/podcasts"
     created = client.post(url, headers={"Origin": ORIGIN, "Idempotency-Key": "first-podcast"}, json=body)
     assert created.status_code == 201
     identity = created.json()["podcast_id"]
-    # 明確建立已保存媒體與其影片工作；新講稿不預留媒體空間。
-    from uuid import UUID
-    with database_session(dsn) as db:
-        db.get(Podcast, UUID(identity)).video_enabled = True
-    complete(dsn)
-    assert storage(client)["reserved_bytes"] == storage_usage.DEFAULT_EPISODE_VIDEO_BYTES
+    # 每集預估：全站還沒有成品時用預設值；未產生的分集以音訊＋影片預估保留。
+    assert storage(client)["reserved_bytes"] == storage_usage.DEFAULT_EPISODE_AUDIO_BYTES + storage_usage.DEFAULT_EPISODE_VIDEO_BYTES
     monkeypatch.setattr(storage_usage, "ACCOUNT_STORAGE_LIMIT_BYTES", storage(client)["used_bytes"])
     # 冪等重送：先回傳原結果，不因帳號隨後額滿而失敗。
     assert client.post(f"/v1/materials/{draft}/sources", content="一二三四".encode(), headers=single).json() == first.json()
     assert client.post(url, headers={"Origin": ORIGIN, "Idempotency-Key": "first-podcast"}, json=body).json()["podcast_id"] == identity
+    blocked = client.post(url, headers={"Origin": ORIGIN, "Idempotency-Key": "second-podcast"}, json=body)
+    assert blocked.status_code == 409 and blocked.json()["reason_code"] == "STORAGE_QUOTA_EXCEEDED"
     other = client.post(f"/v1/materials/{draft}/sources", content="五六".encode(), headers={**single, "Idempotency-Key": "other"})
     assert other.json()["reason_code"] == "STORAGE_QUOTA_EXCEEDED"
+    # 已接受的節目照常產檔：實際成品取代保留額度。
+    complete(dsn)
     usage = storage(client)
     with database_session(dsn) as db:
         audio = db.scalar(select(Artifact.size_bytes).where(Artifact.kind == "podcast_audio"))
@@ -313,6 +314,9 @@ def test_podcast_without_video_never_backfills_videos(closed_loop):
 def legacy_wav_podcast(fixture, monkeypatch, *, key):
     """以舊版保存方式（audio/wav）建立已完成影片與分鏡對齊的節目。"""
     owner, _, _, _, dsn, _ = fixture
+    encode, media = podcasts.wav_to_flac, podcasts.FLAC_MEDIA_TYPE
+    monkeypatch.setattr(podcasts, "wav_to_flac", lambda audio: audio)
+    monkeypatch.setattr(podcasts, "FLAC_MEDIA_TYPE", "audio/wav")
     identity = create(fixture, video=True, key=key)["podcast_id"]
     wav = ffmpeg_wav()
     while state := podcasts.claim_step(dsn=dsn):
@@ -326,7 +330,10 @@ def legacy_wav_podcast(fixture, monkeypatch, *, key):
                     {"beat_id": "beat-0", "title": "整合教學重點", "turns": turns}],
                 "review": {k: {"passed": True, "reason": "synthetic"} for k in ("correctness", "teaching_quality")}},
                 dsn=dsn)
-        seed_saved_audio(dsn, identity, state["index"], wav, media_type="audio/wav")
+        else:
+            podcasts.finish_step(state, audio=wav, audio_provider="synthetic", dsn=dsn)
+    monkeypatch.setattr(podcasts, "wav_to_flac", encode)
+    monkeypatch.setattr(podcasts, "FLAC_MEDIA_TYPE", media)
     monkeypatch.setattr(videos, "provider", lambda state, audio: bundle(state))
     assert videos.step(dsn=dsn)
     state = scenes.claim(dsn=dsn)
@@ -581,8 +588,7 @@ def test_reservations_are_fixed_at_acceptance_and_settled_with_the_artifact(clos
 
     owner, source, _, _, dsn, _ = closed_loop
     identity = create(closed_loop, video=True)["podcast_id"]
-    complete(dsn)
-    estimate = storage_usage.DEFAULT_EPISODE_VIDEO_BYTES
+    estimate = storage_usage.DEFAULT_EPISODE_AUDIO_BYTES + storage_usage.DEFAULT_EPISODE_VIDEO_BYTES
     assert storage_usage.account_usage(owner.learner_id, dsn=dsn)["reserved_bytes"] == estimate
     # 其他帳號的成品改變全站平均，不重新定價已接受的工作。
     with psycopg.connect(dsn) as connection:
@@ -592,7 +598,8 @@ def test_reservations_are_fixed_at_acceptance_and_settled_with_the_artifact(clos
             (owner.learner_id, source.material_id, b"9" * 32, 7))
     usage = storage_usage.account_usage(owner.learner_id, dsn=dsn)
     assert usage["reserved_bytes"] == estimate
-    # 影片尚未完成，固定保留額度仍在。
+    # 成品寫入的同一交易刪除該集音訊保留，改計實際大小；影片保留仍在。
+    complete(dsn)
     after = storage_usage.account_usage(owner.learner_id, dsn=dsn)
     with database_session(dsn) as db:
         kinds = db.scalars(text("SELECT kind FROM storage_reservations WHERE podcast_id = :p"), {"p": identity}).all()
@@ -763,10 +770,10 @@ def test_account_then_material_lock_order_has_no_deadlock(closed_loop, monkeypat
         assert inside.wait(5)
         podcast = pool.submit(podcasts.create_podcast, owner.learner_id, source.material_id, document["revision"],
                               "鎖順序", [c["concept_id"] for c in document["concepts"]], "lock-podcast",
-                              delivery="solo", video=False, dsn=dsn)
+                              delivery="solo", video=True, dsn=dsn)
         video = pool.submit(videos.prepare, owner.learner_id, identity, 0, dsn=dsn)
         assert upload.result(timeout=30) is not None
-        assert podcast.result(timeout=30)["video_enabled"] is False
+        assert podcast.result(timeout=30)["video_enabled"] is True
         assert video.result(timeout=30)["status"] == "pending"
 
 
@@ -778,6 +785,9 @@ def test_requeue_and_prepare_only_reserve_jobs_that_are_really_queued(closed_loo
     with database_session(dsn) as db:
         row = db.get(Podcast, identity)
         row.episodes = [deepcopy(row.episodes[0]) for _ in range(2)]
+        # 合成兩集節目：補上建立時第二集應有的保留。
+        for kind in ("podcast_audio", "podcast_video"):
+            storage_usage.reserve(db, owner.learner_id, row.material_id, kind, 10, podcast_id=identity, episode_index=1)
     complete(dsn)
 
     def video_reservations():
@@ -785,24 +795,26 @@ def test_requeue_and_prepare_only_reserve_jobs_that_are_really_queued(closed_loo
             return db.scalars(text("SELECT episode_index FROM storage_reservations "
                                    "WHERE podcast_id = :p AND kind = 'podcast_video' ORDER BY episode_index"), {"p": identity}).all()
 
-    # 第一集影片失敗後，第二集講稿也失敗；只有實際排入的影片才保留額度。
+    # 第一集影片失敗（同交易釋放影片保留），之後第二集音訊也失敗：整份節目 failed。
     state = videos.claim(dsn=dsn)
     assert videos.finish(state, error="VIDEO_RENDER_FAILED", dsn=dsn)
     claim = podcasts.claim_step(dsn=dsn)
+    podcasts.finish_step(claim, script=script(claim), dsn=dsn)
+    claim = podcasts.claim_step(dsn=dsn)
     podcasts.finish_step(claim, error="PODCAST_PROVIDER_FAILED", dsn=dsn)
     view = podcasts.read_podcast(owner.learner_id, identity, dsn=dsn)
-    assert view["status"] == "failed" and video_reservations() == []
+    assert view["status"] == "failed" and video_reservations() == [1]
     # Codex 反例：接續生成同時恢復 failed 影片並重新保留，不必再按一次。
     podcasts.change_podcast(owner.learner_id, identity, "retry", view["version"], dsn=dsn)
     assert videos.read(owner.learner_id, identity, 0, dsn=dsn)["status"] == "pending"
-    assert video_reservations() == [0]
+    assert video_reservations() == [0, 1]
     # 取消後同來源的 prepare 不會排隊，也不占額度。
     state = videos.read(owner.learner_id, identity, 0, dsn=dsn)
     videos.action(owner.learner_id, identity, 0, "cancel", state["version"], dsn=dsn)
-    assert video_reservations() == []
+    assert video_reservations() == [1]
     before = storage_usage.account_usage(owner.learner_id, dsn=dsn)["used_bytes"]
     assert videos.prepare(owner.learner_id, identity, 0, dsn=dsn)["status"] == "cancelled"
-    assert video_reservations() == []
+    assert video_reservations() == [1]
     assert storage_usage.account_usage(owner.learner_id, dsn=dsn)["used_bytes"] == before
 
 

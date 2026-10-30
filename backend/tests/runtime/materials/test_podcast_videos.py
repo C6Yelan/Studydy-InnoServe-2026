@@ -8,7 +8,7 @@ import pytest
 from fastapi.testclient import TestClient
 from sqlalchemy import select
 from product_fixtures import closed_loop
-from materials.test_podcasts import create,complete_media as complete
+from materials.test_podcasts import create,complete
 from runtime import podcasts,podcast_videos as videos
 from runtime.api.app import ApiSettings,create_app
 from runtime.learner_session import register_account
@@ -179,20 +179,19 @@ def test_material_removal_cascades_video_and_quarantines_media(closed_loop):
 
 
 @pytest.mark.parametrize('delivery',['solo','dialogue'])
-def test_saved_media_video_keeps_original_roles(closed_loop,delivery):
+def test_delivery_automatically_queues_video_and_keeps_original_roles(closed_loop,delivery):
     owner,source,_,document,dsn,_=closed_loop
     saved=podcasts.create_podcast(owner.learner_id,source.material_id,document['revision'],'合成模式驗證',
-        [c['concept_id'] for c in document['concepts']],'video-delivery-'+delivery,delivery=delivery,dsn=dsn)
-    with database_session(dsn) as db:
-        db.get(Podcast, saved['podcast_id']).video_enabled = True
+        [c['concept_id'] for c in document['concepts']],'video-delivery-'+delivery,delivery=delivery,video=True,dsn=dsn)
     state=podcasts.claim_step(dsn=dsn)
     script={'provider':'synthetic','segments':[{'claim_id':c['claim_id'],'turns':
         [{'speaker':'host','text':'這個觀念要如何解釋？'},{'speaker':'guest','text':c['text']}]
         if delivery=='dialogue' else [{'speaker':'host','text':c['text']}]}
         for c in state['episode']['claims']]}
     assert podcasts.finish_step(state,script=script,dsn=dsn)
-    from materials.test_podcasts import seed_saved_audio
-    seed_saved_audio(dsn, saved['podcast_id'], state['index'])
+    from materials.test_podcasts import wav
+    state=podcasts.claim_step(dsn=dsn)
+    assert podcasts.finish_step(state,audio=wav(),audio_provider='synthetic',dsn=dsn)
     assert videos.read(owner.learner_id,saved['podcast_id'],0,dsn=dsn)['status']=='pending'
     state=videos.claim(dsn=dsn);assert videos.finish(state,bundle=bundle(state),dsn=dsn)
     manifest=videos.ready_manifest(owner.learner_id,saved['podcast_id'],0,dsn=dsn)

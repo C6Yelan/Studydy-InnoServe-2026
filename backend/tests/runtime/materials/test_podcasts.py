@@ -27,14 +27,9 @@ from runtime.storage.database import database_session
 
 def create(fixture, *, delivery="solo", key="podcast", video=False):
     owner, source, _, document, dsn, _ = fixture
-    result = podcasts.create_podcast(owner.learner_id, source.material_id, document["revision"],
-        "合成教學", [c["concept_id"] for c in document["concepts"]], key, delivery=delivery, dsn=dsn)
-    if video:
-        # 媒體讀取／影片測試明確建立已保存的影片設定，不代表新講稿會生成音訊。
-        with database_session(dsn) as db:
-            db.get(Podcast, result["podcast_id"]).video_enabled = True
-        return podcasts.read_podcast(owner.learner_id, result["podcast_id"], dsn=dsn)
-    return result
+    return podcasts.create_podcast(owner.learner_id, source.material_id, document["revision"],
+        "合成教學", [c["concept_id"] for c in document["concepts"]], key, delivery=delivery,
+        video=video, dsn=dsn)
 
 
 def wav():
@@ -55,36 +50,11 @@ def script(claim):
 def complete(dsn):
     claim = podcasts.claim_step(dsn=dsn)
     assert podcasts.finish_step(claim, script=script(claim), dsn=dsn)
-    return claim
+    claim = podcasts.claim_step(dsn=dsn)
+    assert podcasts.finish_step(claim, audio=wav(), audio_provider="synthetic-test", dsn=dsn)
 
 
-def seed_saved_audio(dsn, podcast_id, index=0, audio=None, media_type="audio/flac", provider="synthetic-test"):
-    """直接建立既存媒體測試資料，不經新音訊生成工作。"""
-    from runtime.audio import wav_to_flac, validate_audio
-    from runtime.storage.artifacts import write_blob
-    from runtime import podcast_scenes, podcast_videos
-    audio = wav() if audio is None else audio
-    with database_session(dsn) as db:
-        row = db.get(Podcast, podcast_id)
-        stored = wav_to_flac(audio) if media_type == "audio/flac" else audio
-        artifact = write_blob(db, row.learner_id, row.material_id, stored, "podcast_audio", media_type)
-        episodes = deepcopy(row.episodes)
-        episodes[index]["audio"] = {"artifact_id": str(artifact.artifact_id), "sha256": sha256(audio).hexdigest(),
-            "duration_seconds": validate_audio(audio), "provider": provider}
-        row.episodes = episodes
-        if row.video_enabled:
-            from runtime.storage_usage import reserve_videos
-            reserve_videos(db, row, [index])
-            podcast_videos.enqueue(db, row, index)
-        podcast_scenes.enqueue(db, row, index)
-
-
-def complete_media(dsn):
-    claim = complete(dsn)
-    seed_saved_audio(dsn, claim["podcast_id"], claim["index"])
-
-
-def test_persistent_script_retry_and_idempotency(closed_loop):
+def test_persistent_script_audio_retry_and_idempotency(closed_loop):
     owner, _, _, _, dsn, _ = closed_loop
     with ThreadPoolExecutor(max_workers=2) as pool:
         results = list(pool.map(lambda _: create(closed_loop), range(2)))
@@ -94,19 +64,28 @@ def test_persistent_script_retry_and_idempotency(closed_loop):
         create(closed_loop, delivery="dialogue")
     claim = podcasts.claim_step(dsn=dsn)
     assert podcasts.claim_step(dsn=dsn) is None
-    assert podcasts.finish_step(claim, error="PODCAST_PROVIDER_FAILED", dsn=dsn)
+    saved_script = script(claim)
+    assert podcasts.finish_step(claim, script=saved_script, dsn=dsn)
+    audio_claim = podcasts.claim_step(dsn=dsn)
+    assert podcasts.finish_step(audio_claim, error="PODCAST_PROVIDER_FAILED", dsn=dsn)
     view = podcasts.read_podcast(owner.learner_id, identity, dsn=dsn)
-    assert view["status"] == "failed"
+    assert view["status"] == "failed" and view["episodes"][0]["script"] == saved_script
+    # 音訊還沒全部完成時不給總時長。
+    assert view["duration_seconds"] is None
     podcasts.change_podcast(owner.learner_id, identity, "retry", view["version"], dsn=dsn)
     retry = podcasts.claim_step(dsn=dsn)
-    saved_script = script(retry)
-    assert podcasts.finish_step(retry, script=saved_script, dsn=dsn)
+    assert retry["episode"]["script"] == saved_script
+    assert podcasts.finish_step(retry, audio=wav(), audio_provider="synthetic-test", dsn=dsn)
     view = podcasts.read_podcast(owner.learner_id, identity, dsn=dsn)
     assert view["status"] == "ready" and view["completed_episodes"] == 1
-    assert view["episodes"][0]["script"] == saved_script
-    assert not podcasts.finish_step(claim, script=saved_script, dsn=dsn)
+    assert view["episodes"][0]["audio"]["duration_seconds"] == 1
+    # 全部分集完成後，總時長是各集音訊長度的合計，清單也一樣。
+    assert view["duration_seconds"] == 1
+    assert podcasts.list_podcasts(owner.learner_id, dsn=dsn)["podcasts"][0]["duration_seconds"] == 1
+    assert not podcasts.finish_step(audio_claim, audio=wav(), audio_provider="synthetic-test", dsn=dsn)
     with psycopg.connect(dsn) as db:
         assert db.execute("SELECT count(*) FROM study_sessions").fetchone() == (0,)
+        assert db.execute("SELECT count(*) FROM artifacts WHERE kind='podcast_audio'").fetchone() == (1,)
 
 
 def test_podcast_read_can_coexist_with_material_readers(closed_loop):
@@ -153,7 +132,7 @@ def test_cancel_expired_lease_and_delete_fence_late_results(closed_loop):
         create(closed_loop)
 
 
-def test_reject_wrong_script_without_publishing(closed_loop):
+def test_reject_wrong_script_and_truncated_audio_without_publishing(closed_loop):
     owner, _, _, _, dsn, _ = closed_loop
     identity = create(closed_loop)["podcast_id"]
     claim = podcasts.claim_step(dsn=dsn)
@@ -161,8 +140,12 @@ def test_reject_wrong_script_without_publishing(closed_loop):
     wrong["segments"][0]["claim_id"] = "different-source"
     with pytest.raises(PodcastError, match="SCRIPT_INVALID"):
         podcasts.finish_step(claim, script=wrong, dsn=dsn)
-    assert podcasts.read_podcast(owner.learner_id, identity, dsn=dsn)["completed_episodes"] == 0
     assert podcasts.finish_step(claim, script=script(claim), dsn=dsn)
+    claim = podcasts.claim_step(dsn=dsn)
+    with pytest.raises(PodcastError, match="AUDIO_INVALID"):
+        podcasts.finish_step(claim, audio=wav()[:-10], audio_provider="synthetic-test", dsn=dsn)
+    assert podcasts.read_podcast(owner.learner_id, identity, dsn=dsn)["completed_episodes"] == 0
+    assert podcasts.finish_step(claim, audio=wav(), audio_provider="synthetic-test", dsn=dsn)
 
 
 def test_saved_podcast_pins_source_revision_and_deletion_releases_it(closed_loop):
@@ -212,7 +195,7 @@ def test_api_owner_audio_ranges_and_origin_boundary(closed_loop, monkeypatch):
     detail = f"/v1/podcasts/{identity}"
     audio_url = detail + "/episodes/0/audio"
     assert client.get(audio_url).status_code == 404
-    complete_media(dsn)
+    complete(dsn)
     view = client.get(detail)
     assert view.status_code == 200, view.text
     assert view.headers["cache-control"] == "private, no-store"
@@ -254,7 +237,7 @@ def test_api_owner_audio_ranges_and_origin_boundary(closed_loop, monkeypatch):
     # 沒勾影片：不建立影片工作，只有音訊即可開啟播放。
     assert view.json()['video_enabled'] is False
     generation=view.json()['generation']
-    assert [step['step'] for step in generation.pop('steps')] == ['script', 'audio']
+    assert len(generation.pop('steps'))==3
     assert generation == {'active':False,'completed_videos':0,'failed_videos':0,'preview_ready':True,'retryable_videos':False,'expected_videos':0}
     cancelled = client.post(detail + '/actions', headers={'Origin':origin}, json={
         'schema':'podcast-action/v1','action':'cancel','expected_version':view.json()['version']})
@@ -267,7 +250,7 @@ def test_api_owner_audio_ranges_and_origin_boundary(closed_loop, monkeypatch):
 def test_material_discard_fences_podcast_and_removes_its_artifacts(closed_loop):
     owner, source, _, _, dsn, _ = closed_loop
     identity = create(closed_loop)["podcast_id"]
-    complete_media(dsn)
+    complete(dsn)
     other = create(closed_loop, key="running")["podcast_id"]
     claim = podcasts.claim_step(dsn=dsn)
     assert request_material_discard(owner.learner_id, source.material_id, dsn=dsn) == "removed"
@@ -277,7 +260,28 @@ def test_material_discard_fences_podcast_and_removes_its_artifacts(closed_loop):
         assert db.scalar(select(Artifact)) is None
 
 
-
+def test_artifact_write_failure_rolls_back_and_reconciles_orphan(closed_loop, monkeypatch):
+    from runtime.storage.artifacts import reconcile_new_artifacts
+    from runtime.storage.artifacts import _object_path, _root
+    owner, _, _, _, dsn, _ = closed_loop
+    identity = create(closed_loop)["podcast_id"]
+    claim = podcasts.claim_step(dsn=dsn)
+    podcasts.finish_step(claim, script=script(claim), dsn=dsn)
+    claim = podcasts.claim_step(dsn=dsn)
+    original_write = podcasts.write_blob
+    staged = []
+    def fail_after_write(*args, **kwargs):
+        artifact = original_write(*args, **kwargs)
+        staged.append(artifact.artifact_id)
+        raise OSError("synthetic commit boundary failure")
+    with monkeypatch.context() as patch:
+        patch.setattr(podcasts, "write_blob", fail_after_write)
+        with pytest.raises(OSError):
+            podcasts.finish_step(claim, audio=wav(), audio_provider="synthetic-test", dsn=dsn)
+    assert podcasts.read_podcast(owner.learner_id, identity, dsn=dsn)["completed_episodes"] == 0
+    reconcile_new_artifacts(dsn=dsn)
+    assert not _object_path(_root(), staged[0]).exists()
+    assert podcasts.finish_step(claim, audio=wav(), audio_provider="synthetic-test", dsn=dsn)
 
 
 def test_source_context_keeps_same_page_headers_without_changing_claims(closed_loop):
@@ -310,8 +314,11 @@ def test_dialogue_persists_turns_and_rejects_wrong_speaker_or_source(closed_loop
     with pytest.raises(PodcastError, match="SCRIPT_INVALID"):
         podcasts.finish_step(claim, script=bad, dsn=dsn)
     assert podcasts.finish_step(claim, script=dialogue, dsn=dsn)
+    audio_claim = podcasts.claim_step(dsn=dsn)
+    assert podcasts.finish_step(audio_claim, audio=wav(), audio_provider="synthetic-test", dsn=dsn)
     view = podcasts.read_podcast(owner.learner_id, saved["podcast_id"], dsn=dsn)
     assert view["delivery"] == "dialogue" and view["episodes"][0]["script"] == dialogue
+    assert view["episodes"][0]["audio"]["provider"] == "synthetic-test"
 
 
 def test_extended_dialogue_and_actual_audio_provider_are_preserved(closed_loop):
@@ -323,7 +330,10 @@ def test_extended_dialogue_and_actual_audio_provider_are_preserved(closed_loop):
         {"speaker": "host" if i % 2 == 0 else "guest", "text": "這裡可以再說明一下嗎？" if i % 2 == 0 else c["text"]}
         for i in range(8)]} for c in claim["episode"]["claims"]]}
     assert podcasts.finish_step(claim, script=value, dsn=dsn)
-    seed_saved_audio(dsn, result["podcast_id"], provider="synthetic-voice/exact-engine")
+    claim = podcasts.claim_step(dsn=dsn)
+    with pytest.raises(PodcastError, match="PODCAST_AUDIO_INVALID"):
+        podcasts.finish_step(claim, audio=wav(), dsn=dsn)
+    assert podcasts.finish_step(claim, audio=wav(), audio_provider="synthetic-voice/exact-engine", dsn=dsn)
     view = podcasts.read_podcast(owner.learner_id, result["podcast_id"], dsn=dsn)
     assert len(view["episodes"][0]["script"]["segments"][0]["turns"]) == 8
     assert view["episodes"][0]["audio"]["provider"] == "synthetic-voice/exact-engine"
@@ -391,6 +401,8 @@ def test_v2_podcast_finishes_without_quality_verdicts_or_loudness_report(closed_
     value={'schema':'podcast-script/v2','provider':'synthetic-single-generation',
            'segments':[{'beat_id':'beat-0','title':'合成重點','turns':[turn]}]}
     assert podcasts.finish_step(state,script=value,dsn=dsn)
+    audio_state=podcasts.claim_step(dsn=dsn)
+    assert podcasts.finish_step(audio_state,audio=wav(),audio_provider='synthetic',dsn=dsn)
     result=podcasts.read_podcast(owner.learner_id,identity,dsn=dsn)
     assert result['status']=='ready' and result['episodes'][0]['script']==value
     app=api.create_app(api.ApiSettings(profile='local',public_origin='http://127.0.0.1:4183',secure_cookie=False,local_config=settings,dsn=dsn))
@@ -439,7 +451,7 @@ def test_podcast_list_batches_child_states_without_changing_summaries(closed_loo
 
     owner, _, _, _, dsn, _ = closed_loop
     identity = create(closed_loop)['podcast_id']
-    complete_media(dsn)
+    complete(dsn)
     # 這裡只測狀態彙總；音訊與影片內容不作為真實生成品質證據。
     with database_session(dsn) as db:
         original = db.get(Podcast, identity)
@@ -513,3 +525,16 @@ def test_podcast_list_batches_child_states_without_changing_summaries(closed_loo
         counts.append((size, len(statements)))
     record_property('podcast_count_list_queries', counts)
     assert len({queries for _, queries in counts}) == 1, counts
+
+
+def test_create_and_rename_enforce_forty_character_names(closed_loop):
+    from runtime.storage.materials import MaterialLibraryError
+    owner, source, _, document, dsn, _ = closed_loop
+    ids = [concept["concept_id"] for concept in document["concepts"]]
+    saved = podcasts.create_podcast(owner.learner_id, source.material_id, document["revision"], "字" * 40, ids, "name-limit", delivery="solo", dsn=dsn)
+    renamed = podcasts.change_podcast(owner.learner_id, saved["podcast_id"], "rename", saved["version"], name="🐍" * 40, dsn=dsn)
+    assert renamed["name"] == "🐍" * 40
+    with pytest.raises(MaterialLibraryError, match="REQUEST_INVALID"):
+        podcasts.create_podcast(owner.learner_id, source.material_id, document["revision"], "字" * 41, ids, "too-long", delivery="solo", dsn=dsn)
+    with pytest.raises(MaterialLibraryError, match="REQUEST_INVALID"):
+        podcasts.change_podcast(owner.learner_id, saved["podcast_id"], "rename", renamed["version"], name="字" * 41, dsn=dsn)

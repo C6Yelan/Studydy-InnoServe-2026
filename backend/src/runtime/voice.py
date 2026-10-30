@@ -28,7 +28,7 @@ from .generation_jobs import cancellable_job, lease_is_current, check_job, JobCa
 from . import retrieval, material_qa
 
 
-ACTIVE = ("transcribing", "pending", "answering")
+ACTIVE = ("transcribing", "pending", "answering", "speaking")
 # 對話標題在第一個問題送出（或語音辨識完成）時取代預設名稱，之後不再改。
 NEW_CONVERSATION_TITLE = "新的教材問答"
 
@@ -118,6 +118,8 @@ def read(owner, identity, *, dsn=None):
             .order_by(Turn.created_at, Turn.turn_id)
         ).all()
         retrieval._scope(db, owner, row.material_id, row.knowledge_structure_revision)
+        from .podcast_generation import live_progress
+        live = live_progress([(t.turn_id,t.lease_token) for t in turns if t.status=="speaking"])
         sentences = {turn.turn_id: [] for turn in turns}
         for item in db.scalars(select(VoiceSentence).where(VoiceSentence.turn_id.in_(sentences)).order_by(VoiceSentence.index)):
             sentences[item.turn_id].append({"index":item.index,"text":item.text,"status":item.status,
@@ -152,7 +154,7 @@ def read(owner, identity, *, dsn=None):
                         )
                     },
                     "answer": answers[t.turn_id],
-                    "stage": t.stage,
+                    "stage": ("tts_synthesizing" if live.get((str(t.turn_id),str(t.lease_token)),{}).get("status")=="running" else t.stage),
                     "timings": {key:(t.timings or {}).get(key) for key in voice_sentences.TIMING_KEYS},
                     "audio_sentences": sentences[t.turn_id],
                     "audio_url": f"/v1/voice-conversations/{identity}/turns/{t.turn_id}/audio"
@@ -352,12 +354,14 @@ def action(owner, identity, turn_id, action, *, dsn=None):
             if not turn.question:
                 raise SourceError("REQUEST_INVALID")
             turn.status = (
-                "ready"
+                ("ready" if turn.mode == "text" else "speaking")
                 if turn.answer
                 else "pending"
             )
             turn.error_code = None
-            turn.stage = "completed" if turn.status == "ready" else "retrieval"
+            turn.stage = "tts_queued" if turn.status == "speaking" else "completed" if turn.status == "ready" else "retrieval"
+            if turn.status == "speaking":
+                voice_sentences.retry(db, turn)
         else:
             raise SourceError("REQUEST_INVALID")
         status = turn.status
@@ -438,6 +442,8 @@ def claim(*, dsn=None):
             material_id=row.material_id,
             revision=row.knowledge_structure_revision,
         )
+        if turn.status == "speaking":
+            voice_sentences.claim(db, turn, state)
         if turn.status == "transcribing":
             recent = db.scalar(
                 select(Turn)
@@ -620,8 +626,10 @@ def _save_answer(db, turn, state, result):
             current["through_turn_id"],
         ):
             conversation.memory = memory
-    turn.status = "ready"
-    turn.stage = "completed"
+    turn.status = "ready" if turn.mode == "text" else "speaking"
+    turn.stage = "completed" if turn.mode == "text" else "tts_queued"
+    if turn.mode == "voice":
+        voice_sentences.enqueue(db, turn)
 
 
 def finish(state, result=None, error=None, *, dsn=None):
@@ -651,6 +659,14 @@ def finish(state, result=None, error=None, *, dsn=None):
             _save_transcript(db, turn, result)
         elif state["status"] == "answering":
             _save_answer(db, turn, state, result)
+        else:
+            voice_sentences.finish(db, turn, state, result)
+            measured = state.get("audio_timings", {})
+            timings = dict(turn.timings or {})
+            for key, extra in (("tts_queue_ms", state["tts_wait_ms"]), ("tts_synthesis_ms", 0)):
+                if key in measured:
+                    timings[key] = (timings.get(key) or 0) + measured[key] + extra
+            turn.timings = timings
     if state["status"] == "answering":
         model_calls.completed("failed" if error else "succeeded", error)
 
@@ -736,6 +752,13 @@ def step(*, dsn=None):
                     )
                     _record_stage(state, None, dsn=dsn)
                     state["memory_update"] = result.pop("_memory_update")
+                else:
+                    state["audio_timings"] = {}
+                    result = provider(
+                        "/audio",
+                        {**job, "script": {"segments": [{"turns": [{"speaker": "host", "text": state["sentence_text"]}]}]}},
+                        timings=state["audio_timings"],
+                    )
                 if state["status"] == "answering":
                     model_calls.capture(deepcopy(result))
                 finish(state, result, dsn=dsn)

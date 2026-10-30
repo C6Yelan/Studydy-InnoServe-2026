@@ -35,6 +35,10 @@ Studydy 原創程式碼除另有標示外採 [MIT License](LICENSE) 授權。第
 
 語音模式使用 [vad-web 0.0.31](https://github.com/ricky0123/vad)（ISC）、[Silero VAD v6](https://github.com/snakers4/silero-vad)（MIT）與 [ONNX Runtime Web 1.30.0](https://github.com/microsoft/onnxruntime)（MIT）。模型、worklet 與 WASM 從鎖定 npm 套件建置，隨本站發布；[完整授權文字](frontend/public/voice-assets/LICENSES.txt) 同時提供給網站使用者。人聲分類在瀏覽器執行，通過判定的錄音才交給既有 Studydy 語音問答服務。
 
+## 語音合成
+
+Podcast 與問答配音使用 [Coqui XTTS-v2](https://huggingface.co/coqui/XTTS-v2)（[Coqui Public Model License](https://coqui.ai/cpml)，非商用；本版僅用於競賽展示）與其官方內建聲線，程式為 [Idiap coqui-tts 0.27.2](https://github.com/idiap/coqui-ai-TTS)（MPL-2.0）。中文斷詞使用 [CKIP Transformers](https://github.com/ckiplab/ckip-transformers) 與 `ckiplab/bert-base-chinese-ws`（GPL-3.0，台灣中央研究院 CKIP Lab），讀音取自 [CC-CEDICT](https://www.mdbg.net/chinese/dictionary?page=cc-cedict)（CC BY-SA 4.0，CC-CEDICT editors／MDBG）與 [Unicode Unihan](https://www.unicode.org/license.txt)（Unicode License v3）。[人工核對讀音表](ops/podcast/zh-reviewed-readings.json) 為 CC-CEDICT 選讀，依 CC BY-SA 4.0 提供。英文處理使用 cmudict、wordninja、unicode-rbnf（CLDR 數字規則）。不使用 jieba、pypinyin 或原廠中文數字正規化模組。
+
 ## 語音測試素材
 
 瀏覽器人聲分類測試使用 [LibriSpeech](https://www.openslr.org/12) 的 `test-other/1688-142285-0007`。資料集由 Vassil Panayotov 製作、Daniel Povey 協助，採 CC BY 4.0；使用範圍、來源與轉檔方式見[素材說明](frontend/e2e/fixtures/voice/README.md)。

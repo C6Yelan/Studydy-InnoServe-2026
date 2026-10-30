@@ -13,10 +13,10 @@ from runtime.storage.tables import PodcastVideo
 def test_generation_steps_follow_queue_lock_and_published_results(closed_loop, monkeypatch):
     from runtime import podcast_generation
     owner, _, _, _, dsn, _ = closed_loop
-    identity=create(closed_loop)['podcast_id']
+    identity=create(closed_loop, video=True)['podcast_id']
     def view():
         return podcasts.read_podcast(owner.learner_id, identity, dsn=dsn)['generation']['steps']
-    assert [s['status'] for s in view()]==['queued']
+    assert [s['status'] for s in view()]==['queued','waiting','waiting','waiting']
     state=podcasts.claim_step(dsn=dsn)
     assert view()[0]['status']=='running' and view()[0]['started_at']
     metadata={'job_id':str(identity),'job_token':str(state['token'])}
@@ -33,14 +33,32 @@ def test_generation_steps_follow_queue_lock_and_published_results(closed_loop, m
           'parts':[{'text':claim['text'],'source_refs':[{'source_index':i,'evidence_ids':[e['evidence_id'] for e in claim['evidence']]}]}]}]}
         for i,claim in enumerate(claims)]}
     podcasts.finish_step(state, script=verified, dsn=dsn)
-    assert [s['status'] for s in view()]==['completed']
+    assert [s['status'] for s in view()]==['completed','queued','waiting','waiting']
     assert view()[0]['elapsed_seconds']>=0
+    state=podcasts.claim_step(dsn=dsn)
+    podcasts.finish_step(state, audio=wav(), audio_provider='synthetic-test', dsn=dsn)
+    assert [s['status'] for s in view()]==['completed','completed','queued','queued']
+    scene=podcast_scenes.claim(dsn=dsn)
+    podcast_scenes.save_alignment(scene, alignment(scene), dsn=dsn)
+    assert view()[2]['status']=='completed' and view()[2]['elapsed_seconds']>=0
+    with database_session(dsn) as db:
+        video=db.query(PodcastVideo).filter(PodcastVideo.podcast_id==identity).one()
+        video.status='failed';video.started_at=video.finished_at=datetime.now(UTC)
+    assert view()[3]['status']=='failed'
     assert all(s['queue_ahead'] is None for s in view())
 
 
+def test_legacy_script_does_not_automatically_enqueue_alignment(closed_loop):
+    owner, _, _, _, dsn, _=closed_loop
+    identity=create(closed_loop)['podcast_id']
+    state=podcasts.claim_step(dsn=dsn)
+    podcasts.finish_step(state,script=script(state),dsn=dsn)
+    podcasts.finish_step(podcasts.claim_step(dsn=dsn),audio=wav(),audio_provider='synthetic-test',dsn=dsn)
+    steps=podcasts.read_podcast(owner.learner_id,identity,dsn=dsn)['generation']['steps']
+    assert next(s for s in steps if s['step']=='alignment')['status']=='waiting'
 
 
-def test_omitted_content_survives_script_completion_and_api(closed_loop):
+def test_omitted_content_survives_script_audio_and_api(closed_loop):
     owner, _, _, _, dsn, _=closed_loop
     identity=create(closed_loop)['podcast_id']
     state=podcasts.claim_step(dsn=dsn)
@@ -50,6 +68,9 @@ def test_omitted_content_survives_script_completion_and_api(closed_loop):
             {'text':'已核對的內容。','source_refs':[{'source_index':0,'evidence_ids':[e['evidence_id'] for e in claim['evidence']]}]}]}]}],
         'omitted_content':[{'segment_index':0,'claim_ids':[],'reason':'source_check_failed'}]}
     assert podcasts.finish_step(state,script=value,dsn=dsn)
+    audio_state=podcasts.claim_step(dsn=dsn)
+    assert 'omitted_content' not in audio_state['episode']['script']
+    podcasts.finish_step(audio_state,audio=wav(),audio_provider='synthetic-test',dsn=dsn)
     episode=podcasts.read_podcast(owner.learner_id,identity,dsn=dsn)['episodes'][0]
     assert episode['omitted_content']==value['omitted_content']
     assert episode['script']['segments']==value['segments']

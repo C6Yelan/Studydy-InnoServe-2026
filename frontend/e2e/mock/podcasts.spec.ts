@@ -82,7 +82,7 @@ test("management menu renames with conflict recovery; deletion needs confirmatio
   await page.getByRole("button", { name: "刪除 Podcast", exact: true }).click();
   await page.getByRole("button", { name: "確認刪除 Podcast" }).click();
   await expect(page.getByRole("heading", { name: "讓教材說給你聽" })).toBeVisible();
-  await expect(page.getByText("挑選概念，選擇雙人對談或單人解說。生成講稿後保存在你的帳號，隨時可以閱讀。")).toBeVisible();
+  await expect(page.getByText("挑選概念，選擇雙人對談或單人解說，也可勾選教學影片。生成後保存在你的帳號，隨時可以再聽。")).toBeVisible();
   expect(fixture.deletes()).toBe(1);
   expect(await page.evaluate(key => localStorage.getItem(key), positionKey)).toBeNull();
 });
@@ -224,11 +224,15 @@ test("podcast creation keeps manual selection and settings without recommendatio
     return json(route, fixture.view, 201);
   });
   await controls.getByRole('button', { name: '講解設定', exact: true }).click();
-  await expect(page.locator('.cards-create-summary')).toContainText('講稿');
+  // 影片預設不勾；勾選後才隨音訊生成。
+  const videoOption = page.getByRole('checkbox', { name: /同時生成教學影片/ });
+  await expect(videoOption).not.toBeChecked();
+  await expect(page.locator('.cards-create-summary')).toContainText('只有音訊');
+  await videoOption.check();
   await page.getByRole('button', { name: '開始生成 Podcast' }).click();
   await expect(page).toHaveURL(new RegExp(`/materials/${materialId}/podcasts/${podcastId}$`));
   expect(body.concept_ids).toEqual([first.concept_id]); expect(body.delivery).toBe('solo'); expect(body).not.toHaveProperty('mode');
-  expect(body.video).toBe(false);
+  expect(body.video).toBe(true);
   await expect(page.getByRole('tablist', { name: '教材學習內容' })).toBeVisible();
 });
 
@@ -1071,7 +1075,7 @@ test("podcast tiles show status only while work remains and leave version notes 
   // 音訊還沒全部完成：不顯示會變動的總時長。
   const pending = page.getByRole("article").filter({ hasText: "影片生成中" });
   await expect(pending.locator(".podcast-cover i")).toHaveText("3 集");
-  await expect(pending.locator(".library-state")).toHaveText("正在生成 · 已完成 2 / 3 集 · 影片 1 / 3 集");
+  await expect(pending.locator(".library-state")).toHaveText("正在生成 · 音訊 2 / 3 集 · 影片 1 / 3 集");
 });
 
 test("ready Podcast exports each available format for the selected episode", async ({ page }) => {
@@ -1170,7 +1174,7 @@ test('podcast generation shows actual steps, elapsed time and observed queue wit
  const region=page.getByRole('region',{name:'各集製作步驟'}), audio=region.getByRole('listitem').filter({hasText:'配音'});
  await expect(region.getByRole('listitem').filter({hasText:'寫講稿'})).toContainText('已完成');
  await expect(audio).toContainText('排隊中');await expect(audio).toContainText('已耗時 1 分 5 秒');
- await expect(page.getByRole('progressbar',{name:'已完成講稿集數'})).not.toHaveAttribute('aria-valuenow');
+ await expect(page.getByRole('progressbar',{name:'已完成音訊集數'})).not.toHaveAttribute('aria-valuenow');
  expect(await region.getByRole('listitem').allTextContents()).toEqual(['✓ 寫講稿已完成已耗時 0 分 53 秒','配音排隊中已耗時 1 分 5 秒','對齊字幕尚未開始']);
  for(const [width,height] of [[1440,900],[1300,900],[1200,900],[1024,768],[390,844]]){
   await page.setViewportSize({width,height});await page.screenshot({path:testInfo.outputPath(`podcast-steps-${width}.png`),animations:'disabled'});

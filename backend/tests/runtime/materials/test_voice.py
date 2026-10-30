@@ -234,8 +234,7 @@ def test_saved_voice_audio_supports_seeking_without_bypassing_owner(closed_loop)
     turn=voice.add_turn(owner,cid,'range-audio','教材問題',mode='voice',dsn=dsn)
     state=voice.claim(dsn=dsn)
     voice.finish(state,grounded_answer(state,dsn),dsn=dsn)
-    with database_session(dsn) as db:
-        db.get(VoiceTurn, turn["turn_id"]).audio = audio_fixture()
+    voice.finish(voice.claim(dsn=dsn),audio_fixture(),dsn=dsn)
     origin='http://127.0.0.1:4183'
     app=api.create_app(api.ApiSettings(profile='local',public_origin=origin,secure_cookie=False,local_config=settings,dsn=dsn))
     client=TestClient(app,base_url=origin)
@@ -259,7 +258,7 @@ def test_saved_voice_audio_supports_seeking_without_bypassing_owner(closed_loop)
     assert voice.audio(owner,cid,turn['turn_id'],dsn=dsn)==audio_fixture()
 
 
-def test_voice_worker_auto_chains_transcript_and_text_answer_without_send(closed_loop, monkeypatch):
+def test_voice_worker_auto_chains_transcript_answer_audio_without_send(closed_loop, monkeypatch):
     owner, _, cid, dsn = setup(closed_loop)
     turn = voice.add_turn(owner, cid, 'voice-auto', recording=b'synthetic recording', dsn=dsn)
     paths = []
@@ -272,7 +271,8 @@ def test_voice_worker_auto_chains_transcript_and_text_answer_without_send(closed
         if path == '/semantics':
             assert body['request']['question'] == '辨識出的教材問題'
             return qa_model(body)
-        raise AssertionError(path)
+        assert path == '/audio'
+        return audio_fixture()
     monkeypatch.setattr(voice, 'provider', provider)
     assert voice.step(dsn=dsn)
     result = voice.read(owner, cid, dsn=dsn)
@@ -283,9 +283,12 @@ def test_voice_worker_auto_chains_transcript_and_text_answer_without_send(closed
     assert result['turns'][0]['transcription']['segments'][0]['avg_logprob']==-.2
     with database_session(dsn) as db: assert db.get(VoiceTurn, turn['turn_id']).recording is None
     assert voice.step(dsn=dsn)
+    assert voice.read(owner, cid, dsn=dsn)['turns'][0]['status'] == 'speaking'
+    assert voice.step(dsn=dsn)
     ready = voice.read(owner, cid, dsn=dsn)['turns'][0]
-    assert ready['status'] == 'ready' and ready['answer']['text']
-    assert paths == ['/transcribe', '/semantics', '/semantics', '/semantics']
+    assert ready['status'] == 'ready' and ready['audio_url']
+    assert voice.audio(owner, cid, turn['turn_id'], dsn=dsn) == audio_fixture()
+    assert paths == ['/transcribe', '/semantics', '/semantics', '/semantics', '/audio']
     assert not voice.step(dsn=dsn)
 
 
@@ -303,8 +306,7 @@ def test_text_worker_finishes_without_audio_provider_and_mode_is_part_of_intent(
     assert voice.step(dsn=dsn) and not voice.step(dsn=dsn)
     ready = voice.read(owner, cid, dsn=dsn)['turns'][0]
     assert ready['turn_id'] == turn['turn_id'] and ready['mode'] == 'text'
-    assert ready['status'] == 'ready' and ready['answer']['text'] == '純文字回答。'
-    assert ready['audio_url'] is None
+    assert ready['status'] == 'ready' and ready['audio_url'] is None
     assert paths == ['/semantics', '/semantics', '/semantics']
 
 
@@ -326,7 +328,7 @@ def test_recording_keeps_material_topic_when_recent_answer_changes_topic(closed_
     assert len(state['stt_hints'])<=320
 
 
-@pytest.mark.parametrize('phase', ['transcribing', 'answering'])
+@pytest.mark.parametrize('phase', ['transcribing', 'answering', 'speaking'])
 def test_voice_cancel_ignores_late_result_at_each_stage(closed_loop, phase):
     owner, _, cid, dsn = setup(closed_loop)
     turn = voice.add_turn(owner, cid, 'cancel-stage', recording=b'synthetic recording', dsn=dsn)
@@ -335,17 +337,36 @@ def test_voice_cancel_ignores_late_result_at_each_stage(closed_loop, phase):
     if phase != 'transcribing':
         voice.finish(state, {'text': '問題'}, dsn=dsn)
         state = voice.claim(dsn=dsn)
+    if phase == 'speaking':
+        voice.finish(state, grounded_answer(state,dsn,'已保存的回答。'), dsn=dsn)
+        state = voice.claim(dsn=dsn)
     assert state['status'] == phase
     voice.action(owner, cid, turn['turn_id'], 'cancel', dsn=dsn)
-    late = {'transcribing': {'text': '遲到辨識'}, 'answering': answer}[phase]
+    late = {'transcribing': {'text': '遲到辨識'}, 'answering': answer, 'speaking': audio_fixture()}[phase]
     voice.finish(state, late, dsn=dsn)
     result = voice.read(owner, cid, dsn=dsn)['turns'][0]
     assert result['status'] == 'cancelled' and result['audio_url'] is None
-    assert result['answer'] is None
+    assert bool(result['answer']) == (phase == 'speaking')
     assert voice.claim(dsn=dsn) is None
 
 
-
+def test_voice_audio_retry_keeps_answer_and_does_not_repeat_stt_or_answer(closed_loop, monkeypatch):
+    owner, _, cid, dsn = setup(closed_loop)
+    turn = voice.add_turn(owner, cid, 'audio-retry', recording=b'synthetic recording', dsn=dsn)
+    voice.finish(voice.claim(dsn=dsn), {'text': '原問題'}, dsn=dsn)
+    state=voice.claim(dsn=dsn)
+    voice.finish(state, grounded_answer(state,dsn,'保留這份回答。'), dsn=dsn)
+    voice.finish(voice.claim(dsn=dsn), error='VOICE_PROVIDER_FAILED', dsn=dsn)
+    before = deepcopy(voice.read(owner, cid, dsn=dsn)['turns'][0]['answer'])
+    voice.action(owner, cid, turn['turn_id'], 'retry', dsn=dsn)
+    paths = []
+    def provider(path, body, **kwargs):
+        paths.append(path);assert path == '/audio';return audio_fixture()
+    monkeypatch.setattr(voice, 'provider', provider)
+    assert voice.step(dsn=dsn)
+    after = voice.read(owner, cid, dsn=dsn)['turns'][0]
+    assert after['status'] == 'ready' and after['answer'] == before
+    assert paths == ['/audio']
 
 
 
@@ -384,7 +405,7 @@ def test_voice_conversation_keeps_its_revision_after_material_head_changes(revis
 
 
 
-def test_typed_question_in_voice_mode_uses_same_history_and_returns_text(closed_loop, monkeypatch):
+def test_typed_question_in_voice_mode_uses_same_history_and_generates_audio(closed_loop, monkeypatch):
     owner, _, cid, dsn = setup(closed_loop)
     turn = voice.add_turn(owner, cid, 'typed-voice', '用文字輸入的語音模式問題', mode='voice', dsn=dsn)
     with pytest.raises(SourceError, match='IDEMPOTENCY_CONFLICT'):
@@ -394,7 +415,7 @@ def test_typed_question_in_voice_mode_uses_same_history_and_returns_text(closed_
         paths.append(path)
         return qa_model(body, '教材支持的回答。') if path == '/semantics' else audio_fixture()
     monkeypatch.setattr(voice, 'provider', provider)
-    assert voice.step(dsn=dsn) and not voice.step(dsn=dsn)
+    assert voice.step(dsn=dsn) and voice.step(dsn=dsn) and not voice.step(dsn=dsn)
     ready = voice.read(owner, cid, dsn=dsn)['turns'][0]
-    assert ready['turn_id'] == turn['turn_id'] and ready['answer']['text'] and ready['status'] == 'ready'
-    assert paths == ['/semantics', '/semantics', '/semantics']
+    assert ready['turn_id'] == turn['turn_id'] and ready['audio_url'] and ready['status'] == 'ready'
+    assert paths == ['/semantics', '/semantics', '/semantics', '/audio']

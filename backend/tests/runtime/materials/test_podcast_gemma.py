@@ -56,7 +56,8 @@ def test_gemma_script_review_title_and_persistence(closed_loop, monkeypatch, fai
         assert view['status'] == 'failed' and episode['script'] is None
         assert view['error_code'] == ('PODCAST_SCRIPT_INVALID' if failure == 'foreign_source' else 'SEMANTIC_SERVICE_UNAVAILABLE')
         return
-    assert view['status'] == 'ready' and view['completed_episodes'] == 1
+    # 講稿完成後等待配音，音訊完成才算完成一集。
+    assert view['status'] == 'pending' and view['completed_episodes'] == 0
     assert stages == ['script', 'review', 'title']
     script = episode['script']
     assert script['provider'] == f"vllm:{lock['semantic_service']['model_id']};source-script/v17"
@@ -68,4 +69,4 @@ def test_gemma_script_review_title_and_persistence(closed_loop, monkeypatch, fai
         assert episode['title'] == '堆疊的規則'
     else:
         assert episode.get('title') is None
-    assert podcasts.claim_step(dsn=dsn) is None
+    assert podcasts.claim_step(dsn=dsn)['episode']['script'] == script

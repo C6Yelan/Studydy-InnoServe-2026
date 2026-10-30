@@ -25,17 +25,11 @@ def steps(row, children):
     live = children['live']
     scenes = {child.episode_index: child for child in children['scene_rows']}
     videos = {child.episode_index: child for child in children['video_rows']}
-    current = next((i for i, episode in enumerate(row.episodes) if not episode.get('script')), None)
+    current = next((i for i, episode in enumerate(row.episodes) if not episode.get('audio')), None)
     result = []
     now = datetime.now(UTC)
     for index, episode in enumerate(row.episodes):
         for step in ('script', 'audio', 'alignment', 'video'):
-            if step == 'audio' and not episode.get('audio'):
-                continue
-            if step == 'alignment' and index not in scenes:
-                continue
-            if step == 'video' and index not in videos:
-                continue
             if step == 'video' and not row.video_enabled and index not in videos:
                 continue
             started = finished = None
@@ -44,12 +38,13 @@ def steps(row, children):
             if step in ('script', 'audio'):
                 timing = episode.get('step_times', {}).get(step, {})
                 started, finished = timing.get('started_at'), timing.get('finished_at')
-                active_step = 'script'
+                active_step = 'audio' if episode.get('script') else 'script'
                 if episode.get(step):
                     status = 'completed'
                 elif index == current and step == active_step:
-                    status = {'pending': 'queued', 'running': 'running', 'failed': 'failed',
-                              'cancelled': 'skipped'}.get(row.status, 'waiting')
+                    # 講稿在 backend 由 Gemma 生成；配音在 provider 排隊，實際狀態由 live progress 覆寫。
+                    status = {'pending': 'queued', 'running': 'running' if step == 'script' else 'queued',
+                              'failed': 'failed', 'cancelled': 'skipped'}.get(row.status, 'waiting')
                     if row.status == 'running':
                         job_id, token = row.podcast_id, row.lease_token
             else:

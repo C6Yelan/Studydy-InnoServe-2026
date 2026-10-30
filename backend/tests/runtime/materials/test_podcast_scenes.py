@@ -4,7 +4,7 @@ from uuid import uuid4
 import pytest
 from sqlalchemy import select
 from product_fixtures import closed_loop
-from materials.test_podcasts import create,complete_media as complete,wav,seed_saved_audio
+from materials.test_podcasts import create,complete,wav
 from runtime import podcast_scenes as scenes,podcasts
 from runtime.scene_alignment import normalized
 from runtime.errors import SourceError
@@ -76,7 +76,7 @@ def test_corrected_audio_requeues_cancelled_scenes_and_rejects_old_result(closed
         'segments':[{'beat_id':'beat-0','title':'合成重點','turns':[{'speaker':'host','text':text,
             'parts':[{'text':text,'source_refs':[ref]}]}]}]}
     assert podcasts.finish_step(state,script=script,dsn=dsn)
-    seed_saved_audio(dsn, identity, state['index'])
+    assert podcasts.finish_step(podcasts.claim_step(dsn=dsn),audio=wav(),audio_provider='synthetic',dsn=dsn)
     old=scenes.claim(dsn=dsn)
     version=scenes.read(owner.learner_id,identity,dsn=dsn)['episodes'][0]['version']
     scenes.action(owner.learner_id,identity,0,'cancel',version,dsn=dsn)

@@ -13,9 +13,10 @@ from runtime import material_notes, podcasts, card_sets, export_cards
 from runtime.learner_session import register_account
 from test_note_queue import answer as note_answer
 from test_card_generation import create as create_cards, finish as finish_cards, response as card_response
-from test_podcasts import create as create_podcast, complete_media as finish_podcast
+from test_podcasts import create as create_podcast, complete as finish_podcast
 from sqlalchemy import text
 from runtime.storage.database import database_session
+from runtime.storage.tables import Podcast
 
 
 def exported(dsn):
@@ -169,6 +170,9 @@ def test_completed_transcript_exports_verified_text_and_sources(closed_loop, tmp
         for i, item in enumerate(claim["episode"]["claims"])]
     script = {"schema": "podcast-script/v2", "provider": "synthetic", "segments": segments}
     assert podcasts.finish_step(claim, script=script, dsn=dsn)
+    # 先前競賽版只產講稿時已完成的節目：ready 但沒有音訊，仍可匯出講稿。
+    with database_session(dsn) as db:
+        db.get(Podcast, created["podcast_id"]).status = "ready"
     view = podcasts.read_podcast(owner.learner_id, created["podcast_id"], dsn=dsn)
     assert view["status"] == "ready" and view["episodes"][0]["script"] == script
     client = TestClient(_app(dsn, tmp_path, monkeypatch), base_url=ORIGIN)
