@@ -1075,7 +1075,7 @@ test("podcast tiles show status only while work remains and leave version notes 
   // 音訊還沒全部完成：不顯示會變動的總時長。
   const pending = page.getByRole("article").filter({ hasText: "影片生成中" });
   await expect(pending.locator(".podcast-cover i")).toHaveText("3 集");
-  await expect(pending.locator(".library-state")).toHaveText("正在生成 · 已完成 2 / 3 集 · 影片 1 / 3 集");
+  await expect(pending.locator(".library-state")).toHaveText("正在生成 · 音訊 2 / 3 集 · 影片 1 / 3 集");
 });
 
 test("ready Podcast exports each available format for the selected episode", async ({ page }) => {
@@ -1174,7 +1174,7 @@ test('podcast generation shows actual steps, elapsed time and observed queue wit
  const region=page.getByRole('region',{name:'各集製作步驟'}), audio=region.getByRole('listitem').filter({hasText:'配音'});
  await expect(region.getByRole('listitem').filter({hasText:'寫講稿'})).toContainText('已完成');
  await expect(audio).toContainText('排隊中');await expect(audio).toContainText('已耗時 1 分 5 秒');
- await expect(page.getByRole('progressbar',{name:'已完成講稿集數'})).not.toHaveAttribute('aria-valuenow');
+ await expect(page.getByRole('progressbar',{name:'已完成音訊集數'})).not.toHaveAttribute('aria-valuenow');
  expect(await region.getByRole('listitem').allTextContents()).toEqual(['✓ 寫講稿已完成已耗時 0 分 53 秒','配音排隊中已耗時 1 分 5 秒','對齊字幕尚未開始']);
  for(const [width,height] of [[1440,900],[1300,900],[1200,900],[1024,768],[390,844]]){
   await page.setViewportSize({width,height});await page.screenshot({path:testInfo.outputPath(`podcast-steps-${width}.png`),animations:'disabled'});

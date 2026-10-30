@@ -89,8 +89,8 @@ export function PodcastLibrary({ apiClient, learnerId, material, contentNavigati
           }} />
           {!material && <p className="podcast-material-name" title={item.material_name}>{item.material_name}</p>}
           {/* 內容完成時不顯示狀態（按鈕提供播放或閱讀）；生成中、中斷或部分影片失敗時才顯示進度。 */}
-          {item.generation ? !podcastComplete(item) && <p className="library-state">{item.generation.active ? (item.status === 'ready' ? (videoTotal(item) ? '影片／字幕生成中' : '字幕生成中') : podcastStatus[item.status]) : item.generation.failed_videos ? '部分影片生成失敗' : item.status === 'ready' && item.generation.retryable_videos ? '影片待補，請按「接續生成」' : podcastStatus[item.status]} · 已完成 {item.completed_episodes} / {item.episode_count} 集{videoTotal(item) ? ` · 影片 ${item.generation.completed_videos} / ${videoTotal(item)} 集` : ''}</p>
-            : item.status !== "ready" && <p className="library-state">{podcastStatus[item.status]} · 已完成 {item.completed_episodes} / {item.episode_count} 集</p>}
+          {item.generation ? !podcastComplete(item) && <p className="library-state">{item.generation.active ? (item.status === 'ready' ? (videoTotal(item) ? '影片／字幕生成中' : '字幕生成中') : podcastStatus[item.status]) : item.generation.failed_videos ? '部分影片生成失敗' : item.status === 'ready' && item.generation.retryable_videos ? '影片待補，請按「接續生成」' : podcastStatus[item.status]} · 音訊 {item.completed_episodes} / {item.episode_count} 集{videoTotal(item) ? ` · 影片 ${item.generation.completed_videos} / ${videoTotal(item)} 集` : ''}</p>
+            : item.status !== "ready" && <p className="library-state">{podcastStatus[item.status]} · 音訊已完成 {item.completed_episodes} / {item.episode_count} 集</p>}
           {(item.generation?.active || ['pending','running'].includes(item.status)) && <PodcastCancelControl busy={deletingId!==null} onConfirm={()=>void cancelAndDelete(item.podcast_id)}/>}
           <button type="button" className="primary-button" onClick={() => writeRoute({ name: "podcast", podcastId: item.podcast_id, materialId: item.material_id }, false, material ? null : { fromCollection: true })}>{podcastScriptOnly(item) ? "閱讀講稿" : podcastPreviewReady(item) ? "開啟播放" : "查看進度"}</button>
         </article>)}</div></>}
