@@ -613,6 +613,17 @@ def _review_part(view, unit, concepts, title, *, cited_pages_only=False):
     return part
 
 
+def review_concurrency():
+    """一份教材同時送出的複核批次數；各批只讀自己的輸入，套用順序由概念位置固定。"""
+    try:
+        value = int(os.environ.get("STUDYDY_MATERIAL_REVIEW_CONCURRENCY", "1"))
+        if value < 1:
+            raise ValueError
+    except ValueError:
+        raise ValueError("MATERIAL_REVIEW_CONCURRENCY_INVALID") from None
+    return value
+
+
 def _review_units(
     view, units, lock, archive, check_cancel, progress, wait_cancellation_check=None,
     skipped=None, semantic_call=None,
@@ -622,7 +633,7 @@ def _review_units(
     skipped 傳入時，只剩單一概念且收斂來源後仍超過容量的批次不複核（保留草稿原樣），
     概念 ID 記在 skipped；未傳入時沿用整體失敗。
     """
-    width = 1
+    width = review_concurrency()
     units = list(units)
     reviews, calls, split_units, cursor = {}, 0, 0, 0
     stopped = Event()
