@@ -1328,3 +1328,11 @@ def test_coverage_keeps_each_fitting_topic_together_instead_of_splitting_it_acro
     done,_=drive(value,provider)
     assert calls==[0,1]
     assert all(c['status']=='covered' for c in done['search_state']['coverage'])
+
+
+def test_research_text_fields_have_length_ceiling():
+    schema = flow.obj({"reason": flow.TEXT})
+    flow._validate_response({"reason": "x" * flow.TEXT["maxLength"]}, schema)
+    with pytest.raises(SourceError, match="RESEARCH_REVIEW_FAILED"):
+        flow._validate_response({"reason": "x" * (flow.TEXT["maxLength"] + 1)}, schema)
+    assert flow.PLAN["properties"]["searches"]["maxItems"] == 30
