@@ -90,4 +90,4 @@ PYTEST
 
 記錄實際命令、範圍、結果與限制。合成測試提供程式回歸證據；模型品質須另以指定素材及標準，透過產品流程生成並人工核對。
 
-`test_note_sections.py` 驗證原章節／小節最多三層、原順序、多檔一檔一章、無標題地圖退路、跨章 claim 歸屬與每章程式大綱。`test_material_notes.py` 驗證每章必選的複習速覽、合法引用、公式語法與數字、一次逐段核對後只刪不符位置，以及格式與 provider 失敗不可假成功；完整筆記只對未涵蓋概念補寫一次並保留原有效段落。`runtime/study/test_note_v16_queue.py` 用一次性 PostgreSQL 與受控模型驗證章節 metadata 同正文發布、更新途中仍讀舊稿、全空時保留既有稿與明確錯誤、首次空稿保存全部缺漏，以及速覽缺漏只顯示與完整筆記的交集；`test_note_queue.py` 核對重試契約與排程。`test_assessment_safety_v1.py` 保護 v1／v2 封存題與 v3 新題讀取。這些受控測試不代替 Gemma 真實內容驗收。
+`test_note_sections.py` 驗證原章節／小節最多三層、原順序、多檔一檔一章、無標題地圖退路、跨章 claim 歸屬與每章程式大綱。`test_material_notes.py` 驗證每章必選的複習速覽、合法引用、公式語法與數字、一次逐段核對後只刪不符位置，以及格式與 provider 失敗不可假成功；完整筆記只對未涵蓋概念補寫一次並保留原有效段落，章節並行時章內順序、依批次組裝、失敗停止與補缺續接。`runtime/study/test_note_v16_queue.py` 用一次性 PostgreSQL 與受控模型驗證章節 metadata 同正文發布、更新途中仍讀舊稿、全空時保留既有稿與明確錯誤、首次空稿保存全部缺漏，以及速覽缺漏只顯示與完整筆記的交集；`test_note_queue.py` 核對重試契約與排程，以及並行章節依位置保存與續接。`test_assessment_safety_v1.py` 保護 v1／v2 封存題與 v3 新題讀取。這些受控測試不代替 Gemma 真實內容驗收。
