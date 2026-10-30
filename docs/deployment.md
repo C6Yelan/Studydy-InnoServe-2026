@@ -13,6 +13,9 @@
   owner/group 與 STUDYDY_UID/GID 相容；父目錄 0700。`.env` 僅保存路徑，禁止保存 token 值。
 - `STUDYDY_UPLOAD_MAX_BYTES=94371840` 同時約束 Nginx／API；UI 讀取 capabilities。
   內部 artifact 上限不變；capabilities 失敗時不以寫死上限繼續上傳。
+- `STUDYDY_CARD_WORKERS`、`STUDYDY_PODCAST_WORKERS`、`STUDYDY_RESEARCH_WORKERS` 設定卡組、
+  Podcast、主題研究的背景執行緒數，預設 1；依模型服務的並行能力調整（如 A100 可調高、本機維持 1）。
+  Podcast 配音在語音服務端共用 GPU 鎖，多條 worker 只會讓講稿生成並行，配音仍逐份進行。
 - Nginx 限定正式與 localhost Host，清除未使用的 forwarded／Access 身分 headers，
   保留 exact Origin／Cookie；redirect 使用相對路徑。沒有新增 proxy trust chain。
 - 使用新版持久工作、Gemma runtime lock 與 migration baseline；公開網域、UID、port 與資料位置保持競賽設定。
