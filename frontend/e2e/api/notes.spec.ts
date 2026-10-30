@@ -25,7 +25,7 @@ test("real notes save an annotation, reopen its source and generate full notes o
     const download = page.waitForEvent("download");
     await controls.getByRole("menuitem", { name: ({ md: "Markdown", pdf: "PDF", docx: "Word（.docx）" })[format], exact: true }).click();
     const file = await download;
-    expect(file.suggestedFilename()).toBe(`Synthetic-重點整理.${format}`);
+    expect(file.suggestedFilename()).toBe(`Synthetic-複習速覽.${format}`);
     expect(await file.failure()).toBeNull();
   }
   await page.locator(".note-sources button").first().click();
@@ -45,7 +45,7 @@ test("real notes save an annotation, reopen its source and generate full notes o
   await page.getByRole("button", { name: "確認重新生成", exact: true }).click();
   await expect(page.getByRole("button", { name: "重新生成", exact: true })).toBeEnabled();
   await expect(page.getByText("完整筆記的複習想法", { exact: true })).toBeVisible();
-  await page.getByRole("button", { name: "重點整理", exact: true }).click();
+  await page.getByRole("button", { name: "複習速覽", exact: true }).click();
   await expect(page.getByText("真 API 保存我的複習想法", { exact: true })).toBeVisible();
   expect(errors).toEqual([]);
 });
