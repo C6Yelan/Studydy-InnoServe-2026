@@ -60,3 +60,5 @@ PostgreSQL 映像與隔離測試 fixture 固定同一個 18.6-bookworm digest；
 繁中提示更新：新題組使用 `source-span-single-choice/v3`，筆記契約為 `material-notes/v17`，localization 與 Podcast 核對提示各升為 v2。Gemma 講稿提示位於 `backend/src/runtime/podcast_script_generation.py`（`source-script/v17`），不在 ASR provider。封存 v1／v2 題組仍依原 lock 生成及驗證，已存資料與 hash 不重寫，無 migration；開 Pod 後另做真模型驗收。
 
 筆記生成契約為 `material-notes/v17`：新稿依原教材章節，模型核對一次後刪除不符內容，完整筆記每批對未涵蓋概念補寫並核對一次；複習速覽每章挑 3～5 條核心，缺漏概念明列。舊發布稿、Evidence 與已保存 lock／hash 不改寫，契約變更重試只清除未發布暫存。v16 新增 `0032_note_source_sections.sql` 的 `material_notes.published_metadata`，需與理解 `sections`／`unorganized_concepts` 的前端一起部署；舊稿兩欄回空陣列。
+
+`0033_maintenance_budget_range.sql` 把 0021 的 DB 約束 `demo_reanalysis_budget` 改為每個維護 run 自訂上限（`limit` 1～2000，`reserved_calls` 不超過該 run 的 `limit`）；`create_revision(..., full_reanalysis=True)` 建立的工作仍是 300，已存在的 run 不變。經使用者授權的一次性維護重分析可設定較高上限，仍在外送前原子保留、不得超支；這類 run 可封存替換過來源的新 source set，發布時只核對新結構與該 run 自己的來源綁定，不要求與舊版相同。一般新增來源流程不變。
