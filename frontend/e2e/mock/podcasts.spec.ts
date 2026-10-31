@@ -1063,7 +1063,7 @@ test('legacy browser position is uploaded once and playback reports real listeni
   await expect.poll(() => posts.some(p => p.ended === true && p.episode_index === 0), { timeout: 10_000 }).toBe(true);
 });
 
-test("podcast tiles show status only while work remains and leave version notes to the player", async ({ page }) => {
+test("podcast tiles show status only while work remains", async ({ page }) => {
   const fixture = await mockPodcasts(page);
   const done = { ...fixture.view, name: "已完成的 Podcast", episode_count: 3, completed_episodes: 3, duration_seconds: 3910, status: "ready", is_current_revision: false,
     generation: { active: false, preview_ready: true, completed_videos: 3, failed_videos: 0 } };
