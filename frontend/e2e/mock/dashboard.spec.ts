@@ -693,7 +693,7 @@ test("v7 goal, difficulty, media, combo and easter-egg achievements reuse the se
   await expect(onTime.getByRole("progressbar")).toHaveCount(0);
 });
 
-test("new badge notice shows only server-claimed badges once", async ({ page }) => {
+test("new badge notice shows only server-claimed badges once", async ({ page }, testInfo) => {
   let earned: Record<string, { earned_on: string }> = { first_answer: { earned_on: "2026-10-16" } };
   await page.route("**/v1/learning-activity", (route) => route.fulfill({ json: learningActivity({ badges: earned }) }));
   let pending: string[] = [];
@@ -717,7 +717,12 @@ test("new badge notice shows only server-claimed badges once", async ({ page }) 
   await expect(notice).toContainText("點亮概念");
   await expect(notice).not.toContainText("初次作答");
   await expect(notice.locator(".badge-medal")).toHaveCSS("animation-name", "none");
-  await notice.getByRole("button", { name: "太好了" }).click();
+  for (const [width, height] of [[1440, 900], [390, 844]]) {
+    await page.setViewportSize({ width, height });
+    await expect(notice.getByRole("button", { name: "查看", exact: true })).toBeVisible();
+    await page.screenshot({ path: testInfo.outputPath(`badge-notice-${width}.png`), animations: "disabled" });
+  }
+  await notice.getByRole("button", { name: "關閉" }).click();
   await expect(notice).toHaveCount(0);
   await page.reload();
   await expect(page.locator(".header-progress")).toBeVisible();
@@ -764,7 +769,7 @@ test("level-up closes by Escape and badge notice leaves page controls usable", a
   await expect(progress).toBeFocused();
   await progress.click();
   await expect(page).toHaveURL(/achievements/);
-  await badgeDialog.getByRole("button", { name: "太好了" }).click();
+  await badgeDialog.getByRole("button", { name: "關閉" }).click();
   await expect(badgeDialog).toHaveCount(0);
 });
 

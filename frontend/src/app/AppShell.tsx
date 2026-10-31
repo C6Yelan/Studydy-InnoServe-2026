@@ -98,7 +98,6 @@ export function AppShell({
         </nav>
         <div className="account-controls">{accountAction}</div>
       </header>
-      <div id="badge-notice-slot" />
       <main className="app-main" id="main-content">
         {children}
       </main>
