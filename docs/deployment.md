@@ -16,6 +16,7 @@
 - `STUDYDY_MATERIAL_WORKERS`、`STUDYDY_CARD_WORKERS`、`STUDYDY_RESEARCH_WORKERS` 設定教材、卡組、主題研究的背景執行緒數；
   `STUDYDY_PODCAST_WORKERS` 設定同份 Podcast 的製作並行數。全部預設 1；依模型服務的並行能力調整（如 A100 可調高、本機維持 1）。
   Podcast 配音在語音服務端共用 GPU 鎖，多集製作只會讓講稿生成並行，配音仍逐份進行。
+  `STUDYDY_VIDEO_WORKERS`（預設 1）設定同時渲染的 Podcast 影片集數；影片在後端容器以 CPU 編碼，字幕對齊仍在語音服務逐份進行。
 - `STUDYDY_NOTES_CHAPTER_CONCURRENCY` 設定一份完整筆記同時生成的一級章數，預設 1（逐批依序）。
   大於 1 時各章並行、章內依序；前文只看當下已完成且位置在前的批次，跨章重述的攔截較少。
   速覽不受影響。同時請求數約為教材 worker 數乘以此值，須小於模型服務的 `--max-num-seqs`。
