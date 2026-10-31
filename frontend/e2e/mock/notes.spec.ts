@@ -1,7 +1,7 @@
 import { expect, test } from "@playwright/test";
-import { json, mockKnowledgeMapApi, artifactId, materialId, runId, structureRevision, structureView } from "../fixtures/knowledge-map";
+import { json, mockKnowledgeMapApi, openMapConcept, artifactId, materialId, runId, structureRevision, structureView } from "../fixtures/knowledge-map";
 import { outlineView } from "../fixtures/knowledge-read-views.mjs";
-import type { MaterialNotesView, NoteKind } from "../../src/api/contracts";
+import type { MaterialNotesView, NoteHighlight, NoteKind, NoteMarkupTarget } from "../../src/api/contracts";
 
 const formula = String.raw`\text{大小} = \text{推入次數} - \text{取出次數}`;
 
@@ -91,23 +91,50 @@ async function setup(page: Parameters<typeof mockKnowledgeMapApi>[0], initial = 
   let summary = initial;
   let full: MaterialNotesView = { ...notes("full"), status: "not_generated", generation: 0, paragraphs: [], outline: [], content_revision: null, content_generation: null };
   const writes: string[] = [];
+  let highlights: NoteHighlight[] = [];
   await page.route("**/notes/**", route => {
     const request = route.request();
     if (!request.url().includes("/v1/")) return route.fallback();
     const kind = request.url().includes("/notes/full") ? "full" : "summary";
     let view = kind === "full" ? full : summary;
+    const target = (id: string): NoteMarkupTarget => {
+      const section = view.sections.find(s => `section:${s.section_id}` === id);
+      return section ? { target_type: "section", id, anchor: id, heading: section.heading, level: section.level }
+        : view.paragraphs.find(p => p.id === id)!;
+    };
+    if (request.url().includes("/highlights")) {
+      if (request.method() === "POST") {
+        const body = request.postDataJSON();
+        const highlight = { ...body, highlight_id: crypto.randomUUID(), created_at: new Date().toISOString(), original_revision: structureRevision, original_generation: 1, original_paragraph: target(body.paragraph_id) };
+        highlights.push(highlight);
+        return json(route, highlight, 201);
+      }
+      if (request.method() === "DELETE") { highlights = highlights.filter(h => h.highlight_id !== request.url().split("/").pop()); return route.fulfill({ status: 204 }); }
+      return json(route, { highlights });
+    }
     if (request.method() === "POST") { writes.push("generate"); view = { ...view, status: "pending" }; }
     if (request.method() === "PUT") {
       writes.push("annotation");
       const body = request.postDataJSON();
       const id = request.url().split("/").pop()!;
-      view = { ...view, annotations: body.body ? [{ annotation_id: id, anchor: view.paragraphs[0].anchor, body: body.body,
-        original_revision: structureRevision, original_paragraph: view.paragraphs[0], paragraph_id: "0", updated_at: "2026-10-25T01:00:00Z" }] : [] };
+      view = { ...view, annotations: [...view.annotations.filter(a => a.annotation_id !== id), ...(body.body ? [{ annotation_id: id, anchor: target(body.paragraph_id).anchor, body: body.body,
+        original_revision: structureRevision, original_paragraph: target(body.paragraph_id), paragraph_id: body.paragraph_id, block_path: body.block_path, start: body.start, end: body.end, quote: body.quote, updated_at: "2026-10-25T01:00:00Z" }] : [])] };
     }
     if (kind === "full") full = view; else summary = view;
     return json(route, view);
   });
   return { writes, setSummary: (v: MaterialNotesView) => { summary = v; }, setFull: (v: MaterialNotesView) => { full = v; } };
+}
+
+async function selectText(page: Parameters<typeof mockKnowledgeMapApi>[0], selector = "#note-section-0 .note-bullets [data-note-text]") {
+  const text = page.locator(selector).first();
+  await expect(text).toBeVisible();
+  await text.evaluate(element => {
+    const range = document.createRange(); range.selectNodeContents(element);
+    const selection = window.getSelection()!; selection.removeAllRanges(); selection.addRange(range);
+    element.dispatchEvent(new MouseEvent("mouseup", { bubbles: true }));
+  });
+  await expect(page.getByRole("toolbar", { name: "選取文字工具列" })).toBeVisible();
 }
 
 test("notes read without generating and preserve annotations after reload", async ({ page }) => {
@@ -116,8 +143,9 @@ test("notes read without generating and preserve annotations after reload", asyn
   await expect(page.getByRole("tab", { name: "筆記", exact: true })).toHaveAttribute("aria-selected", "true");
   await expect(page.getByRole("heading", { name: "一、堆疊的順序" })).toBeVisible();
   expect(state.writes).toEqual([]);
+  await selectText(page);
   await page.getByRole("button", { name: "新增註記", exact: true }).first().click();
-  await page.getByLabel("個人註記", { exact: true }).fill("記住最後進入、最先取出。");
+  await page.getByRole("textbox", { name: "個人註記", exact: true }).fill("記住最後進入、最先取出。");
   await page.getByRole("button", { name: "儲存註記", exact: true }).click();
   await expect(page.getByRole("dialog")).toBeHidden();
   await page.reload();
@@ -125,7 +153,8 @@ test("notes read without generating and preserve annotations after reload", asyn
   await page.locator(".note-sources .source-reference-button").first().click();
   await expect(page.getByRole("dialog", { name: "教材來源" })).toBeVisible();
   await page.getByRole("button", { name: "關閉", exact: true }).click();
-  await page.getByRole("button", { name: "Stack · 查看地圖" }).first().click();
+  await selectText(page);
+  await page.getByRole("button", { name: "在地圖查看", exact: true }).click();
   await expect(page.getByRole("dialog", { name: "概念詳情" })).toBeVisible();
   expect(state.writes).toEqual(["annotation"]);
 });
@@ -141,7 +170,7 @@ test("full notes require a click and failed regeneration keeps content and previ
   await expect(page.getByText(/來源引用未通過驗證/)).toBeVisible();
   await expect(page.getByTitle("由 AI 整理，每個重點都可點開原文對照。",{exact:true})).toBeVisible();
   await expect(page.getByRole("heading", { name: "一、堆疊的順序" })).toBeVisible();
-  await expect(page.getByRole("heading", { name: "先前段落的註記" })).toBeVisible();
+  await expect(page.getByRole("heading", { name: "先前的註記" })).toBeVisible();
   await page.getByText("當時段落：先前的段落").click();
   await expect(page.getByRole("heading", { name: "先前的段落", exact: true })).toBeVisible();
   await expect(page.getByText("舊版段落正文。", { exact: true })).toBeVisible();
@@ -151,7 +180,7 @@ test("full notes require a click and failed regeneration keeps content and previ
   await expect(page.getByRole("button", { name: "生成完整筆記", exact: true })).toBeVisible();
   expect(state.writes).toEqual([]);
   await page.getByRole("button", { name: "生成完整筆記", exact: true }).click();
-  await expect(page.getByRole("progressbar", { name: "已完成分區" })).toBeVisible();
+  await expect(page.getByRole("progressbar", { name: "已完成批次" })).toBeVisible();
   expect(state.writes).toEqual(["generate"]);
 });
 
@@ -163,11 +192,13 @@ test("notes and annotation editor remain usable on narrow screens and keyboard",
     await expect(page.getByRole("heading", { name: "一、堆疊的順序" })).toBeVisible();
     expect(await page.evaluate(() => document.documentElement.scrollWidth)).toBe(width);
     await page.screenshot({ path: testInfo.outputPath(`notes-${width}.png`), fullPage: true });
+    await selectText(page);
+    await page.keyboard.press("Tab");
+    await expect(page.getByRole("button", { name: "標記黃色", exact: true })).toBeFocused();
     await page.getByRole("button", { name: "新增註記", exact: true }).first().focus();
     await page.keyboard.press("Enter");
-    await expect(page.getByLabel("個人註記", { exact: true })).toBeFocused();
-    await page.keyboard.press("Escape");
-    await expect(page.getByRole("button", { name: "新增註記", exact: true }).first()).toBeFocused();
+    await expect(page.getByRole("textbox", { name: "個人註記", exact: true })).toBeFocused();
+    await page.getByRole("button", { name: "取消", exact: true }).click();
   }
 });
 
@@ -180,10 +211,10 @@ test("full notes show restored section progress and retain completed work on ret
   await page.getByRole("button", { name: "完整筆記", exact: true }).click();
   await expect(page.getByText(/重試時會從未完成部分接續/)).toBeVisible();
   await page.getByRole("button", { name: "重試生成", exact: true }).click();
-  await expect(page.getByRole("progressbar", { name: "已完成分區" })).toBeVisible();
-  await expect(page.getByRole("progressbar", { name: "已完成分區" })).toHaveAttribute("aria-valuenow", "1");
-  await expect(page.getByRole("progressbar", { name: "已完成分區" })).toHaveAttribute("aria-valuemax", "3");
-  await expect(page.getByText("已完成 1 / 3 個分區", { exact: true })).toBeVisible();
+  await expect(page.getByRole("progressbar", { name: "已完成批次" })).toBeVisible();
+  await expect(page.getByRole("progressbar", { name: "已完成批次" })).toHaveAttribute("aria-valuenow", "2");
+  await expect(page.getByRole("progressbar", { name: "已完成批次" })).toHaveAttribute("aria-valuemax", "6");
+  await expect(page.getByText("已完成 2 / 6 批", { exact: true })).toBeVisible();
 });
 
 
@@ -277,8 +308,8 @@ for (const format of ['audio','images'] as const) test(`note references use veri
  await page.route(`**/v1/artifacts/${artifactId}`,route=>route.fulfill({contentType:'text/html',body:'<!doctype html><html lang="zh-Hant"><body style="font-family:sans-serif;background:#e8efff;padding:24px"><h1>堆疊示意圖</h1><p>最後放入，最先取出。</p></body></html>'}));
  await page.goto(`/materials/${materialId}/notes`);
  const marker=page.locator('.note-sources .source-reference-button').first();await expect(marker).toHaveText(format==='audio'?'[▶ 04:02]':'[第 3 張圖片]');
- await marker.hover();await expect(page.getByRole('tooltip')).toContainText(format==='audio'?'課堂錄音':'投影片圖片');
- if(format==='images')await expect(page.getByRole('tooltip').locator('iframe')).toBeVisible();
+ await marker.click();await expect(page.getByRole('dialog',{name:'教材來源'})).toContainText(format==='audio'?'課堂錄音':'投影片圖片');
+ await page.getByRole('dialog',{name:'教材來源'}).getByRole('button',{name:'關閉'}).click();
  for(const [width,height] of [[1440,900],[1024,768],[390,844]]){
   await page.setViewportSize({width,height});await marker.scrollIntoViewIfNeeded();await marker.hover();
   await page.screenshot({path:testInfo.outputPath(`note-${format}-${width}.png`)});
@@ -303,8 +334,9 @@ test("older visible notes keep annotation and export requests on their content r
   return route.fulfill({contentType:'application/pdf',headers:{'Content-Disposition':"attachment; filename*=UTF-8''notes.pdf"},body:'%PDF'});
  });
  await page.goto(`/materials/${materialId}/notes`);
+ await selectText(page);
  await page.getByRole('button',{name:'新增註記',exact:true}).first().click();
- await page.getByLabel('個人註記',{exact:true}).fill('舊稿的個人註記');
+ await page.getByRole('textbox',{name:'個人註記',exact:true}).fill('舊稿的個人註記');
  await page.getByRole('button',{name:'儲存註記',exact:true}).click();await expect(page.getByRole('dialog')).toBeHidden();
  expect(annotationPath).toContain(`/knowledge-structures/${oldRevision}/notes/summary/annotations/`);
  await page.getByRole('button',{name:'匯出筆記',exact:true}).click();
@@ -315,29 +347,14 @@ test("older visible notes keep annotation and export requests on their content r
 });
 
 
-test("full notes regeneration confirms before writing and updated materials offer an update", async ({ page }) => {
+test("updated materials offer a full notes update", async ({ page }) => {
   const state = await setup(page);
-  state.setFull(notes("full"));
-  await page.goto(`/materials/${materialId}/notes`);
-  await page.getByRole("button", { name: "完整筆記", exact: true }).click();
-  await page.getByLabel("更多筆記操作").click();
-  await page.getByRole("button", { name: "重新生成", exact: true }).click();
-  const dialog = page.getByRole("dialog", { name: "重新生成完整筆記" });
-  await expect(dialog).toContainText("將重新撰寫整份筆記，可能需要數分鐘");
-  expect(state.writes).toEqual([]);
-  await dialog.getByRole("button", { name: "取消", exact: true }).click();
-  await expect(page.getByRole("button", { name: "重新生成", exact: true })).toBeFocused();
-  await page.getByRole("button", { name: "重新生成", exact: true }).click();
-  await dialog.getByRole("button", { name: "確認重新生成" }).click();
-  await expect(page.getByText("正在更新筆記，完成後自動替換", { exact: true })).toBeVisible();
-  await expect(page.getByRole("heading", { name: "一、堆疊的順序" })).toBeVisible();
-  expect(state.writes).toEqual(["generate"]);
   state.setFull({ ...notes("full"), update_available: true });
-  await page.reload();
+  await page.goto(`/materials/${materialId}/notes`);
   await page.getByRole("button", { name: "完整筆記", exact: true }).click();
   await expect(page.getByText("教材已更新，要更新完整筆記嗎？", { exact: true })).toBeVisible();
   await page.getByRole("button", { name: "更新完整筆記", exact: true }).click();
-  expect(state.writes).toEqual(["generate", "generate"]);
+  expect(state.writes).toEqual(["generate"]);
 });
 
 test("updating notes retain readable content, real elapsed time and section progress until replacement", async ({ page }) => {
@@ -347,11 +364,11 @@ test("updating notes retain readable content, real elapsed time and section prog
   await page.goto(`/materials/${materialId}/notes`);
   await expect(page.getByText("正在更新筆記，完成後自動替換", { exact: true })).toBeVisible();
   await expect(page.getByText(/已耗時 1 分/)).toBeVisible();
-  await expect(page.getByRole("progressbar", { name: "已完成分區" })).not.toHaveAttribute("aria-valuenow");
+  await expect(page.getByRole("progressbar", { name: "已完成批次" })).not.toHaveAttribute("aria-valuenow");
   await expect(page.getByRole("heading", { name: "一、堆疊的順序" })).toBeVisible();
   state.setSummary({ ...initial, progress: { ...initial.progress, completed_sections: 1, completed_parts: 2 } });
-  await expect(page.getByRole("progressbar", { name: "已完成分區" })).toHaveAttribute("aria-valuenow", "1");
-  await expect(page.getByText("已完成 1 / 4 個分區", { exact: true })).toBeVisible();
+  await expect(page.getByRole("progressbar", { name: "已完成批次" })).toHaveAttribute("aria-valuenow", "2");
+  await expect(page.getByText("已完成 2 / 10 批", { exact: true })).toBeVisible();
   const completed = notes();
   completed.paragraphs[0].heading = "更新後的堆疊"; completed.outline[0].heading = "更新後的堆疊";
   state.setSummary(completed);
@@ -404,7 +421,8 @@ test("older notes open the map bound to the visible content and its original run
   const oldView = { ...structureView(), knowledge_structure_revision: oldRevision, source_resolver: initial.source_resolver };
   await page.route(`**/knowledge-structures/${encodeURIComponent(oldRevision)}/outline`, route => route.fulfill({ json: outlineView(oldView, materialId, oldRun) }));
   await page.goto(`/materials/${materialId}/notes`);
-  await page.getByRole("button", { name: "Stack · 查看地圖", exact: true }).first().click();
+  await selectText(page);
+  await page.getByRole("button", { name: "在地圖查看", exact: true }).click();
   await expect(page).toHaveURL(new RegExp(`/runs/${oldRun}/knowledge-structures/`));
   expect(decodeURIComponent(page.url())).toContain(oldRevision);
 });
@@ -428,6 +446,8 @@ test("long notes keep the current outline entry visible and restore the local re
   await expect(last).toHaveAttribute("aria-current", "location");
   await expect(last).toBeInViewport();
   await page.setViewportSize({ width: 390, height: 844 });
+  // 窄版的段落操作改放正文下方，高度不同；先捲到末段再驗證目錄定位。
+  await body.evaluate(element => { element.scrollTop = element.scrollHeight; });
   const trigger = page.getByRole("button", { name: "章節目錄", exact: true });
   await expect(trigger).toHaveAttribute("aria-expanded", "false");
   await trigger.click();
@@ -438,34 +458,224 @@ test("long notes keep the current outline entry visible and restore the local re
   await expect(trigger).toHaveAttribute("aria-expanded", "false");
 });
 
-test("paragraph actions appear on hover and keyboard focus, with inline source markers", async ({ page }) => {
-  await setup(page);
-  await page.goto(`/materials/${materialId}/notes`);
-  const paragraph = page.locator("#note-section-0");
-  const actions = paragraph.locator(".note-paragraph-actions");
-  await page.locator(".note-kinds").hover();
-  await expect(actions).toHaveCSS("opacity", "0");
-  await paragraph.hover();
-  await expect(actions).toHaveCSS("opacity", "1");
-  await page.locator(".note-kinds").hover();
-  await paragraph.focus();
-  await expect(actions).toHaveCSS("opacity", "1");
-  await expect(paragraph.locator(".note-callout li .note-sources .source-reference-button")).toHaveCount(1);
-});
-
-test("both note kinds expose regeneration and existing full content remains readable", async ({ page }) => {
+test("existing full content remains readable while an update is available", async ({ page }) => {
   const state = await setup(page);
   state.setFull({ ...notes("full"), status: "not_generated", update_available: true });
   await page.goto(`/materials/${materialId}/notes`);
-  await page.getByLabel("更多筆記操作").click();
-  await page.getByRole("button", { name: "重新生成", exact: true }).click();
-  const confirmation = page.getByRole("dialog", { name: "重新生成複習速覽" });
-  await expect(confirmation).toBeVisible();
-  await confirmation.getByRole("button", { name: "取消", exact: true }).click();
   await page.getByRole("button", { name: "完整筆記", exact: true }).click();
   await expect(page.getByRole("heading", { name: "一、堆疊的順序" })).toBeVisible();
-  await page.getByLabel("更多筆記操作").click();
-  await page.getByRole("button", { name: "重新生成", exact: true }).click();
-  await expect(page.getByRole("dialog", { name: "重新生成完整筆記" })).toBeVisible();
   expect(state.writes).toEqual([]);
+});
+
+test("progress page follows the upload layout, keeps the old draft readable and returns when finished", async ({ page }) => {
+  const initial = { ...notes(), status: "running" as const, updating: true, started_at: new Date(Date.now() - 65000).toISOString(), updated_at: new Date().toISOString(),
+    progress: { stage: "generating" as const, completed_sections: 0, total_sections: 4, completed_parts: 3, total_parts: 10, current_section: "堆疊" } };
+  const state = await setup(page, initial);
+  await page.goto(`/materials/${materialId}/notes`);
+  await page.getByRole("button", { name: "查看進度", exact: true }).click();
+  const progress = page.getByRole("region", { name: "筆記生成進度" });
+  await expect(progress.getByRole("heading", { name: "正在更新複習速覽", level: 1 })).toBeVisible();
+  await expect(progress.getByRole("heading", { name: "整體進度" })).toBeVisible();
+  await expect(progress.getByText("已完成 3 / 10 批。完成後自動開啟筆記。")).toBeVisible();
+  for (const step of ["規劃分批", "逐批撰寫", "逐段核對", "整理章節", "發布"]) await expect(progress.getByText(step, { exact: true })).toBeVisible();
+  await expect(progress.getByText("已完成 3 / 10 批・堆疊", { exact: true })).toBeVisible();
+  await expect(progress.getByText(/1 分/)).toBeVisible();
+  expect(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth)).toBe(true);
+  await expect(page).toHaveURL(/\/notes\?view=progress$/);
+  await page.reload();
+  await expect(progress).toBeVisible();
+  await page.goBack();
+  await expect(page.getByRole("heading", { name: "一、堆疊的順序" })).toBeVisible();
+  await page.goForward();
+  await expect(progress).toBeVisible();
+  await progress.getByRole("button", { name: "返回筆記" }).click();
+  await expect(page).toHaveURL(/\/notes$/);
+  await expect(page.getByRole("heading", { name: "一、堆疊的順序" })).toBeVisible();
+  await page.getByRole("button", { name: "查看進度", exact: true }).click();
+  const completed = notes();
+  completed.paragraphs[0].heading = "更新後的堆疊"; completed.outline[0].heading = "更新後的堆疊";
+  state.setSummary(completed);
+  await expect(page.getByRole("region", { name: "筆記生成進度" })).toHaveCount(0);
+  await expect(page.getByRole("heading", { name: "一、更新後的堆疊" })).toBeVisible();
+  await expect(page).toHaveURL(/\/notes$/);
+});
+
+test("knowledge map concept opens the first note section that cites it", async ({ page }) => {
+  await setup(page);
+  await page.goto(`/materials/${materialId}/runs/${runId}/knowledge-structures/${encodeURIComponent(structureRevision)}`);
+  await page.getByRole("tab", { name: "知識地圖" }).click();
+  await openMapConcept(page);
+  await page.getByRole("dialog", { name: "概念詳情", exact: true }).getByRole("button", { name: "在筆記中查看" }).click();
+  await expect(page).toHaveURL(new RegExp(`/materials/${materialId}/notes$`));
+  await expect(page.locator("#note-section-0")).toHaveClass(/note-paragraph-located/);
+  await expect(page.locator("#note-section-0")).toBeFocused();
+});
+
+test("knowledge map hides the note link when notes do not cite the concept", async ({ page }) => {
+  await setup(page, { ...notes(), paragraphs: [], outline: [] });
+  await page.goto(`/materials/${materialId}/runs/${runId}/knowledge-structures/${encodeURIComponent(structureRevision)}`);
+  await page.getByRole("tab", { name: "知識地圖" }).click();
+  await openMapConcept(page);
+  await expect(page.getByRole("dialog", { name: "概念詳情", exact: true }).getByRole("button", { name: "在筆記中查看" })).toHaveCount(0);
+});
+
+test("selected text retains highlight styles after reload and removes overlapping marks", async ({ page }) => {
+  await setup(page);
+  await page.goto(`/materials/${materialId}/notes`);
+  await selectText(page);
+  await page.getByRole("button", { name: "標記黃色", exact: true }).click();
+  await expect(page.locator(".note-mark-yellow")).toHaveText("堆疊使用後進先出");
+  await page.getByRole("button", { name: "標記粗體", exact: true }).click();
+  await expect(page.locator(".note-mark-yellow")).toHaveCSS("font-weight", "700");
+  await page.reload();
+  await expect(page.locator(".note-mark-yellow")).toHaveText("堆疊使用後進先出");
+  await selectText(page);
+  await page.getByRole("button", { name: "移除標記", exact: true }).click();
+  await expect(page.locator("#note-section-0 .note-bullets [data-note-text]").first()).toHaveCSS("font-weight", "400");
+  await page.reload();
+  await expect(page.locator("#note-section-0 .note-bullets [data-note-text]").first()).toHaveCSS("background-color", "rgba(0, 0, 0, 0)");
+});
+
+test("all note headings, table labels and whole formulas retain marks and comments", async ({ page }) => {
+  const view = notes();
+  view.sections = [
+    { section_id: "empty", heading: "第一章 資料結構", level: 1, parent_id: null, paragraph_ids: [], outline: [] },
+    { section_id: "content", heading: "1.1 堆疊", level: 2, parent_id: "empty", paragraph_ids: ["0", "1"], outline: [] },
+  ];
+  await setup(page, view);
+  await page.goto(`/materials/${materialId}/notes`);
+  const selectors = ["#note-section-empty h2 [data-note-text]", "#note-section-content h3 [data-note-text]",
+    "#note-section-0 h4 [data-note-text]", "#note-section-0 caption [data-note-text]",
+    "#note-section-0 th [data-note-text]", "#note-section-0 .note-callout-title [data-note-text]"];
+  for (const selector of selectors) {
+    await selectText(page, selector);
+    await page.getByRole("button", { name: "標記黃色", exact: true }).click();
+    await expect(page.locator(selector).first()).toHaveClass(/note-mark-yellow/);
+  }
+  await selectText(page, selectors[0]);
+  await page.getByRole("button", { name: "新增註記", exact: true }).click();
+  await page.getByRole("textbox", { name: "個人註記", exact: true }).fill("空章節也能寫心得");
+  await page.getByRole("button", { name: "儲存註記", exact: true }).click();
+  await expect(page.getByText("空章節也能寫心得", { exact: true })).toBeVisible();
+  const math = page.locator("#note-section-1 .note-mark-formula");
+  await math.focus();
+  await page.keyboard.press("Enter");
+  await page.getByRole("button", { name: "標記藍色", exact: true }).click();
+  await expect(math).toHaveClass(/note-mark-blue/);
+  await page.getByRole("button", { name: "新增註記", exact: true }).click();
+  await page.getByRole("textbox", { name: "個人註記", exact: true }).fill("公式整條註記");
+  await page.getByRole("button", { name: "儲存註記", exact: true }).click();
+  await expect(page.getByText("公式整條註記", { exact: true })).toBeVisible();
+  await page.reload();
+  for (const selector of selectors) await expect(page.locator(selector).first()).toHaveClass(/note-mark-yellow/);
+  await expect(math).toHaveClass(/note-mark-blue/);
+  await expect(math).toHaveAttribute("data-note-source", formula);
+  await expect(page.getByText("空章節也能寫心得", { exact: true })).toBeVisible();
+  await expect(page.getByText("公式整條註記", { exact: true })).toBeVisible();
+});
+
+test("inline math expands to the whole formula while keeping surrounding text in one annotation block", async ({ page }) => {
+  const view = notes();
+  view.paragraphs[0] = { ...view.paragraphs[0], blocks: [{ type: "text", text: "計算 $x^2$ 結果" }] };
+  await setup(page, view);
+  await page.goto(`/materials/${materialId}/notes`);
+  const prose = page.locator("#note-section-0 .note-prose");
+  await expect(prose).toBeVisible();
+  await prose.evaluate(element => {
+    const range = document.createRange(); range.selectNodeContents(element);
+    const selection = window.getSelection()!; selection.removeAllRanges(); selection.addRange(range);
+    element.dispatchEvent(new MouseEvent("mouseup", { bubbles: true }));
+  });
+  await expect(page.getByRole("button", { name: "新增註記", exact: true })).toBeEnabled();
+  await page.getByRole("button", { name: "標記綠色", exact: true }).click();
+  await page.reload();
+  await expect(prose.locator(".note-mark-green")).toHaveCount(3);
+  await expect(prose.locator(".note-mark-formula")).toHaveAttribute("data-note-source", "$x^2$");
+});
+
+test("selection opens a BOT draft without submitting a question", async ({ page }) => {
+  await setup(page);
+  const posts: string[] = [];
+  await page.route("**/voice-conversations", route => {
+    if (route.request().method() === "POST") posts.push(route.request().url());
+    return json(route, { conversations: [] });
+  });
+  await page.goto(`/materials/${materialId}/notes`);
+  await selectText(page);
+  await page.getByRole("button", { name: "問 AI BOT", exact: true }).click();
+  await expect(page.getByLabel("問題／辨識文字")).toHaveValue("堆疊使用後進先出");
+  expect(posts).toEqual([]);
+});
+
+test("cross-block selection saves separate marks and explains the annotation limit", async ({ page }) => {
+  await setup(page);
+  await page.goto(`/materials/${materialId}/notes`);
+  await expect(page.locator("#note-section-0 [data-note-text]").first()).toBeVisible();
+  await page.locator("#note-section-0").evaluate(element => {
+    const spans = element.querySelectorAll("[data-note-text]");
+    const range = document.createRange(); range.setStart(spans[0].firstChild!, 0); range.setEnd(spans[1].firstChild!, spans[1].textContent!.length);
+    const selection = window.getSelection()!; selection.removeAllRanges(); selection.addRange(range);
+    spans[1].dispatchEvent(new MouseEvent("mouseup", { bubbles: true }));
+  });
+  await expect(page.getByRole("button", { name: "新增註記", exact: true })).toBeDisabled();
+  await expect(page.getByText("註記請選取同一段內的文字", { exact: true })).toBeVisible();
+  await page.getByRole("button", { name: "標記綠色", exact: true }).click();
+  await expect(page.locator(".note-mark-green")).toHaveCount(2);
+  await page.reload();
+  await expect(page.locator(".note-mark-green")).toHaveCount(2);
+});
+
+test("touch selection changes reveal the mobile toolbar below the selected text", async ({ page }) => {
+  await setup(page);
+  await page.setViewportSize({ width: 390, height: 844 });
+  await page.goto(`/materials/${materialId}/notes`);
+  const text = page.locator("#note-section-0 [data-note-text]").first();
+  await expect(text).toBeVisible();
+  await text.evaluate(element => {
+    const range = document.createRange(); range.selectNodeContents(element);
+    const selection = window.getSelection()!; selection.removeAllRanges(); selection.addRange(range);
+    document.dispatchEvent(new Event("selectionchange"));
+  });
+  const toolbar = page.getByRole("toolbar", { name: "選取文字工具列" });
+  await expect(toolbar).toBeVisible();
+  expect((await toolbar.boundingBox())!.y).toBeGreaterThanOrEqual((await text.boundingBox())!.y);
+  await toolbar.getByRole("button", { name: "新增註記", exact: true }).click();
+  await expect(page.getByRole("dialog", { name: "註記邊欄" })).toBeVisible();
+  await expect(page.getByRole("textbox", { name: "個人註記", exact: true })).toBeFocused();
+});
+
+test("overlapping comments align to the same quote and cycle their active cards", async ({ page }, testInfo) => {
+  const initial = notes();
+  initial.paragraphs = [{ ...initial.paragraphs[0], blocks: [{ type: "bullets", items: [{ text: "最上面的盤子最先拿走" }] }] }];
+  initial.outline = initial.outline.slice(0, 1);
+  initial.annotations = ["第一則想法", "第二則想法"].map((body, i) => ({
+    annotation_id: `55555555-5555-4555-8555-${String(i + 1).padStart(12, "0")}`, anchor: "stable-anchor", body,
+    paragraph_id: "0", block_path: ["blocks", 0, "items", 0, "text"], start: 0, end: 11, quote: "最上面的盤子最先拿走",
+    original_revision: structureRevision, original_paragraph: initial.paragraphs[0], updated_at: "2026-10-25T01:00:00Z",
+  }));
+  await setup(page, initial);
+  await page.setViewportSize({ width: 1440, height: 900 });
+  await page.goto(`/materials/${materialId}/notes`);
+  const quote = page.locator(".note-mark-comment").first();
+  await quote.click();
+  await expect(page.locator(".note-comment-card.is-active")).toContainText("第一則想法");
+  await quote.click();
+  await expect(page.locator(".note-comment-card.is-active")).toContainText("第二則想法");
+  const cards = page.locator(".note-comment-lane .note-comment-card");
+  const first = (await cards.nth(0).boundingBox())!, second = (await cards.nth(1).boundingBox())!;
+  expect(first.y).toBeGreaterThanOrEqual((await quote.boundingBox())!.y - 2);
+  expect(second.y).toBeGreaterThanOrEqual(first.y + first.height);
+  const widths = await page.locator(".note-markup").evaluate(element => ({
+    column: parseFloat(getComputedStyle(element).gridTemplateColumns),
+    prose: element.querySelector(".note-markup-prose")!.getBoundingClientRect().width,
+  }));
+  expect(widths.prose).toBeCloseTo(widths.column, 1);
+  await page.screenshot({ path: testInfo.outputPath("notes-comments-1440.png"), fullPage: true });
+  await page.setViewportSize({ width: 390, height: 844 });
+  const pins = page.getByRole("button", { name: "開啟註記", exact: true });
+  await expect(pins).toHaveCount(2);
+  await expect.poll(async () => {
+    const first = (await pins.nth(0).boundingBox())!, second = (await pins.nth(1).boundingBox())!;
+    return (second.y - first.y) / first.height;
+  }).toBeLessThan(2);
 });

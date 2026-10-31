@@ -90,6 +90,12 @@ PYTEST
 
 記錄實際命令、範圍、結果與限制。合成測試提供程式回歸證據；模型品質須另以指定素材及標準，透過產品流程生成並人工核對。
 
+`test_research_workflow.py` 驗證完整涵蓋請求預算、長標題／線索／警告只在超額時截取、原文分批及來源索引保留；無法容納的原文不得宣稱支持。Gemma 回應仍須通過現有欄位與型別檢查。
+
 `test_note_sections.py` 驗證原章節／小節最多三層、原順序、多檔一檔一章、無標題地圖退路、跨章 claim 歸屬與每章程式大綱。`test_material_notes.py` 驗證每章必選的複習速覽、合法引用、公式語法與數字、一次逐段核對後只刪不符位置，以及格式與 provider 失敗不可假成功；完整筆記只對未涵蓋概念補寫一次並保留原有效段落，章節並行時章內順序、依批次組裝、失敗停止與補缺續接。`runtime/study/test_note_v16_queue.py` 用一次性 PostgreSQL 與受控模型驗證章節 metadata 同正文發布、更新途中仍讀舊稿、全空時保留既有稿與明確錯誤、首次空稿保存全部缺漏，以及速覽缺漏只顯示與完整筆記的交集；`test_note_queue.py` 核對重試契約與排程，以及並行章節依位置保存與續接。`test_assessment_safety_v1.py` 保護 v1／v2 封存題與 v3 新題讀取。這些受控測試不代替 Gemma 真實內容驗收。
 
 Podcast 回歸以合成資料驗證省略 29／31 重點後的存檔一致性、各集並行與 lease 恢復、前段變動後重核、共用請求上限、標題 512 tokens 與失敗候選／診斷保存，以及疊字重試仍污染時拒收。候選與診斷只保存在測試私人目錄，不呼叫真模型；不以此宣稱模型品質通過。
+
+`frontend/e2e/mock/notes.spec.ts` 另驗證批次進度、進度頁重新整理／返回，以及從知識地圖開啟對應筆記段落；沒有對應段落時不顯示入口，閱讀不觸發生成。
+
+`runtime/study/test_note_highlights.py` 驗證標記 CRUD、owner／Origin、選取範圍、Unicode code point、唯一／重複／缺失原句對應、舊註記、各類區塊與整條公式、章節標記重對應及三種匯出格式。`test_notes_browser.py` 走隔離 DB 的真 API；notes mock 驗證選取工具列、旁註、BOT 預填但不送出、手機與鍵盤操作。

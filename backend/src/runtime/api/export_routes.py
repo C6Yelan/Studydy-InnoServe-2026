@@ -10,7 +10,7 @@ import asyncio
 from pydantic import Field
 from .models import _Closed
 from . import request_context
-from .. import material_notes, export_documents, export_cards
+from .. import material_notes, note_highlights, note_marks, export_documents, export_cards
 from ..learning_activity import record_export
 
 async def export_slot(request: Request):
@@ -81,6 +81,12 @@ def install(app, settings):
         if view['content_generation'] is None:
             raise request_context.ApiFailure('RESOURCE_NOT_FOUND')
         view['knowledge_structure_revision'] = view['content_revision']
+        from .. import note_anchors
+        highlights = note_highlights.listing(learner, material_id, revision, kind, dsn=settings.dsn, view=view)
+        marked = note_marks.apply(note_anchors.targets(view['paragraphs'], view.get('sections', [])), highlights)
+        view['paragraphs'] = [p for p in marked if p.get('target_type') != 'section']
+        headings = {p['id']: p['heading'] for p in marked if p.get('target_type') == 'section'}
+        view['sections'] = [{**s, 'heading': headings['section:' + s['section_id']]} for s in view.get('sections', [])]
         from ..storage.database import database_session
         with database_session(settings.dsn) as db:
             view['material_name'] = material_name(db, learner, material_id)

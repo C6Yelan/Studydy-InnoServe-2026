@@ -16,6 +16,8 @@ from test_podcast_provider import verdict
 
 @pytest.mark.parametrize('failure', [None, 'script', 'review', 'title', 'foreign_source'])
 def test_gemma_script_review_title_and_persistence(closed_loop, monkeypatch, failure):
+    # 本例驗證等待耗盡後的發布／失敗流程；退避與等待上限由 semantic_service 單元測試驗證。
+    monkeypatch.setattr(semantic_service, 'SERVICE_WAIT_SECONDS', 0)
     owner, material, _, document, dsn, _ = closed_loop
     saved = podcasts.create_podcast(owner.learner_id, material.material_id, document['revision'],
         '合成講稿', [document['concepts'][0]['concept_id']], 'gemma-script', delivery='solo', dsn=dsn)

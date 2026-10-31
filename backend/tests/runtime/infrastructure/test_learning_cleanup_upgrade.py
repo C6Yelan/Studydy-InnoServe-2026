@@ -40,7 +40,7 @@ def test_empty_upgrade_keeps_single_concept_constraints(clean_database_dsn, migr
         assert db.execute("SELECT conkey,confkey FROM pg_constraint WHERE conname='assessment_set_items_set_id_study_session_id_knowledge_str_fkey'").fetchone() == ([1,3,4,5],[1,4,5,6])
 
 
-def test_upgrade_preserves_normal_answers_goals_and_only_supported_moved_completion(closed_loop):
+def test_upgrade_preserves_normal_answers_goals_and_only_supported_moved_completion(closed_loop, monkeypatch):
     f = concept_fixture(closed_loop, 2)
     owner,material,dsn = f['learner'].learner_id,f['source'].material_id,f['dsn']
     retired = create(f)
@@ -53,7 +53,10 @@ def test_upgrade_preserves_normal_answers_goals_and_only_supported_moved_complet
     day = datetime.now(ZoneInfo('Asia/Taipei')).date()
     learning_goals.set_goal(f['learner'],material,day+timedelta(days=5),100,dsn=dsn)
     # 真發布及真移版，完成標記包含即將被清除與應保留的兩種來源。
-    head = new_revision(f, 'rewrite')
+    # 第 28 版資料尚無標記表；種舊資料時不執行新版來源回收，升級本身仍走真 SQL。
+    with monkeypatch.context() as legacy:
+        legacy.setattr('runtime.knowledge_publication._prune_unreferenced_structures', lambda *args: None)
+        head = new_revision(f, 'rewrite')
     preview = version_moves.preview_version_move(f['learner'],material,dsn=dsn)
     moved = version_moves.execute_version_move(f['learner'],material,head['revision'],[],True,
         preview['preview_digest'],'upgrade-move',dsn=dsn)

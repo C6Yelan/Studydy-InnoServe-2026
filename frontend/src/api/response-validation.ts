@@ -1,5 +1,5 @@
 import type {
-  MaterialNotesView, AssessmentPresence, CelebrationClaim,
+  MaterialNotesView, NoteHighlight, AssessmentPresence, CelebrationClaim,
   LearningGoalView, LearningGoalsView,
   StudyStartView,
   LearningDiagnosisView, ConceptDifficultyView,
@@ -1774,6 +1774,13 @@ function noteParagraph(value: unknown): boolean {
     && (p.table === null || noteTable(object(p.table)));
 }
 
+function noteSnapshot(value: unknown): boolean {
+  const s = object(value);
+  if (s?.target_type === "section") return typeof s.id === "string" && s.id.startsWith("section:")
+    && s.anchor === s.id && typeof s.heading === "string" && (s.level === 1 || s.level === 2 || s.level === 3);
+  return noteParagraph(value);
+}
+
 function noteOutline(value: unknown): value is unknown[] {
   return Array.isArray(value) && value.every(v => {
     const o = object(v);
@@ -1789,6 +1796,27 @@ function noteProgress(value: unknown): boolean {
     && [p.completed_sections, p.total_sections, p.completed_parts, p.total_parts].every(v => Number.isInteger(v) && Number(v) >= 0)
     && Number(p.completed_sections) <= Number(p.total_sections) && Number(p.completed_parts) <= Number(p.total_parts)
     && (p.current_section === null || typeof p.current_section === "string");
+}
+
+function noteAnchor(x: Record<string, unknown>): boolean {
+  const path = x.block_path;
+  return (path == null && x.start == null && x.end == null && (x.quote == null || typeof x.quote === "string"))
+    || (Array.isArray(path) && path.length > 0 && path.every(p => typeof p === "string" || (Number.isInteger(p) && Number(p) >= 0))
+      && Number.isInteger(x.start) && Number(x.start) >= 0 && Number.isInteger(x.end) && Number(x.end) > Number(x.start) && typeof x.quote === "string");
+}
+
+export function noteHighlight(value: unknown): value is NoteHighlight {
+  const x = object(value);
+  return !!x && isUuid(x.highlight_id) && (x.paragraph_id === null || typeof x.paragraph_id === "string")
+    && noteAnchor(x) && typeof x.quote === "string"
+    && ["yellow", "green", "blue", "pink", "bold", "underline", "strikethrough"].includes(String(x.style))
+    && timestamp(x.created_at) && revision(x.original_revision, "knowledge-structure")
+    && count(x.original_generation) && noteSnapshot(x.original_paragraph);
+}
+
+export function noteHighlights(value: unknown): value is { highlights: NoteHighlight[] } {
+  const x = object(value);
+  return !!x && Array.isArray(x.highlights) && x.highlights.every(noteHighlight);
 }
 
 export function materialNotes(value: unknown): value is MaterialNotesView {
@@ -1818,8 +1846,8 @@ export function materialNotes(value: unknown): value is MaterialNotesView {
     && (v.content_revision === null ? v.content_generation === null && v.paragraphs.length === 0 && v.outline.length === 0
       : count(v.content_generation))
     && Array.isArray(v.annotations) && v.annotations.every(a => { const x = object(a); return !!x
-      && isUuid(x.annotation_id) && typeof x.anchor === "string" && typeof x.body === "string"
-      && revision(x.original_revision, "knowledge-structure") && noteParagraph(x.original_paragraph)
+      && isUuid(x.annotation_id) && typeof x.anchor === "string" && typeof x.body === "string" && noteAnchor(x)
+      && revision(x.original_revision, "knowledge-structure") && noteSnapshot(x.original_paragraph)
       && (x.paragraph_id === null || typeof x.paragraph_id === "string") && timestamp(x.updated_at); });
 }
 

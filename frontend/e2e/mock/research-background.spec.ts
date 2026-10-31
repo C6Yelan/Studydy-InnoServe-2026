@@ -121,7 +121,7 @@ test('prepared sources require submission and published partial results open the
   await expect(page).toHaveURL(new RegExp(`/runs/${runId}/knowledge-structures/${encodeURIComponent(structureRevision)}$`));
 });
 
-test('stopped research is preserved in collapsed history while the current task stays visible', async ({page}) => {
+test('stopped research stays in the history list after active tasks', async ({page}) => {
   await mockKnowledgeMapApi(page, structureView());
   await page.route(`**/v1/materials/${materialId}/research`,r=>json(r,{researches:[
     {research_id:researchId,query:'目前選好的三份補充資料',status:'ready',selection:['a','b','c'],run_id:null,run_status:null,candidate_count:3,created_at:'2026-10-15T00:00:00Z'},
@@ -130,9 +130,10 @@ test('stopped research is preserved in collapsed history while the current task 
   await page.goto(`/materials/${materialId}/research`);
   await expect(page.getByRole('heading',{name:'目前選好的三份補充資料',exact:true})).toBeVisible();
   await expect(page.getByText('來源已準備，但尚未納入目前知識地圖；確認加入後才會分析。',{exact:true})).toBeVisible();
-  await expect(page.getByRole('heading',{name:'已停止的舊測試查詢',exact:true})).not.toBeVisible();
-  await page.getByText('已停止的查詢 · 1 筆',{exact:true}).click();
-  await expect(page.getByRole('heading',{name:'已停止的舊測試查詢',exact:true})).toBeVisible();
+  // 已停止的查詢不另分組，與其他紀錄並列並排在最後，以狀態標籤區分。
+  const stoppedRecord=page.getByRole('article',{name:'已停止的舊測試查詢'});
+  await expect(stoppedRecord).toBeVisible();await expect(stoppedRecord.locator('.research-status')).toBeVisible();
+  await expect(page.locator('.research-record').last()).toHaveAttribute('aria-label','已停止的舊測試查詢');
 });
 
 

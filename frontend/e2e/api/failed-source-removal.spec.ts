@@ -37,7 +37,7 @@ test('remove failed initial source, refresh, upload a replacement and publish', 
   expect(after.sources[0].included).toBe(true);
   const old = await (await page.request.get(`/v1/material-processing-runs/${oldRun}`)).json();
   expect(old.status).toBe('failed');
-  expect(old.error_code).toBe('SEMANTIC_OUTPUT_TRUNCATED');
+  expect(old.error_code).toBe('SEMANTIC_OUTPUT_INVALID');
   await page.getByRole('button', { name: '開啟知識地圖', exact: true }).click();
   await expect(page).toHaveURL(/\/knowledge-structures\//);
   await expect(page.locator('.react-flow__node').first()).toBeVisible();

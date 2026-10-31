@@ -16,6 +16,7 @@ export type KnownApiReasonCode =
   | "VOICE_PROVIDER_FAILED"
   | "VOICE_TRANSCRIPT_INVALID"
   | "VOICE_CONTEXT_TOO_LARGE"
+  | "VOICE_ANSWER_INVALID"
   | "RETRIEVAL_INDEX_REQUIRED"
   | "RETRIEVAL_INDEX_INVALID"
   | "MATERIAL_FORMAT_UNSUPPORTED"
@@ -1034,15 +1035,24 @@ export type NoteLegacyParagraph = NoteSource & {
   text: string; table: { headers: string[]; rows: string[][] } | null; formula: string | null;
 };
 export type NoteParagraph = NoteSection | NoteLegacyParagraph;
+export type NoteSectionSnapshot = { target_type: "section"; id: string; anchor: string; heading: string; level: 1 | 2 | 3 };
+export type NoteMarkupTarget = NoteParagraph | NoteSectionSnapshot;
 export type NoteOutlineEntry = { paragraph_id: string; level: 1 | 2 | 3; number: string; heading: string };
 export type NoteSourceSection = {
   section_id: string; heading: string; level: 1 | 2 | 3; parent_id: string | null; paragraph_ids: string[];
   outline: { section_id: string; heading: string; level: 2 | 3 }[];
 };
 export type NoteAnnotation = {
+  block_path?: (string | number)[] | null; start?: number | null; end?: number | null; quote?: string | null;
   annotation_id: string; anchor: string; body: string;
-  original_revision: string; original_paragraph: NoteParagraph;
+  original_revision: string; original_paragraph: NoteMarkupTarget;
   paragraph_id: string | null; updated_at: string;
+};
+export type NoteSelection = { paragraph_id: string; block_path: (string | number)[]; start: number; end: number; quote: string };
+export type HighlightStyle = "yellow" | "green" | "blue" | "pink" | "bold" | "underline" | "strikethrough";
+export type NoteHighlight = Omit<NoteSelection, "paragraph_id" | "block_path" | "start" | "end"> & {
+  highlight_id: string; paragraph_id: string | null; block_path: (string | number)[] | null; start: number | null; end: number | null;
+  style: HighlightStyle; created_at: string; original_revision: string; original_generation: number; original_paragraph: NoteMarkupTarget;
 };
 export type MaterialNotesView = {
   schema: "material-notes/v3"; material_id: string; knowledge_structure_revision: string;

@@ -1,7 +1,7 @@
 import { browserId } from "./browser-id.ts";
 import * as validate from "./response-validation.ts";
 import type {
-  MaterialNotesView, NoteKind, AssessmentPresence, CelebrationClaim,
+  MaterialNotesView, NoteKind, NoteHighlight, NoteSelection, HighlightStyle, AssessmentPresence, CelebrationClaim,
   LearningGoalView, LearningGoalsView,
   StudyStartView,
   LearningDiagnosisView, ConceptDifficultyView,
@@ -91,6 +91,7 @@ const apiErrorMessages: Record<KnownApiReasonCode, string> = {
   VOICE_PROVIDER_UNAVAILABLE: "語音服務暫時無法連線，已保存的對話仍可查看。",
   VOICE_PROVIDER_FAILED: "這次問答處理失敗，請重試。",
   VOICE_TRANSCRIPT_INVALID: "沒有辨識到清楚的語音，請再錄一次或改用文字。",
+  VOICE_ANSWER_INVALID: "回答未通過教材核對，請縮小範圍或換個問法再試。",
   VOICE_CONTEXT_TOO_LARGE: "這次問題與引用內容超過回答容量，請聚焦一個問題再試。",
   RETRIEVAL_INDEX_REQUIRED: "這份教材尚未具備新版檢索索引，請使用原始來源重新建立教材。",
   RETRIEVAL_INDEX_INVALID: "教材檢索索引無法核對，請重新建立教材。",
@@ -155,7 +156,7 @@ export function formatBytes(bytes: number): string {
   return `${unit === 0 ? value : value.toFixed(value >= 100 ? 0 : 1).replace(/\.0$/, "")} ${units[unit]}`;
 }
 
-function safeMessage(reason: ApiReasonCode): string {
+export function safeMessage(reason: ApiReasonCode): string {
   return reason === "UNKNOWN_API_ERROR" ? genericApiMessage : apiErrorMessages[reason];
 }
 
@@ -818,10 +819,25 @@ export class StudydyApiClient {
     }, (v): v is MaterialNotesView => validate.materialNotes(v) && v.material_id === materialId && v.knowledge_structure_revision === revision && v.kind === kind);
   }
 
-  async saveNoteAnnotation(view: MaterialNotesView, id: string, paragraphId: string | null, body: string): Promise<MaterialNotesView> {
+  async getNoteHighlights(view: MaterialNotesView): Promise<{ highlights: NoteHighlight[] }> {
+    return this.json(`/v1/materials/${view.material_id}/knowledge-structures/${view.content_revision}/notes/${view.kind}/highlights`, { method: "GET" }, validate.noteHighlights);
+  }
+
+  async addNoteHighlight(view: MaterialNotesView, selection: NoteSelection, style: HighlightStyle): Promise<NoteHighlight> {
+    return this.json(`/v1/materials/${view.material_id}/knowledge-structures/${view.content_revision}/notes/${view.kind}/highlights`, {
+      method: "POST", headers: { Origin: origin(), "Content-Type": "application/json" },
+      body: JSON.stringify({ expected_generation: view.content_generation, ...selection, style }),
+    }, validate.noteHighlight);
+  }
+
+  async removeNoteHighlight(view: MaterialNotesView, id: string): Promise<void> {
+    await this.request(`/v1/materials/${view.material_id}/knowledge-structures/${view.content_revision}/notes/${view.kind}/highlights/${id}`, { method: "DELETE", headers: { Origin: origin() } });
+  }
+
+  async saveNoteAnnotation(view: MaterialNotesView, id: string, paragraphId: string | null, body: string, selection?: NoteSelection): Promise<MaterialNotesView> {
     const saved = await this.json(`/v1/materials/${view.material_id}/knowledge-structures/${view.content_revision}/notes/${view.kind}/annotations/${id}`, {
       method: "PUT", headers: { Origin: origin(), "Content-Type": "application/json" },
-      body: JSON.stringify({ expected_generation: view.content_generation, paragraph_id: paragraphId, body }),
+      body: JSON.stringify({ expected_generation: view.content_generation, paragraph_id: paragraphId, body, ...selection }),
     }, (v): v is MaterialNotesView => validate.materialNotes(v) && v.material_id === view.material_id && v.knowledge_structure_revision === view.content_revision && v.kind === view.kind);
     // 舊稿註記寫回舊內容後，重新讀取目前請求，避免把畫面切成舊教材。
     return view.content_revision === view.knowledge_structure_revision ? saved : this.getNotes(view.material_id, view.knowledge_structure_revision, view.kind);
