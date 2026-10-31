@@ -2,6 +2,8 @@ from __future__ import annotations
 
 from collections.abc import Callable, Mapping
 from copy import deepcopy
+from contextlib import nullcontext
+from contextvars import ContextVar
 import json
 import os
 import re
@@ -15,6 +17,8 @@ import httpx
 
 from content_identity import canonical_bytes
 
+
+_request_slots = ContextVar("podcast_request_slots", default=None)
 
 API_KEY_ENV = "VLLM_API_KEY"
 SERVICE_URL_ENV = "STUDYDY_SEMANTIC_BASE_URL"
@@ -54,9 +58,9 @@ def _invalid_candidate(error, content, reason):
     if isinstance(content, str):
         from . import model_calls
 
-        model_calls.capture(content)
-        model_calls.rejected(reason, candidate=content)
         error.request_metadata = {**(error.request_metadata or {}), "response_validation": reason}
+        model_calls.capture(content, request_metadata=error.request_metadata)
+        model_calls.rejected(reason, candidate=content)
     return error
 
 
@@ -378,28 +382,42 @@ def _degenerate_text(value: Any, source: str) -> bool:
 
 
 def request_semantics(client: httpx.Client, **arguments: Any) -> dict[str, Any]:
-    """透過共用 HTTP 邊界請求語意結果。
+    """截斷或疊字最多重試一次；每個候選只保存一次並附上對應請求診斷。"""
+    from . import model_calls
 
-    輸出截斷時以較小輸出上限重試一次。出現原文沒有的疊字／思考殘字時以原輸出上限
-    重試一次；重試失敗就交回第一次的結果，重試仍有疊字就交回重試結果，
-    都由各功能既有的驗證決定是否採用。
-    """
+    def metadata():
+        diagnostics = arguments.get("diagnostics")
+        return {k: v for k, v in diagnostics[-1].items() if k != "candidate"} if diagnostics else {}
 
-    try:
-        result = _request_semantics_once(client, **arguments)
-    except SemanticServiceError as error:
-        if error.reason_code != "SEMANTIC_OUTPUT_TRUNCATED":
+    def attempt(**overrides):
+        try:
+            return _request_semantics_once(client, **{**arguments, **overrides})
+        except SemanticServiceError as error:
+            if error.request_metadata is not None:
+                # _invalid_candidate 保存的記錄持有這份 metadata，同步補上來源／片段與實送診斷。
+                error.request_metadata.update(metadata())
             raise
-        return _request_semantics_once(
-            client, **arguments, max_tokens_cap=TRUNCATION_RETRY_MAX_TOKENS
-        )
-    source = canonical_bytes(arguments["request"]).decode("utf-8")
-    if not _degenerate_text(result, source):
-        return result
-    # 第一次已是完整可解析的結果；重試只為換掉疊字，不能讓它把可用結果變成失敗。
-    try:
-        return _request_semantics_once(client, **arguments)
-    except SemanticServiceError:
+
+    with _request_slots.get() or nullcontext():
+        source = canonical_bytes(arguments["request"]).decode("utf-8")
+        retried = False
+        try:
+            result = attempt()
+        except SemanticServiceError as error:
+            if error.reason_code != "SEMANTIC_OUTPUT_TRUNCATED":
+                raise
+            result = attempt(max_tokens_cap=TRUNCATION_RETRY_MAX_TOKENS)
+            retried = True
+        if _degenerate_text(result, source):
+            model_calls.capture(result, request_metadata=metadata())
+            model_calls.rejected("candidate_degenerate_text")
+            if not retried:
+                result = attempt()
+                if not _degenerate_text(result, source):
+                    return result
+                model_calls.capture(result, request_metadata=metadata())
+            model_calls.rejected("SEMANTIC_GENERATION_FAILED")
+            raise SemanticServiceError("SEMANTIC_GENERATION_FAILED")
         return result
 
 
@@ -666,9 +684,13 @@ def generate(prompt, schema, *, request=None, cancellation_check=None, cancelled
         if cancellation_check is not None:
             cancellation_check()
 
+    diagnostics = []
     with semantic_client() as client:
         result = request_semantics(
             client, runtime_lock=lock, task="material_review",
             request=request or {}, response_schema=schema, cancellation_check=check,
+            diagnostics=diagnostics,
         )
-    return model_calls.capture(result)
+    return model_calls.capture(result, request_metadata={
+        k: v for k, v in diagnostics[-1].items() if k != "candidate"
+    })

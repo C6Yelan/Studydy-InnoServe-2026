@@ -98,3 +98,57 @@ def test_failed_title_waits_for_parent_transaction(tmp_path):
     model_calls.close(parent)
     path, = (tmp_path / "artifacts/failures").glob("*.json")
     assert json.loads(path.read_text())["tags"]["feature"] == "podcast_title"
+
+
+def test_podcast_failure_masks_secrets_and_keeps_validation_location(tmp_path, monkeypatch):
+    from runtime.podcast_script import validate
+    monkeypatch.setenv("STUDYDY_PODCAST_PROVIDER_TOKEN", "private-provider-secret")
+    work = start(feature="podcast_script")
+    model_calls.capture({"title": "private-provider-secret", "authorization": "unknown-secret",
+                        "raw": "Bearer raw-secret"})
+    with pytest.raises(ValueError):
+        validate({"schema": "podcast-script/v2", "provider": "test", "segments": []}, {"claims": []})
+    model_calls.completed("failed", "PODCAST_SCRIPT_INVALID")
+    model_calls.close(work)
+    path, = (tmp_path / "artifacts/failures").glob("*.json")
+    saved = path.read_text()
+    assert "private-provider-secret" not in saved and "unknown-secret" not in saved and "raw-secret" not in saved
+    document = json.loads(saved)
+    assert document["rejections"][0]["file"] == "podcast_script.py"
+    assert document["rejections"][0]["function"] == "validate"
+    assert document["rejections"][0]["line"] > 0
+
+
+@pytest.mark.parametrize("contents, error", [
+    ([("stop", '{"text":"private-provider-secret"}')], None),
+    ([("length", '{"text":"'), ("length", '{"text":"')], "SEMANTIC_OUTPUT_TRUNCATED"),
+    ([("stop", '{"text":')], "SEMANTIC_RESPONSE_INVALID"),
+    ([("stop", '[]')], "SEMANTIC_RESPONSE_INVALID"),
+    ([("stop", '{"text":"分布分布"}'), ("stop", '{"text":"分布分布"}')], "SEMANTIC_GENERATION_FAILED"),
+    ([("stop", '{"text":"分布分布"}'), ("length", '{')], "SEMANTIC_OUTPUT_TRUNCATED"),
+])
+def test_generate_keeps_one_candidate_per_attempt_with_private_metadata(tmp_path, monkeypatch, contents, error):
+    from runtime import semantic_service, local_ai_config
+    from test_semantic_service_v1 import _chat, _lock
+    monkeypatch.setattr(local_ai_config, "configured_lock", _lock)
+    monkeypatch.setenv("VLLM_API_KEY", "private-provider-secret")
+    requests = []
+    monkeypatch.setattr(semantic_service, "semantic_client", lambda: _chat(contents, requests))
+    work = start(feature="podcast_script")
+    request = {"source": "private-provider-secret", "window": {"start": 2, "end": 7}}
+    schema = {"type": "object", "properties": {"text": {"type": "string"}}, "required": ["text"]}
+    if error:
+        with pytest.raises(SemanticServiceError, match=error):
+            semantic_service.generate("synthetic", schema, request=request)
+    else:
+        assert semantic_service.generate("synthetic", schema, request=request) == {"text": "private-provider-secret"}
+    model_calls.completed("failed", error or "PODCAST_SCRIPT_INVALID")
+    model_calls.close(work)
+    path, = (tmp_path / "artifacts/failures").glob("*.json")
+    records = json.loads(path.read_text())["candidates"]
+    assert len(records) == len(contents)
+    assert [r["request_metadata"]["finish_reason"] for r in records] == [v[0] for v in contents]
+    assert [r["request_metadata"]["max_tokens"] for r in records] == requests
+    assert all(r["request_metadata"]["request"]["window"] == request["window"] for r in records)
+    assert all("candidate" not in r["request_metadata"] for r in records)
+    assert "private-provider-secret" not in path.read_text()

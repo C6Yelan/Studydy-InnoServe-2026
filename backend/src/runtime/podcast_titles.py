@@ -65,15 +65,20 @@ def semantic_call():
         )
         task_lock.update(prompt=PROMPT, max_tokens=512)
         cancellation = _cancellation.get()
+        diagnostics = []
         with semantic_client() as client:
-            return request_semantics(
+            result = request_semantics(
                 client,
                 runtime_lock={**lock, "material_review": task_lock},
                 task="material_review",
                 request=request,
                 response_schema=_SCHEMA,
+                diagnostics=diagnostics,
                 cancellation_check=cancellation.check if cancellation is not None else None,
             )
+        return model_calls.capture(result, request_metadata={
+            k: v for k, v in diagnostics[-1].items() if k != "candidate"
+        })
 
     return call
 
@@ -87,7 +92,10 @@ def generate(episode, call=None, *, claim=None):
         claim["material_id"], claim["owner"], defer_to_parent=True,
     ) if claim is not None else None
     try:
-        result = validate((call or semantic_call())(build_request(episode)))
+        candidate = (call or semantic_call())(build_request(episode))
+        if call is not None:
+            model_calls.capture(candidate)
+        result = validate(candidate)
         if trace is not None:
             model_calls.completed("succeeded" if result else "failed", None if result else "PODCAST_TITLE_INVALID")
         return result

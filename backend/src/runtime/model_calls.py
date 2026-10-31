@@ -9,6 +9,8 @@ from uuid import uuid4
 import json
 import logging
 import os
+import re
+import traceback
 
 
 _current = ContextVar("model_work", default=None)
@@ -87,11 +89,12 @@ def tags(*, feature=None, stage=None):
     return value
 
 
-def capture(candidate, *, call_tags=None):
+def capture(candidate, *, call_tags=None, request_metadata=None):
     work = _current.get()
     if work is not None and work.archive is None:
         with work.lock:
-            work.candidates.append({"tags": call_tags or tags(), "candidate": candidate})
+            work.candidates.append({"tags": call_tags or tags(), "candidate": candidate,
+                                    **({"request_metadata": request_metadata} if request_metadata is not None else {})})
     return candidate
 
 
@@ -107,6 +110,33 @@ def rejected(reason, *, candidate=None, call_tags=None):
                     "candidate": candidate,
                     "rejection_reason": reason,
                 })
+
+
+def validation_failed(error):
+    """只記驗證位置，不把 exception 文字或區域變數寫入診斷。"""
+    frame = traceback.extract_tb(error.__traceback__)[-1]
+    rejected({"code": "PODCAST_SCRIPT_INVALID", "file": Path(frame.filename).name,
+              "function": frame.name, "line": frame.lineno})
+
+
+def _redact(document):
+    secrets = [value for key, value in os.environ.items()
+               if value and re.search(r"TOKEN|PASSWORD|SECRET|API_KEY|DSN", key)]
+
+    def clean(value):
+        if isinstance(value, dict):
+            return {key: "[REDACTED]" if re.fullmatch(
+                r"(?i)(authorization|password|secret|token|api[_-]?key|access[_-]?token)", key
+            ) else clean(item) for key, item in value.items()}
+        if isinstance(value, list):
+            return [clean(item) for item in value]
+        if isinstance(value, str):
+            for secret in sorted(secrets, key=len, reverse=True):
+                value = value.replace(secret, "[REDACTED]")
+            return re.sub(r"(?i)Bearer\s+[A-Za-z0-9._~+/-]+=*", "Bearer [REDACTED]", value)
+        return value
+
+    return clean(document)
 
 
 def completed(outcome, reason=None):
@@ -163,7 +193,7 @@ def _finalize(work):
                 path = directory / f"{uuid4()}.json"
                 descriptor = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
                 with os.fdopen(descriptor, "w", encoding="utf-8") as output:
-                    json.dump(document, output, ensure_ascii=False)
+                    json.dump(_redact(document), output, ensure_ascii=False)
             except (OSError, TypeError, ValueError):
                 _logger.warning("MODEL_FAILURE_RECORD_FAILED")
         archive_candidates = list(work.candidates) if work.archive is not None and work.outcome == "failed" else []
