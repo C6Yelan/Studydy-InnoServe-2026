@@ -97,3 +97,5 @@ PYTEST
 Podcast 回歸以合成資料驗證省略 29／31 重點後的存檔一致性、各集並行與 lease 恢復、前段變動後重核、共用請求上限、標題 512 tokens 與失敗候選／診斷保存，以及疊字重試仍污染時拒收。候選與診斷只保存在測試私人目錄，不呼叫真模型；不以此宣稱模型品質通過。
 
 `frontend/e2e/mock/notes.spec.ts` 另驗證批次進度、進度頁重新整理／返回，以及從知識地圖開啟對應筆記段落；沒有對應段落時不顯示入口，閱讀不觸發生成。
+
+`runtime/study/test_note_highlights.py` 驗證標記 CRUD、owner／Origin、選取範圍、Unicode code point、唯一／重複／缺失原句對應、舊註記及三種匯出格式。`test_notes_browser.py` 走隔離 DB 的真 API；notes mock 驗證選取工具列、旁註、BOT 預填但不送出、手機與鍵盤操作。

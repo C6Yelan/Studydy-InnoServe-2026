@@ -64,6 +64,10 @@ Migration runner 核對 [SQL序列](../backend/migrations/) 與 checksum，每�
 語音辨識與合成服務與文字模型分開。問答的錄音辨識、檢索、多輪摘要、引用核對與答案保存各自維持取消及工作身分。
 Podcast 由單一協調 worker 持有租約，依 STUDYDY_PODCAST_WORKERS 並行製作各集及第一輪段落核對，文字請求共用同一並行上限；逐集保存並在整批結束後釋放租約。前段改寫影響後段依據時重新核對。講稿核對來源後交本機語音服務配音；音訊完成才算完成一集，之後排入字幕對齊與可選的影片。語音問答的已核對回答逐句配音。
 
+## 個人筆記標記
+
+`note_highlights`（0034）保存 owner、教材、筆記種類、原 revision／generation、Unicode code point 選取範圍、quote 與段落快照。`note_annotations` 同時新增可為空的範圍欄位，既有註記不搬資料。讀取時依原位置或唯一相符 quote 重新對應；失配保留原稿供回查。寫入綁定可見稿版本，沿用 owner／Origin 邊界，不呼叫模型。
+
 ## 前端介面原則
 
 1. 同類元件全站共用一個樣式：進度條、按鈕、對話框、清單卡片不各頁自己做。
