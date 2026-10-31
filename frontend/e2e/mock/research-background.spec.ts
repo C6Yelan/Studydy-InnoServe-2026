@@ -121,7 +121,7 @@ test('prepared sources require submission and published partial results open the
   await expect(page).toHaveURL(new RegExp(`/runs/${runId}/knowledge-structures/${encodeURIComponent(structureRevision)}$`));
 });
 
-test('stopped research is preserved in collapsed history while the current task stays visible', async ({page}) => {
+test('stopped research stays in the history list after active tasks', async ({page}) => {
   await mockKnowledgeMapApi(page, structureView());
   await page.route(`**/v1/materials/${materialId}/research`,r=>json(r,{researches:[
     {research_id:researchId,query:'目前選好的三份補充資料',status:'ready',selection:['a','b','c'],run_id:null,run_status:null,candidate_count:3,created_at:'2026-10-15T00:00:00Z'},
