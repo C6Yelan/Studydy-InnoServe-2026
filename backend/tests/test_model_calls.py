@@ -98,3 +98,22 @@ def test_failed_title_waits_for_parent_transaction(tmp_path):
     model_calls.close(parent)
     path, = (tmp_path / "artifacts/failures").glob("*.json")
     assert json.loads(path.read_text())["tags"]["feature"] == "podcast_title"
+
+
+def test_podcast_failure_masks_secrets_and_keeps_validation_location(tmp_path, monkeypatch):
+    from runtime.podcast_script import validate
+    monkeypatch.setenv("STUDYDY_PODCAST_PROVIDER_TOKEN", "private-provider-secret")
+    work = start(feature="podcast_script")
+    model_calls.capture({"title": "private-provider-secret", "authorization": "unknown-secret",
+                        "raw": "Bearer raw-secret"})
+    with pytest.raises(ValueError):
+        validate({"schema": "podcast-script/v2", "provider": "test", "segments": []}, {"claims": []})
+    model_calls.completed("failed", "PODCAST_SCRIPT_INVALID")
+    model_calls.close(work)
+    path, = (tmp_path / "artifacts/failures").glob("*.json")
+    saved = path.read_text()
+    assert "private-provider-secret" not in saved and "unknown-secret" not in saved and "raw-secret" not in saved
+    document = json.loads(saved)
+    assert document["rejections"][0]["file"] == "podcast_script.py"
+    assert document["rejections"][0]["function"] == "validate"
+    assert document["rejections"][0]["line"] > 0

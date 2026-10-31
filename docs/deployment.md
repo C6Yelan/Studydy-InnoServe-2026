@@ -13,9 +13,9 @@
   owner/group 與 STUDYDY_UID/GID 相容；父目錄 0700。`.env` 僅保存路徑，禁止保存 token 值。
 - `STUDYDY_UPLOAD_MAX_BYTES=94371840` 同時約束 Nginx／API；UI 讀取 capabilities。
   內部 artifact 上限不變；capabilities 失敗時不以寫死上限繼續上傳。
-- `STUDYDY_MATERIAL_WORKERS`、`STUDYDY_CARD_WORKERS`、`STUDYDY_PODCAST_WORKERS`、`STUDYDY_RESEARCH_WORKERS` 設定教材、卡組、
-  Podcast、主題研究的背景執行緒數，預設 1；依模型服務的並行能力調整（如 A100 可調高、本機維持 1）。
-  Podcast 配音在語音服務端共用 GPU 鎖，多條 worker 只會讓講稿生成並行，配音仍逐份進行。
+- `STUDYDY_MATERIAL_WORKERS`、`STUDYDY_CARD_WORKERS`、`STUDYDY_RESEARCH_WORKERS` 設定教材、卡組、主題研究的背景執行緒數；
+  `STUDYDY_PODCAST_WORKERS` 設定同份 Podcast 的製作並行數。全部預設 1；依模型服務的並行能力調整（如 A100 可調高、本機維持 1）。
+  Podcast 配音在語音服務端共用 GPU 鎖，多集製作只會讓講稿生成並行，配音仍逐份進行。
 - `STUDYDY_NOTES_CHAPTER_CONCURRENCY` 設定一份完整筆記同時生成的一級章數，預設 1（逐批依序）。
   大於 1 時各章並行、章內依序；前文只看當下已完成且位置在前的批次，跨章重述的攔截較少。
   速覽不受影響。同時請求數約為教材 worker 數乘以此值，須小於模型服務的 `--max-num-seqs`。
@@ -27,6 +27,8 @@
 - Nginx 限定正式與 localhost Host，清除未使用的 forwarded／Access 身分 headers，
   保留 exact Origin／Cookie；redirect 使用相對路徑。沒有新增 proxy trust chain。
 - 使用新版持久工作、Gemma runtime lock 與 migration baseline；公開網域、UID、port 與資料位置保持競賽設定。
+
+Podcast 由單一協調 worker 持有整份租約；`STUDYDY_PODCAST_WORKERS`（預設 1）控制各集製作及第一輪段落核對的並行數，文字請求共用 N 槽，不因兩層並行相乘。各集完成即保存，整批結束才釋放租約；中斷後從未完成步驟接續。前段修正影響後段核對依據時重核後段，語音 GPU 鎖維持原樣。
 
 Access 非必要。每次切換須先完成本機驗收與部署核准；啟動 connector 前必須完成本機 smoke，
 使用 `docker compose -f compose.yaml -f compose.tunnel.yaml --profile tunnel up -d --no-deps cloudflared`。
