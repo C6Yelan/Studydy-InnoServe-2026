@@ -36,6 +36,8 @@ chmod 600 .env
 
 容器的 127.0.0.1 指向自己。模型在主機時可使用 host.docker.internal，但服務須監聽容器可達介面；其他容器或遠端服務使用其可達 origin。
 
+教學影片由後端容器內的 `/app/backend/.venv/bin/python` 渲染。正式依賴包含 Pillow 與 imageio-ffmpeg，沿用映像內 Noto 字型；Compose 將 `STUDYDY_VIDEO_WORK_DIR` 設為可寫的 `/tmp/podcast-video-work`，並提供 3 GiB tmpfs，滿足渲染器至少 2 GiB 可用空間的要求。不要填入主機影片虛擬環境的路徑。
+
 ## 建置與服務管理
 
 首次使用時，先由主機資料管理者建立尚不存在的 `STUDYDY_DATA_DIR`（預設 `./.studydy-product/compose`），owner/group 對應 `STUDYDY_UID/GID`、權限0700，避免 Docker 自動建立 root-owned bind 目錄。若資料根已存在，不重設其擁有者或權限；先核對既有狀態，再依本次部署狀態檔處理需要遷移的 artifact 子樹。

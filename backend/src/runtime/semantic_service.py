@@ -415,7 +415,17 @@ def _request_semantics_once(
     before_request: Callable[[], None] | None = None,
     tags: dict | None = None,
     max_tokens_cap: int | None = None,
+    diagnostics: list[dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
+    diagnostic = {
+        "task": task, "request": deepcopy(request), "input_tokens": None,
+        "max_tokens": None, "finish_reason": None, "usage": {},
+        "candidate": None, "request_id": None,
+    }
+    if diagnostics is not None:
+        diagnostics.append(diagnostic)
+    # read 每次約 6000 字，最多 4000 字說明與有界索引，8192 tokens 足以容納；不沿用整份審查的 32K。
+    read_cap = 8192 if task == "material_review" and request.get("task") == "read" else None
     service = _service(runtime_lock)
     try:
         task_lock = runtime_lock["assessment" if task == "assessment_check" else task]
@@ -442,10 +452,11 @@ def _request_semantics_once(
             cancellation_check,
         )
         max_tokens = _output_budget(
-            task, max_tokens, input_tokens, service["max_model_len"]
+            task, min(max_tokens, read_cap or max_tokens), input_tokens, service["max_model_len"]
         )
         if max_tokens_cap is not None:
             max_tokens = min(max_tokens, max_tokens_cap)
+        diagnostic.update(input_tokens=input_tokens, max_tokens=max_tokens)
         if before_request is not None:
             before_request()
         response = _post(
@@ -494,6 +505,11 @@ def _request_semantics_once(
             )
         choice = api_body["choices"][0]
         content = choice["message"]["content"]
+        diagnostic.update(
+            finish_reason=choice.get("finish_reason"),
+            usage=deepcopy(api_body.get("usage") or {}),
+            candidate=content, request_id=api_body.get("id"),
+        )
         if choice.get("finish_reason") != "stop":
             error = SemanticServiceError("SEMANTIC_OUTPUT_TRUNCATED")
             finish_reason = choice.get("finish_reason")
