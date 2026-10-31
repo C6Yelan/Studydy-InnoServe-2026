@@ -58,9 +58,9 @@ def _invalid_candidate(error, content, reason):
     if isinstance(content, str):
         from . import model_calls
 
-        model_calls.capture(content)
-        model_calls.rejected(reason, candidate=content)
         error.request_metadata = {**(error.request_metadata or {}), "response_validation": reason}
+        model_calls.capture(content, request_metadata=error.request_metadata)
+        model_calls.rejected(reason, candidate=content)
     return error
 
 
@@ -382,27 +382,42 @@ def _degenerate_text(value: Any, source: str) -> bool:
 
 
 def request_semantics(client: httpx.Client, **arguments: Any) -> dict[str, Any]:
-    """截斷或疊字最多重試一次；重試仍污染或失敗就拒收。"""
+    """截斷或疊字最多重試一次；每個候選只保存一次並附上對應請求診斷。"""
+    from . import model_calls
+
+    def metadata():
+        diagnostics = arguments.get("diagnostics")
+        return {k: v for k, v in diagnostics[-1].items() if k != "candidate"} if diagnostics else {}
+
+    def attempt(**overrides):
+        try:
+            return _request_semantics_once(client, **{**arguments, **overrides})
+        except SemanticServiceError as error:
+            if error.request_metadata is not None:
+                # _invalid_candidate 保存的記錄持有這份 metadata，同步補上來源／片段與實送診斷。
+                error.request_metadata.update(metadata())
+            raise
+
     with _request_slots.get() or nullcontext():
         source = canonical_bytes(arguments["request"]).decode("utf-8")
         retried = False
         try:
-            result = _request_semantics_once(client, **arguments)
+            result = attempt()
         except SemanticServiceError as error:
             if error.reason_code != "SEMANTIC_OUTPUT_TRUNCATED":
                 raise
-            result = _request_semantics_once(
-                client, **arguments, max_tokens_cap=TRUNCATION_RETRY_MAX_TOKENS
-            )
+            result = attempt(max_tokens_cap=TRUNCATION_RETRY_MAX_TOKENS)
             retried = True
         if _degenerate_text(result, source):
+            model_calls.capture(result, request_metadata=metadata())
+            model_calls.rejected("candidate_degenerate_text")
             if not retried:
-                result = _request_semantics_once(client, **arguments)
-            if _degenerate_text(result, source):
-                from . import model_calls
-                model_calls.capture(result)
-                model_calls.rejected("SEMANTIC_GENERATION_FAILED")
-                raise SemanticServiceError("SEMANTIC_GENERATION_FAILED")
+                result = attempt()
+                if not _degenerate_text(result, source):
+                    return result
+                model_calls.capture(result, request_metadata=metadata())
+            model_calls.rejected("SEMANTIC_GENERATION_FAILED")
+            raise SemanticServiceError("SEMANTIC_GENERATION_FAILED")
         return result
 
 
@@ -669,9 +684,13 @@ def generate(prompt, schema, *, request=None, cancellation_check=None, cancelled
         if cancellation_check is not None:
             cancellation_check()
 
+    diagnostics = []
     with semantic_client() as client:
         result = request_semantics(
             client, runtime_lock=lock, task="material_review",
             request=request or {}, response_schema=schema, cancellation_check=check,
+            diagnostics=diagnostics,
         )
-    return model_calls.capture(result)
+    return model_calls.capture(result, request_metadata={
+        k: v for k, v in diagnostics[-1].items() if k != "candidate"
+    })

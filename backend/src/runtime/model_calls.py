@@ -89,11 +89,12 @@ def tags(*, feature=None, stage=None):
     return value
 
 
-def capture(candidate, *, call_tags=None):
+def capture(candidate, *, call_tags=None, request_metadata=None):
     work = _current.get()
     if work is not None and work.archive is None:
         with work.lock:
-            work.candidates.append({"tags": call_tags or tags(), "candidate": candidate})
+            work.candidates.append({"tags": call_tags or tags(), "candidate": candidate,
+                                    **({"request_metadata": request_metadata} if request_metadata is not None else {})})
     return candidate
 
 
