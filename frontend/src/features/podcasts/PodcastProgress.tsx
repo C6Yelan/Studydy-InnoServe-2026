@@ -39,7 +39,7 @@ export function PodcastProgress({ view, busy, onAction }: {
   const lastUpdate = steps.map(step => step.started_at).filter((at): at is string => !!at).sort().at(-1);
   return <section className="flow-page processing-page task-page is-processing" aria-label="Podcast 生成進度">
     <FlowHeader title={view.status === "cancelled" ? "已取消 Podcast 生成" : paused ? "Podcast 生成中斷" : "正在生成 Podcast"}
-      description={paused ? "已完成的部分會保留，接續生成會從未完成的部分開始。" : "Studydy 會一集一集寫講稿、配音，全部完成後對齊字幕並開啟預覽。"} />
+      description={paused ? "已完成的部分會保留，接續生成會從未完成的部分開始。" : "Studydy 會製作各集講稿與配音，全部完成後對齊字幕並開啟預覽。"} />
     <LearningSteps labels={podcastSteps} current={2} label="建立 Podcast 步驟" />
     <div className="processing-grid">
       <section className="surface processing-card">

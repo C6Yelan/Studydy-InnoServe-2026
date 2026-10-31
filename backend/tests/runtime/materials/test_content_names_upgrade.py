@@ -8,7 +8,7 @@ import pytest
 
 from product_fixtures import closed_loop
 from runtime import card_sets, podcasts
-from runtime.storage.migrations import DEFAULT_MIGRATIONS_DIR, run_migrations
+from runtime.storage.migrations import DEFAULT_MIGRATIONS_DIR, load_migrations, run_migrations
 
 
 @pytest.fixture
@@ -48,7 +48,7 @@ def test_upgrade_truncates_all_names_and_preserves_deleted_cards(closed_loop):
                 db.execute("""INSERT INTO podcasts (podcast_id,learner_id,material_id,knowledge_structure_revision,name,mode,concept_ids,episodes,status,video_enabled,idempotency_key_sha256,request_fingerprint,created_at)
                     SELECT gen_random_uuid(),learner_id,material_id,knowledge_structure_revision,repeat('長',80),mode,concept_ids,episodes,status,video_enabled,sha256(g::text::bytea),request_fingerprint,now()
                     FROM podcasts CROSS JOIN generate_series(1,1001) g WHERE podcast_id=%s""", (identity,))
-    assert run_migrations(dsn) == (31,)
+    assert run_migrations(dsn) == tuple(m.version for m in load_migrations() if m.version >= 31)
     with psycopg.connect(dsn) as db:
         for table in ("card_sets", "podcasts"):
             rows = db.execute(f"SELECT name FROM {table}").fetchall()
