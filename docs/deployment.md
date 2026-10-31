@@ -49,6 +49,16 @@ Access 非必要。每次切換須先完成本機驗收與部署核准；啟動 
 語音合成另建 Python 3.12 環境：先由 PyTorch cu128 index 安裝 torch／torchaudio 2.8.0，再安裝 `ops/podcast/xtts-requirements.txt`（不裝 Coqui 中文 extras、jieba、pypinyin）。設定 `STUDYDY_PODCAST_TTS_PYTHON`（該環境的 python）、`STUDYDY_XTTS_MODEL_DIR`（[coqui/XTTS-v2@6c2b0d75](https://huggingface.co/coqui/XTTS-v2/tree/6c2b0d75eae4b7047358e3b6bd9325f857d43f77) 的 config.json、vocab.json、model.pth、speakers_xtts.pth）、`STUDYDY_XTTS_CKIP_MODEL_DIR`（[ckiplab/bert-base-chinese-ws@60c22ced](https://huggingface.co/ckiplab/bert-base-chinese-ws)）、`STUDYDY_XTTS_CKIP_TOKENIZER_DIR`（[google-bert/bert-base-chinese@8f23c25b](https://huggingface.co/google-bert/bert-base-chinese) 的 tokenizer 檔）、`STUDYDY_XTTS_CEDICT`（[CC-CEDICT](https://www.mdbg.net/chinese/dictionary?page=cc-cedict) 的 `cedict_1_0_ts_utf-8_mdbg.txt.gz`）、`STUDYDY_XTTS_UNIHAN`（[Unicode Unihan.zip](https://www.unicode.org/Public/UCD/latest/ucd/Unihan.zip)），並設 `HF_HUB_OFFLINE=1`。
 XTTS-v2 權重採 Coqui Public Model License，不得商用，只用於競賽展示。`/audio` 與 `/media-transcribe` 共用 GPU 鎖；每次請求啟動子程序載入模型，結束釋放 GPU。
 服務預設 `127.0.0.1:18091`。容器使用主機服務時，須由部署者設定可達的監聽位址與存取邊界。
+
+競賽 provider 啟動前，將暫存目錄放在 WSL 硬碟上的競賽資料目錄，避免音訊、轉寫及字幕對齊暫存占用 `/tmp` 的記憶體檔案系統：
+
+```bash
+mkdir -p /home/jerry/project/Studydy/main-competition/.studydy-product/podcast/tmp
+export TMPDIR=/home/jerry/project/Studydy/main-competition/.studydy-product/podcast/tmp
+```
+
+部署者須把此 `TMPDIR` 值加入競賽 provider 既有啟動設定，並確保服務帳號可寫入該目錄；provider 及其子程序沿用同一設定。只更新這份文件不會改變執行中的服務，實際套用與重啟由部署流程處理。
+
 短錄音與對齊使用 CPU；影音轉寫與語音合成使用 GPU，部署前須與同機其他工作安排資源使用時段。
 SearXNG 由競賽 project 的 `research-search` 提供，不使用正式站的 provider 或搜尋服務。
 
