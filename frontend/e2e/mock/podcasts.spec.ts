@@ -51,6 +51,41 @@ async function mockPodcasts(page: Page) {
   return { view, structure, script, actions, conflict: () => { conflict = true; }, deletes: () => deletes };
 }
 
+test("scripted episodes without audio keep the podcast production page readable", async ({ page }) => {
+  const fixture = await mockPodcasts(page);
+  fixture.view.video_enabled = false;
+  fixture.view.completed_episodes = 0;
+  fixture.view.episodes.forEach(episode => { episode.script = fixture.script; episode.audio = null; });
+  fixture.view.generation = { active: true, completed_videos: 0, failed_videos: 0, steps: fixture.view.episodes.flatMap((_, episode_index) => [
+    { episode_index, step: "script", status: "completed", started_at: null, elapsed_seconds: null, queue_ahead: null },
+    { episode_index, step: "audio", status: episode_index === 0 ? "running" : "waiting", started_at: null, elapsed_seconds: null, queue_ahead: null },
+  ]) };
+  await page.goto(`/materials/${materialId}/podcasts/${podcastId}`);
+  await expect(page.getByRole("heading", { name: "正在生成 Podcast", exact: true })).toBeVisible();
+  await expect(page.getByRole("heading", { name: "第 1 / 3 集", exact: true })).toBeVisible();
+  await expect(page.locator(".progress-estimate-note")).toContainText("已完成 0 / 3 集");
+  await expect(page.locator(".processing-timeline")).toContainText("配音");
+  await expect(page.getByRole("button", { name: "接續生成", exact: true })).toHaveCount(0);
+  expect(fixture.actions).toEqual([]);
+});
+
+test("failed podcasts with partial audio show saved production progress and resume", async ({ page }) => {
+  const fixture = await mockPodcasts(page);
+  fixture.view.status = "failed";
+  fixture.view.error_code = "PODCAST_SCRIPT_INVALID";
+  fixture.view.video_enabled = false;
+  fixture.view.episodes[1].script = fixture.script;
+  fixture.view.generation = { active: false, completed_videos: 0, failed_videos: 0, steps: fixture.view.episodes.flatMap((_, episode_index) => [
+    { episode_index, step: "script", status: episode_index < 2 ? "completed" : "failed", started_at: null, elapsed_seconds: null, queue_ahead: null },
+    { episode_index, step: "audio", status: episode_index === 0 ? "completed" : "waiting", started_at: null, elapsed_seconds: null, queue_ahead: null },
+  ]) };
+  await page.goto(`/materials/${materialId}/podcasts/${podcastId}`);
+  await expect(page.getByRole("heading", { name: "Podcast 生成中斷", exact: true })).toBeVisible();
+  await expect(page.locator(".progress-estimate-note")).toContainText("已完成 1 / 3 集");
+  await expect(page.getByRole("button", { name: "接續生成", exact: true })).toBeEnabled();
+  expect(fixture.actions).toEqual([]);
+});
+
 test("management menu renames with conflict recovery; deletion needs confirmation", async ({ page }) => {
   const fixture = await mockPodcasts(page);
   await page.goto("/podcasts");
@@ -95,7 +130,7 @@ test('unfinished Podcasts show only saved progress, cancel and retry',async({pag
  await expect(progress.getByRole('heading',{name:'第 2 / 3 集'})).toBeVisible();
  await expect(progress.locator('.status-timeline .is-active')).toHaveText('寫講稿進行中');
  await expect(page.locator('video,audio,.media-playback-controls')).toHaveCount(0);
- fixture.view.episodes[1].script=fixture.script;fixture.view.completed_episodes=2;fixture.view.generation!.steps![1].step='audio';
+ fixture.view.episodes[1].script=fixture.script;fixture.view.completed_episodes=1;fixture.view.generation!.steps![1].step='audio';
  await expect(progress.locator('.status-timeline .is-active')).toHaveText('配音進行中');
  fixture.view.status='cancelled';
  await expect(progress.getByRole('button',{name:'接續生成'})).toBeVisible();
@@ -1175,7 +1210,6 @@ test('podcast generation follows the upload processing layout with overall progr
   {episode_index:0,step:'alignment',status:'waiting',started_at:null,elapsed_seconds:null,queue_ahead:null},
  ];
  view.episodes[0].script={provider:'synthetic',segments:view.episodes[0].claims.map(c=>({claim_id:c.claim_id,turns:[{speaker:'host',text:'已核對的合成內容。'}]}))};
- view.completed_episodes=1;
  view.generation={active:true,completed_videos:0,failed_videos:0,expected_videos:0,steps};
  await page.goto(`/podcasts/${podcastId}`);
  await expect(page.getByRole('heading',{name:'第 1 / 1 集',exact:true})).toBeVisible();
@@ -1247,21 +1281,17 @@ for (const [width, height] of [[1440, 900], [1920, 1080], [1024, 768]]) test(`vi
 });
 
 
-test("script-only podcasts open readable transcripts and export Markdown without media requests", async ({ page }) => {
+test("scripted podcasts awaiting audio open production progress without media requests", async ({ page }) => {
   const fixture = await mockPodcasts(page);
-  Object.assign(fixture.view, { status: "ready", video_enabled: false, completed_episodes: 3,
-    generation: { active: false, preview_ready: false, retryable_videos: false, completed_videos: 0, failed_videos: 0 } });
+  Object.assign(fixture.view, { status: "running", video_enabled: false, completed_episodes: 0,
+    generation: { active: true, preview_ready: false, retryable_videos: false, completed_videos: 0, failed_videos: 0 } });
   fixture.view.episodes.forEach(episode => { episode.script = fixture.script; episode.audio = null; });
   const mediaRequests: string[] = [];
   page.on("request", request => { if (/\/(audio|video(?:\/media)?)$/.test(new URL(request.url()).pathname)) mediaRequests.push(request.url()); });
-  await page.route("**/episodes/0/export/md", route => route.fulfill({ contentType: "text/markdown",
-    headers: { "Content-Disposition": "attachment; filename*=UTF-8''script.md" }, body: "# 講稿" }));
   await page.goto("/podcasts");
-  await page.getByRole("button", { name: "閱讀講稿", exact: true }).click();
-  await expect(page.getByText("講稿已完成，可閱讀或匯出逐字稿。", { exact: true })).toBeVisible();
-  await expect(page.getByRole("tabpanel", { name: "逐字稿", exact: true })).toContainText("這是合成的教材講解。");
-  const download = page.waitForEvent("download");
-  await page.getByRole("button", { name: "匯出本集", exact: true }).click();
-  expect((await download).suggestedFilename()).toBe("script.md");
+  await expect(page.locator(".library-state")).toContainText("音訊 0 / 3 集");
+  await page.getByRole("button", { name: "查看進度", exact: true }).click();
+  await expect(page.getByRole("heading", { name: "正在生成 Podcast", exact: true })).toBeVisible();
+  await expect(page.locator(".progress-estimate-note")).toContainText("已完成 0 / 3 集");
   expect(mediaRequests).toEqual([]);
 });
