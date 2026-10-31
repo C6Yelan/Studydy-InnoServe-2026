@@ -281,16 +281,18 @@ def html_document(data, final, media):
     formulas = {}
     for node in tree.xpath(
         '//span[contains(concat(" ", normalize-space(@class), " "), " mwe-math-element ")]'
+        ' | //math[@alttext and not(ancestor::span[contains(concat(" ", normalize-space(@class), " "), " mwe-math-element ")])]'
     ):
-        math = node.find('.//math[@alttext]')
-        if math is None or not math.get("alttext"):
+        math = node if node.tag == "math" else node.find('.//math[@alttext]')
+        latex = node.get("alttext") or next(iter(node.xpath('.//math/@alttext | .//img/@alt')), None)
+        if not latex:
             continue
         token = f"STUDYDYFORMULA{digest[:16]}N{len(formulas)}END"
-        latex = math.get("alttext")
         formulas[token] = (
-            f"\n$$\n{latex}\n$$\n" if math.get("display") == "block" else f"${latex}$"
+            f"\n$$\n{latex}\n$$\n" if math is not None and math.get("display") == "block" else f"${latex}$"
         )
         node.clear(keep_tail=True)
+        node.tag = "span"
         node.text = token
     # 移除網頁編輯與引註標記，保留一般數學上標與程式碼字面值。
     for node in tree.xpath(
