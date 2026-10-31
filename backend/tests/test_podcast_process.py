@@ -399,3 +399,16 @@ def test_run_drains_stderr_in_memory_while_sending_large_input(capsys):
     assert result.stderr == '合成錯誤內容\n' * 12000
     captured = capsys.readouterr()
     assert captured.out == captured.err == ''
+
+
+def test_align_route_accepts_a_full_video_episode(provider_server, monkeypatch):
+    # 後端影片渲染以 HTTP 送整集字幕；一集常有 16～25 段，不能套用分鏡的 12 段上限。
+    seen = {}
+    def align(body, *, cancelled=None, max_texts=12):
+        seen['max_texts'] = max_texts
+        assert len(body['texts']) <= max_texts
+        return {'synthetic': True}
+    monkeypatch.setattr(provider, 'align_audio', align)
+    job = {'job_id': str(uuid4()), 'job_token': str(uuid4())}
+    assert post(provider_server, '/align', {**job, 'texts': ['段落'] * 25}) == (200, {'synthetic': True})
+    assert seen['max_texts'] == 80
