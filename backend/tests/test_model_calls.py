@@ -124,8 +124,8 @@ def test_podcast_failure_masks_secrets_and_keeps_validation_location(tmp_path, m
     ([("length", '{"text":"'), ("length", '{"text":"')], "SEMANTIC_OUTPUT_TRUNCATED"),
     ([("stop", '{"text":')], "SEMANTIC_RESPONSE_INVALID"),
     ([("stop", '[]')], "SEMANTIC_RESPONSE_INVALID"),
-    ([("stop", '{"text":"分布分布"}'), ("stop", '{"text":"分布分布"}')], "SEMANTIC_GENERATION_FAILED"),
-    ([("stop", '{"text":"分布分布"}'), ("length", '{')], "SEMANTIC_OUTPUT_TRUNCATED"),
+    ([("stop", '{"text":"分布分布分布"}'), ("stop", '{"text":"分布分布分布"}')], "SEMANTIC_GENERATION_FAILED"),
+    ([("stop", '{"text":"分布分布分布"}'), ("length", '{')], "SEMANTIC_OUTPUT_TRUNCATED"),
 ])
 def test_generate_keeps_one_candidate_per_attempt_with_private_metadata(tmp_path, monkeypatch, contents, error):
     from runtime import semantic_service, local_ai_config
