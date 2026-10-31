@@ -116,6 +116,11 @@ def media_transcribe(body, *, cancelled=None):
         return json.loads(output.read_text())
 
 
+def align_video_cues(body, *, cancelled=None):
+    """後端影片渲染以 HTTP 對齊整集字幕（一集常有 16～25 段），採影片的 80 段上限。"""
+    return align_audio(body, cancelled=cancelled, max_texts=80)
+
+
 def align_audio(body, *, cancelled=None, max_texts=12):
     import base64
 
@@ -171,7 +176,7 @@ class Handler(BaseHTTPRequestHandler):
         if not compare_digest(self.headers.get("Authorization", ""), expected):
             self.send_error(401)
             return
-        routes = {"/audio": audio, "/transcribe": transcribe, "/media-transcribe": media_transcribe, "/align": align_audio}
+        routes = {"/audio": audio, "/transcribe": transcribe, "/media-transcribe": media_transcribe, "/align": align_video_cues}
         if self.path not in {*routes, "/jobs/cancel", "/jobs/progress"}:
             self.send_error(404)
             return
