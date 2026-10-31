@@ -31,7 +31,7 @@ PDF 有可讀文字層時直接建立原生 Evidence；其餘頁面以 Tesseract
 
 Evidence 保留教材、1-based 頁碼、區塊、定位及技術字面值。換行合併依幾何與段落結構，不跨欄猜讀序。
 
-影音來源的教學重點須整理句法、標點與贅詞，原始引用另標「語音辨識結果」。新生成的口語重點若未保留引用中的技術字面值，候選拒收並待核對，不以整段逐字稿替代整理結果；疑詞保留原字，不猜測訂正。既有 `spoken_excerpt_literal_repair/v1` 資料仍按原契約讀取，原始 Evidence、引用與已保存 hash 不重寫。
+影音來源的教學重點須整理句法、標點與贅詞，原始引用另放在共用來源側欄，並說明語音辨識或字幕來源。新生成的口語重點若未保留引用中的技術字面值，候選拒收並待核對，不以整段逐字稿替代整理結果；疑詞保留原字，不猜測訂正。既有 `spoken_excerpt_literal_repair/v1` 資料仍按原契約讀取，原始 Evidence、引用與已保存 hash 不重寫。
 
 語意請求按章節與 Evidence 分批，以實際 tokenizer 核對 prompt、概念目錄與輸出預算。模型引用完整 Evidence handle；程式還原來源關係並驗證 Claim、Relation 及 Path。設定以 runtime lock 為準。
 
