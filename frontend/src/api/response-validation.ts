@@ -1726,7 +1726,7 @@ export function podcast(value: unknown): value is PodcastView {
     return true;
   });
   return valid && covered.size === (item.concept_ids as string[]).length
-    && item.episodes.filter((v) => object(v)?.script !== null).length === item.completed_episodes
+    && item.episodes.filter((v) => object(v)?.audio !== null).length === item.completed_episodes
     && (item.status !== "ready" || item.completed_episodes === item.episode_count);
 }
 

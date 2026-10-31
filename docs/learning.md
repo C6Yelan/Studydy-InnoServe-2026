@@ -56,7 +56,7 @@ Progress 與 resume 使用同一 DB snapshot，核對 session、run、知識結�
 
 Podcast 略過仍無法通過來源核對的段落，保存 omitted_content；不因省略比例拒發其餘已核對段落，整集沒有可保留段落才失敗。
 
-Podcast 的 ready 與 completed_episodes 依已完成音訊計算；講稿完成後排入配音，音訊完成後排入字幕對齊，勾選影片時另排影片。先前只產講稿的 ready 節目提供閱讀及 Markdown 匯出，不請求不存在的音訊、影片、時間軸或收聽進度。
+Podcast 的 ready 與 completed_episodes 依已完成音訊計算；講稿完成後排入配音，音訊完成後排入字幕對齊，勾選影片時另排影片。講稿已完成、音訊尚未完成的集數仍顯示製作中；全部音訊完成後才能標為 ready。
 
 ## 學習回饋
 
