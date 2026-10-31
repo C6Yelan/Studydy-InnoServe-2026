@@ -10,7 +10,7 @@ import zipfile
 
 import pymupdf
 
-from . import note_latex
+from . import note_latex, note_marks
 from .note_content import CALLOUT_LABELS, body_html, numbered_heading, outline
 
 FONT_DIR = Path('/usr/share/fonts/opentype/noto')
@@ -169,14 +169,14 @@ def _source_notice(view):
 def _md_items(items, indent=''):
     lines = []
     for item in items:
-        lines.append(f'{indent}- {md_text(item["text"])}')
+        lines.append(f'{indent}- {note_marks.markdown(item["text"], md_text)}')
         lines.extend(_md_items(item.get('children') or [], indent + '  '))
     return lines
 
 
 def _md_table(headers, rows):
     def cell(value):
-        return md_text(value).replace('\n', '<br>')
+        return note_marks.markdown(value, md_text).replace('\n', '<br>')
     return ['| ' + ' | '.join(cell(c) for c in headers) + ' |', '| ' + ' | '.join('---' for _ in headers) + ' |',
             *('| ' + ' | '.join(cell(c) for c in row) + ' |' for row in rows), '']
 
@@ -186,7 +186,7 @@ def _md_blocks(blocks):
     for block in blocks:
         kind = block['type']
         if kind == 'text':
-            lines.extend([md_text(block['text']), ''])
+            lines.extend([note_marks.markdown(block['text'], md_text), ''])
         elif kind == 'bullets':
             lines.extend([*_md_items(block['items']), ''])
         elif kind == 'table':
@@ -208,6 +208,20 @@ def _note_groups(view):
         return [(None, view['paragraphs'])]
     paragraphs = {p['id']: p for p in view['paragraphs']}
     return [(section, [paragraphs[pid] for pid in section['paragraph_ids']]) for section in view['sections']]
+
+
+def _md_quote(a):
+    # 舊註記沒有選取範圍，維持原呈現。
+    return [f'被註記原句：{md_text(a["quote"])}', ''] if a.get('quote') else []
+
+
+def _pdf_quote(a):
+    return f'<p>被註記原句：{escape(a["quote"])}</p>' if a.get('quote') else ''
+
+
+def _docx_quote(doc, a):
+    if a.get('quote'):
+        doc.add_paragraph(xml_text('被註記原句：' + a['quote']))
 
 
 def note_markdown(view):
@@ -235,7 +249,7 @@ def note_markdown(view):
     def paragraph(p, number=None, source_section=None):
         if 'blocks' not in p:
             # 舊版段落格式：保留可讀，直到重新生成。
-            lines.extend([f'## {md_text(p["heading"])}', '', md_text(p['text']), ''])
+            lines.extend([f'## {md_text(p["heading"])}', '', note_marks.markdown(p['text'], md_text), ''])
             if p.get('formula'):
                 lines.extend([md_text(p['formula']), ''])
             if p.get('table'):
@@ -270,7 +284,7 @@ def note_markdown(view):
             depth = paragraph(p, None if section else numbers.get(p['id']), section)
             for a in view['annotations']:
                 if a['paragraph_id'] == p['id']:
-                    lines.extend([f'{"#" * (depth + 1)} 個人註記', '', md_text(a['body']), ''])
+                    lines.extend([f'{"#" * (depth + 1)} 個人註記', '', md_text(a['body']), '', *_md_quote(a)])
     if view.get('unorganized_concepts'):
         lines.extend(['## 以下概念暫未整理', ''])
         lines.extend(f'- {md_text(c["label"])}' for c in view['unorganized_concepts'])
@@ -281,7 +295,7 @@ def note_markdown(view):
         for a in orphaned:
             lines.extend([f'原版本：{a["original_revision"].rsplit(":", 1)[-1][:8]}', ''])
             depth = paragraph(a['original_paragraph'])
-            lines.extend([f'{"#" * (depth + 1)} 個人註記', '', md_text(a['body']), ''])
+            lines.extend([f'{"#" * (depth + 1)} 個人註記', '', md_text(a['body']), '', *_md_quote(a)])
     return '\n'.join(lines)
 
 
@@ -314,7 +328,7 @@ def note_pdf(view):
                 marker = f'source-{number}'
                 footnotes[marker] = f'[{number}] ' + '；'.join(_note_sources(p['evidence']))
                 parts.append(f'<p id="{marker}">[{number}]</p>')
-            parts.extend(f'<p>個人註記：{escape(a["body"])}</p>' for a in view['annotations'] if a['paragraph_id'] == p['id'])
+            parts.extend(f'<p>個人註記：{escape(a["body"])}</p>{_pdf_quote(a)}' for a in view['annotations'] if a['paragraph_id'] == p['id'])
     if view.get('unorganized_concepts'):
         parts.append('<h2>以下概念暫未整理</h2><ul>' + ''.join(
             f'<li>{escape(c["label"])}</li>' for c in view['unorganized_concepts']) + '</ul>')
@@ -329,7 +343,7 @@ def note_pdf(view):
                 marker = f'source-{number}'
                 footnotes[marker] = f'[{number}] ' + '；'.join(_note_sources(p['evidence']))
                 parts.append(f'<p id="{marker}">[{number}]</p>')
-            parts.append(f'<p>個人註記：{escape(a["body"])}</p>')
+            parts.append(f'<p>個人註記：{escape(a["body"])}</p>{_pdf_quote(a)}')
     return pdf(''.join(parts), images, keep_headings=True, footnotes=footnotes)
 
 
@@ -340,7 +354,7 @@ def xml_text(value):
 
 def _docx_items(container, items, depth=1):
     for item in items:
-        container.add_paragraph(xml_text(item['text']), style='List Bullet' if depth == 1 else f'List Bullet {depth}')
+        note_marks.docx_runs(container.add_paragraph(style='List Bullet' if depth == 1 else f'List Bullet {depth}'), item['text'], xml_text)
         _docx_items(container, item.get('children') or [], depth + 1)
 
 
@@ -351,7 +365,7 @@ def _docx_table(doc, headers, rows):
         cell.text = xml_text(value)
     for row in rows:
         for cell, value in zip(table.add_row().cells, row):
-            cell.text = xml_text(value)
+            note_marks.docx_runs(cell.paragraphs[0], value, xml_text)
     # 相鄰表格之間須隔一段，否則 Word 會把它們合成同一個表格。
     doc.add_paragraph()
 
@@ -364,7 +378,7 @@ def _docx_blocks(doc, blocks):
     for block in blocks:
         kind = block['type']
         if kind == 'text':
-            doc.add_paragraph(xml_text(block['text']))
+            note_marks.docx_runs(doc.add_paragraph(), block['text'], xml_text)
         elif kind == 'bullets':
             _docx_items(doc, block['items'])
         elif kind == 'table':
@@ -490,7 +504,7 @@ def note_docx(view):
         if 'blocks' not in p:
             # 舊版段落格式：保留可讀，直到重新生成。
             doc.add_heading(xml_text(p['heading']), 1)
-            doc.add_paragraph(xml_text(p['text']))
+            note_marks.docx_runs(doc.add_paragraph(), p['text'], xml_text)
             if p.get('formula'):
                 doc.add_paragraph(xml_text(p['formula']))
             if p.get('table'):
@@ -523,6 +537,7 @@ def note_docx(view):
                 if a['paragraph_id'] == p['id']:
                     doc.add_heading('個人註記', level + 1)
                     doc.add_paragraph(xml_text(a['body']))
+                    _docx_quote(doc, a)
     if view.get('unorganized_concepts'):
         doc.add_heading('以下概念暫未整理', 1)
         for concept in view['unorganized_concepts']:
@@ -535,6 +550,7 @@ def note_docx(view):
             level = paragraph(a['original_paragraph'])
             doc.add_heading('個人註記', level + 1)
             doc.add_paragraph(xml_text(a['body']))
+            _docx_quote(doc, a)
     if len(footnotes) > 2:
         part = XmlPart(PackURI('/word/footnotes.xml'), CONTENT_TYPE.WML_FOOTNOTES,
                        footnotes, doc.part.package)
