@@ -98,4 +98,4 @@ Podcast 回歸以合成資料驗證省略 29／31 重點後的存檔一致性、
 
 `frontend/e2e/mock/notes.spec.ts` 另驗證批次進度、進度頁重新整理／返回，以及從知識地圖開啟對應筆記段落；沒有對應段落時不顯示入口，閱讀不觸發生成。
 
-`runtime/study/test_note_highlights.py` 驗證標記 CRUD、owner／Origin、選取範圍、Unicode code point、唯一／重複／缺失原句對應、舊註記及三種匯出格式。`test_notes_browser.py` 走隔離 DB 的真 API；notes mock 驗證選取工具列、旁註、BOT 預填但不送出、手機與鍵盤操作。
+`runtime/study/test_note_highlights.py` 驗證標記 CRUD、owner／Origin、選取範圍、Unicode code point、唯一／重複／缺失原句對應、舊註記、各類區塊與整條公式、章節標記重對應及三種匯出格式。`test_notes_browser.py` 走隔離 DB 的真 API；notes mock 驗證選取工具列、旁註、BOT 預填但不送出、手機與鍵盤操作。

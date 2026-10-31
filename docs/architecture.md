@@ -66,7 +66,7 @@ Podcast 由單一協調 worker 持有租約，依 STUDYDY_PODCAST_WORKERS 並行
 
 ## 個人筆記標記
 
-`note_highlights`（0034）保存 owner、教材、筆記種類、原 revision／generation、Unicode code point 選取範圍、quote 與段落快照。`note_annotations` 同時新增可為空的範圍欄位，既有註記不搬資料。讀取時依原位置或唯一相符 quote 重新對應；失配保留原稿供回查。寫入綁定可見稿版本，沿用 owner／Origin 邊界，不呼叫模型。
+`note_highlights`（0034）保存 owner、教材、筆記種類、原 revision／generation、Unicode code point 選取範圍、quote 與段落或章節快照。`note_annotations` 同時新增可為空的範圍欄位，既有註記不搬資料。讀取時依原位置或唯一相符 quote 重新對應；失配保留原稿供回查。章節以 section 目標獨立錨定；標題編號只在選取／匯出時衍生，不改寫保存稿。寫入綁定可見稿版本，沿用 owner／Origin 邊界，不呼叫模型；有標記或註記引用的來源版本不清理。
 
 ## 前端介面原則
 
