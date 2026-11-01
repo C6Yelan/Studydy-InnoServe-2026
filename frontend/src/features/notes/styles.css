@@ -30,7 +30,7 @@
 .note-source-section > h4, .note-source-paragraph > h4, .note-source-paragraph > h5 { font-size: 1rem; line-height: 1.5; margin: 0 0 12px; }
 .note-chapter-outline { margin-bottom: 16px; }
 .note-chapter-outline > p { font-weight: 700; }
-.note-chapter-outline ul, .note-unorganized ul { padding-left: 1.5em; }
+.note-chapter-outline ul { padding-left: 1.5em; }
 .note-chapter-outline .text-button { text-align: left; }
 .note-outline [aria-current="location"] { background: var(--studydy-blue-soft); color: var(--text-primary); }
 .note-reading-body { min-height: 0; min-width: 0; overflow-y: auto; overscroll-behavior: contain; scrollbar-gutter: stable; }

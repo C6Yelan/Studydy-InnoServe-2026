@@ -51,9 +51,8 @@ test("an empty update keeps the published notes and explains the retained conten
   await expect(page.getByRole("heading", { name: "一、堆疊的順序", exact: true })).toBeVisible();
 });
 
-test("source chapters preserve three levels, chapter outlines and missing concept map links", async ({ page }, testInfo) => {
+test("source chapters preserve three levels and chapter outlines while hiding empty chapters", async ({ page }, testInfo) => {
   const view = notes();
-  const missing = structureView().concepts[1];
   view.sections = [
     { section_id: "chapter", heading: "第一章 資料結構", level: 1, parent_id: null, paragraph_ids: [], outline: [
       { section_id: "section", heading: "1.1 堆疊", level: 2 },
@@ -61,14 +60,15 @@ test("source chapters preserve three levels, chapter outlines and missing concep
     ] },
     { section_id: "section", heading: "1.1 堆疊", level: 2, parent_id: "chapter", paragraph_ids: ["0"], outline: [] },
     { section_id: "subsection", heading: "1.1.1 大小", level: 3, parent_id: "section", paragraph_ids: ["1"], outline: [] },
+    { section_id: "images", heading: "圖片.zip", level: 1, parent_id: null, paragraph_ids: [], outline: [] },
   ];
-  view.unorganized_concepts = [{ concept_id: missing.concept_id, label: missing.label }];
   await setup(page, view);
   for (const width of [1536, 1440]) {
     await page.setViewportSize({ width, height: 900 });
     await page.goto(`/materials/${materialId}/notes`);
     await expect(page.getByRole("button", { name: "複習速覽", exact: true })).toHaveAttribute("aria-pressed", "true");
     await expect(page.getByRole("heading", { name: "第一章 資料結構", level: 2 })).toBeVisible();
+    await expect(page.getByRole("heading", { name: "圖片.zip" })).toHaveCount(0);
     const chapter = page.getByRole("navigation", { name: "第一章 資料結構章節大綱", exact: true });
     await page.screenshot({ path: testInfo.outputPath(`source-chapters-top-${width}.png`) });
     await chapter.getByRole("button", { name: "1.1.1 大小", exact: true }).click();
@@ -80,10 +80,6 @@ test("source chapters preserve three levels, chapter outlines and missing concep
     expect(await page.evaluate(() => document.documentElement.scrollWidth)).toBe(width);
     await page.screenshot({ path: testInfo.outputPath(`source-chapters-${width}.png`) });
   }
-  await page.getByRole("button", { name: `${missing.label} · 在地圖查看`, exact: true }).click();
-  await expect(page).toHaveURL(new RegExp(`/runs/${runId}/knowledge-structures/`));
-  expect(decodeURIComponent(page.url())).toContain(structureRevision);
-  await expect(page.getByRole("dialog", { name: "概念詳情", exact: true })).toContainText(missing.label);
 });
 
 async function setup(page: Parameters<typeof mockKnowledgeMapApi>[0], initial = notes()) {

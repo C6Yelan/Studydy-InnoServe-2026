@@ -3,7 +3,7 @@ import { Progress } from "../../ui/Progress";
 import { MathText } from "../../ui/MathText";
 import { mathPlainText } from "../../ui/math-text";
 import { ExportControls } from "../exports/ExportControls";
-import { useCallback, useEffect, useRef, useState, type ReactNode } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { errorMessage, type StudydyApiClient } from "../../api/client";
 import type { MaterialNotesView, NoteBlock, NoteCalloutStyle, NoteItem, NoteKind, NoteOutlineEntry, NoteParagraph } from "../../api/contracts";
 import { MarkupParagraph, NoteMarkup, NoteText } from "./NoteMarkup";
@@ -116,8 +116,18 @@ function NotesContent({ api, materialId, revision, kind, changeKind, target, ope
   const [now, setNow] = useState(Date.now());
   const pending = view?.status === "pending" || view?.status === "running";
   useLocateParagraph(view, target);
-  const outline: NoteOutlineEntry[] = view?.sections.length
-    ? view.sections.map(s => ({ paragraph_id: s.section_id, heading: s.heading, level: s.level, number: "" }))
+  // 沒有任何正文（含子節）的章節不顯示，例如只剩檔名的圖片或影片來源。
+  const sections = useMemo(() => {
+    const all = view?.sections ?? [];
+    const filled = new Set<string>();
+    for (const section of all) {
+      if (!section.paragraph_ids.length) continue;
+      for (let id: string | null = section.section_id; id && !filled.has(id); id = all.find(s => s.section_id === id)?.parent_id ?? null) filled.add(id);
+    }
+    return all.filter(s => filled.has(s.section_id)).map(s => ({ ...s, outline: s.outline.filter(entry => filled.has(entry.section_id)) }));
+  }, [view?.sections]);
+  const outline: NoteOutlineEntry[] = sections.length
+    ? sections.map(s => ({ paragraph_id: s.section_id, heading: s.heading, level: s.level, number: "" }))
     : view?.outline ?? [];
   useEffect(() => {
     if (!pending || !view?.started_at) return;
@@ -240,7 +250,7 @@ function NotesContent({ api, materialId, revision, kind, changeKind, target, ope
       </section>}
       {view.status === "failed" && view.progress && view.progress.completed_parts > 0 && <p>已完成部分已保存，重試時會從未完成部分接續。</p>}
       <NoteMarkup api={api} view={view} saved={update} openConcept={id => void openConcept(id)} renderPrevious={(paragraph, originalRevision) => "target_type" in paragraph ? <p>{paragraph.heading}</p> : <ParagraphBody paragraph={paragraph} sources={<span className="note-sources">{sourceLinks(paragraph.evidence).map(e => <SourceButton key={e.evidence_id} apiClient={api} evidence={e} reference={{ quote: e.quote }} resolver={`/v1/materials/${materialId}/knowledge-structures/${originalRevision}/evidence`}/>)}</span>}/> }>
-      {view.sections.length ? view.sections.map(section => {
+      {sections.length ? sections.map(section => {
         const Heading = section.level === 1 ? "h2" : section.level === 2 ? "h3" : "h4";
         const target = { target_type: "section" as const, id: `section:${section.section_id}`, anchor: `section:${section.section_id}`, heading: section.heading, level: section.level };
         return <section key={section.section_id} id={`note-section-${section.section_id}`} data-note-target={target.id} tabIndex={-1}
@@ -254,11 +264,6 @@ function NotesContent({ api, materialId, revision, kind, changeKind, target, ope
           {section.paragraph_ids.map(id => paragraph(view.paragraphs.find(p => p.id === id)!, section.level))}
         </section>;
       }) : view.paragraphs.map(p => paragraph(p))}
-      {!!view.unorganized_concepts.length && <section className="note-unorganized" aria-labelledby="unorganized-concepts-title">
-        <h2 id="unorganized-concepts-title">以下概念暫未整理</h2>
-        <ul>{view.unorganized_concepts.map(concept => <li key={concept.concept_id}>{concept.label} <button type="button" className="text-button"
-          aria-label={`${concept.label} · 在地圖查看`} onClick={() => void openConcept(concept.concept_id)}>在地圖查看</button></li>)}</ul>
-      </section>}
       </NoteMarkup>
     </>}
       </div></div>
