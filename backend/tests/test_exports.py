@@ -97,7 +97,7 @@ def structured_note():
     return view
 
 
-def test_source_chapters_and_unorganized_concepts_export_in_all_formats():
+def test_source_chapters_export_in_all_formats_without_empty_chapters():
     view = structured_note()
     view['paragraphs'] = [view['paragraphs'][0]]
     view['annotations'] = []
@@ -110,8 +110,9 @@ def test_source_chapters_and_unorganized_concepts_export_in_all_formats():
          'paragraph_ids': [], 'outline': []},
         {'section_id': 'detail', 'heading': '原教材細節', 'level': 3, 'parent_id': 'section',
          'paragraph_ids': ['0'], 'outline': []},
+        {'section_id': 'images', 'heading': '圖片壓縮檔.zip', 'level': 1, 'parent_id': None,
+         'paragraph_ids': [], 'outline': []},
     ]
-    view['unorganized_concepts'] = [{'concept_id': 'missing', 'label': '尚未整理的概念'}]
     md = documents.note_markdown(view)
     assert '## 原教材第一章' in md and '### 原教材小節' in md and '#### 原教材細節' in md
     assert '[原教材細節](#detail)' in md and '<a id="detail"></a>' in md
@@ -122,8 +123,8 @@ def test_source_chapters_and_unorganized_concepts_export_in_all_formats():
     with pymupdf.open(stream=documents.note_pdf(view), filetype='pdf') as pdf:
         pdf_text = unicodedata.normalize('NFKC', ''.join(page.get_text() for page in pdf))
     for output in (md, text, pdf_text):
-        assert all(label in output for label in ('複習速覽', '原教材第一章', '章節大綱', '出口占比',
-            '以下概念暫未整理', '尚未整理的概念'))
+        assert all(label in output for label in ('複習速覽', '原教材第一章', '章節大綱', '出口占比'))
+        assert '圖片壓縮檔' not in output
 
 
 def test_structured_notes_keep_outline_levels_bullets_tables_formula_and_callouts_in_every_format():

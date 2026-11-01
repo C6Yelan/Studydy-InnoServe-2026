@@ -207,7 +207,17 @@ def _note_groups(view):
     if not view.get('sections'):
         return [(None, view['paragraphs'])]
     paragraphs = {p['id']: p for p in view['paragraphs']}
-    return [(section, [paragraphs[pid] for pid in section['paragraph_ids']]) for section in view['sections']]
+    # 沒有任何正文（含子節）的章節不匯出，與網頁筆記一致。
+    parents = {section['section_id']: section['parent_id'] for section in view['sections']}
+    filled = set()
+    for section in view['sections']:
+        identity = section['section_id'] if section['paragraph_ids'] else None
+        while identity is not None and identity not in filled:
+            filled.add(identity)
+            identity = parents.get(identity)
+    return [({**section, 'outline': [item for item in section['outline'] if item['section_id'] in filled]},
+             [paragraphs[pid] for pid in section['paragraph_ids']])
+            for section in view['sections'] if section['section_id'] in filled]
 
 
 def _md_quote(a):
@@ -292,10 +302,6 @@ def note_markdown(view):
             for a in view['annotations']:
                 if a['paragraph_id'] == p['id']:
                     lines.extend([f'{"#" * (depth + 1)} 個人註記', '', md_text(a['body']), '', *_md_quote(a)])
-    if view.get('unorganized_concepts'):
-        lines.extend(['## 以下概念暫未整理', ''])
-        lines.extend(f'- {md_text(c["label"])}' for c in view['unorganized_concepts'])
-        lines.append('')
     orphaned = [a for a in view['annotations'] if a['paragraph_id'] is None]
     if orphaned:
         lines.extend(['# 先前段落的註記', '', '以下註記未能精確對應目前段落，保留當時內容。', ''])
@@ -338,9 +344,6 @@ def note_pdf(view):
                 footnotes[marker] = f'[{number}] ' + '；'.join(_note_sources(p['evidence']))
                 parts.append(f'<p id="{marker}">[{number}]</p>')
             parts.extend(f'<p>個人註記：{escape(a["body"])}</p>{_pdf_quote(a)}' for a in view['annotations'] if a['paragraph_id'] == p['id'])
-    if view.get('unorganized_concepts'):
-        parts.append('<h2>以下概念暫未整理</h2><ul>' + ''.join(
-            f'<li>{escape(c["label"])}</li>' for c in view['unorganized_concepts']) + '</ul>')
     orphaned = [a for a in view['annotations'] if a['paragraph_id'] is None]
     if orphaned:
         parts.append('<h1>先前段落的註記</h1><p>以下註記未能精確對應目前段落，保留當時內容。</p>')
@@ -570,10 +573,6 @@ def note_docx(view):
                     doc.add_heading('個人註記', level + 1)
                     doc.add_paragraph(xml_text(a['body']))
                     _docx_quote(doc, a)
-    if view.get('unorganized_concepts'):
-        doc.add_heading('以下概念暫未整理', 1)
-        for concept in view['unorganized_concepts']:
-            doc.add_paragraph(xml_text(concept['label']), style='List Bullet')
     orphaned = [a for a in view['annotations'] if a['paragraph_id'] is None]
     if orphaned:
         doc.add_heading('先前段落的註記', 1)
