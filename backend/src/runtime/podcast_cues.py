@@ -6,8 +6,12 @@ import re
 def split_text(text, limit, preferred):
     """保留每個字元；優先在標點／空白切開，時間仍須另由音訊對齊。"""
     while len(text) > limit:
+        # 括號內（如公式參數 Attention(Q, K, V)）不切，避免切出只有符號名的讀句。
         stops = [
-            m.end() for m in re.finditer(r"[。！？!?；;，,：:、]\s*", text[:limit])
+            m.end()
+            for m in re.finditer(r"[。！？!?；;，,：:、]\s*", text[:limit])
+            if len(re.findall(r"[(（]", text[: m.end()]))
+            <= len(re.findall(r"[)）]", text[: m.end()]))
         ]
         eligible = [i for i in stops if i >= preferred]
         if eligible:
@@ -27,6 +31,9 @@ def split_text(text, limit, preferred):
                 before = re.search(r"[A-Za-z0-9_]+$", text[:end])
                 if before and before.start():
                     end = before.start()
+        # 只剩標點的尾段（如「）。」）沒有可辨識字元，取不到 ASR 錨點；併入前段最後一字。
+        while end > 1 and not any(c.isalnum() for c in text[end:]):
+            end -= 1
         yield text[:end]
         text = text[end:]
     if text:

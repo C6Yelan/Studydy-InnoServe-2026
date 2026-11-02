@@ -4,6 +4,10 @@ from difflib import SequenceMatcher
 import math
 import unicodedata
 
+from .hanzi_readings import READINGS
+
+_READING = {char: reading for reading, chars in READINGS.items() for char in chars}
+
 
 class AlignmentError(ValueError):
     def __init__(self, indices=(), fully_matched=False, can_group=False):
@@ -50,8 +54,9 @@ def align_texts(texts, words, duration):
         times.extend([(start, end)] * len(value))
     if not observed:
         raise AlignmentError()
-    # 依正規化字元對齊；同音誤字無法提供精確錨點。
-    ref_sounds, obs_sounds = list(reference), list(observed)
+    # ASR 常輸出簡體或同音字，不代表音訊與原稿不同；漢字依讀音對齊，顯示及引用仍用原稿。
+    ref_sounds = [_READING.get(c, c) for c in reference]
+    obs_sounds = [_READING.get(c, c) for c in observed]
     matches = SequenceMatcher(
         None, ref_sounds, obs_sounds, autojunk=False
     ).get_matching_blocks()
@@ -124,7 +129,7 @@ def align_texts(texts, words, duration):
         "starts": starts,
         "anchors": anchors,
         "duration": duration,
-        "method": "whisper-character-boundaries/v1",
+        "method": "whisper-phonetic-boundaries/v1",
     }
 
 

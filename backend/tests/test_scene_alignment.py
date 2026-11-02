@@ -10,7 +10,7 @@ def test_measured_word_times_define_scene_boundaries_not_text_lengths():
     result=align_texts(texts,words,10)
     assert result['starts']==[0,7.3]
     assert result['anchors'][1]['text'] in normalized(texts[1])
-    assert result['method']=='whisper-character-boundaries/v1'
+    assert result['method']=='whisper-phonetic-boundaries/v1'
 
 
 def test_unmatched_or_reversed_speech_does_not_get_invented_timing():
@@ -29,13 +29,12 @@ def test_flow_requires_explicit_sequence_and_keeps_words():
     assert flow_steps({'text':'流程：1. 如果失敗則停止；2. 否則繼續'})==[]
 
 
-def test_matching_anchors_around_recognition_error_keep_measured_times():
+def test_homophones_align_without_rewriting_the_script():
     texts=['先確認兩端的連接埠與完整資料。','第二段接著說明資料傳送的步驟。']
-    words=[{'word':'先確認兩端的連接部與完整資料','start':.2,'end':4},{'word':texts[1],'start':6,'end':9}]
+    words=[{'word':'先确认两端的连接部与完整资料','start':.2,'end':4},{'word':texts[1],'start':6,'end':9}]
     result=align_texts(texts,words,10)
     assert result['starts']==[0,6]
-    assert result['anchors'][0]['text'] in normalized(texts[0])
-    assert result['anchors'][0]['text'] in normalized(words[0]['word'])
+    assert '連接埠' in result['anchors'][0]['text']
     assert texts[0]=='先確認兩端的連接埠與完整資料。'
 
 
