@@ -30,15 +30,15 @@
 
 | 重點狀態 | 意義 |
 | --- | --- |
-| diagnostic_pass | 初篩答對 |
-| needs_review | 初篩答錯，最新補強尚未答對 |
-| remediation_pass | 補強答對 |
+| diagnostic_pass | 初篩第一次作答就答對，重點已完成 |
+| needs_review | 曾答錯，尚未連續答對兩道不同題 |
+| remediation_pass | 答錯後已連續答對兩道不同題，重點已完成 |
 | unanswered | 未作答 |
 | unavailable | 未發布題目 |
 
 未作答或生成失敗不算答錯，也不算通過。評量結果依進行中題組、待改善與未檢測重點投影為 in_progress、needs_review、passed 或 incomplete。
 
-補強答案標為 assisted，計入改善但不增加獨立掌握證據。掌握要求每個 Claim 具備不同的合格正確題與最新正確作答，詳見 [learning_states.py](../backend/src/learning_adaptation/learning_states.py)。
+補強作答仍標為 assisted 保存。重點完成規則為：第一次作答答對即完成；答錯後須連續答對兩道不同題（依 semantic identity 判別），再次答錯重新累積；完成後之後的錯誤不撤銷完成，詳見 [learning_states.py](../backend/src/learning_adaptation/learning_states.py) 的 `claim_completion`。
 
 ## 恢復與版本承接
 

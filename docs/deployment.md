@@ -29,8 +29,6 @@
   保留 exact Origin／Cookie；redirect 使用相對路徑。沒有新增 proxy trust chain。
 - 使用新版持久工作、Gemma runtime lock 與 migration baseline；公開網域、UID、port 與資料位置保持競賽設定。
 
-Podcast 由單一協調 worker 持有整份租約；`STUDYDY_PODCAST_WORKERS`（預設 1）控制各集製作及第一輪段落核對的並行數，文字請求共用 N 槽，不因兩層並行相乘。各集完成即保存，整批結束才釋放租約；中斷後從未完成步驟接續。前段修正影響後段核對依據時重核後段，語音 GPU 鎖維持原樣。
-
 Access 非必要。每次切換須先完成本機驗收與部署核准；啟動 connector 前必須完成本機 smoke，
 使用 `docker compose -f compose.yaml -f compose.tunnel.yaml --profile tunnel up -d --no-deps cloudflared`。
 日後管理前後端也須保留兩個 Compose 檔；不要用 base-only 設定意外撤掉 HTTPS／edge。
@@ -40,10 +38,7 @@ Access 非必要。每次切換須先完成本機驗收與部署核准；啟動 
 `STUDYDY_TEST_ENV_FILE`；Nginx test 指定兩個測試 image，僅使用測試 port 4183。
 資料測試使用 disposable DB；不得掛載產品資料或呼叫模型。
 
-本版從 migration 0001 到最新序列使用獨立 baseline，只能套用到空的新資料庫，不能直接升級舊競賽資料庫。
-核准切換後，先確認 DB 大小與剩餘空間，保存舊 image identity 與私有設定；停止寫入後執行 `pg_dump`，並以 `pg_restore --list` 驗證備份可讀。只重建 PostgreSQL DB，再從 0001 套用到最新 migration；artifact／原始 PDF 目錄原地保留，不改名、不搬移、不刪除。
-舊帳號不自動轉入新 DB；以已授權帳密透過 `/v1/accounts` 重新註冊，再執行登入檢查。舊檔保留供回復使用。
-回復時使用舊 images、設定與經驗證的 DB dump，搭配原地保留的 artifact 目錄；不把新 SQL 套到舊資料，也不清除 volume。
+此 DB 只能從空資料庫依 0001 起的 migration 初始化，不能直接升級舊競賽資料庫。回復時使用舊 images、設定與經驗證的 DB dump，搭配原地保留的 artifact 目錄；不把新 SQL 套到舊資料，也不清除 volume。
 
 語音辨識與合成由本機獨立 `ops/podcast/provider.py` 提供 `/audio`、`/transcribe`、`/media-transcribe`、`/align`。
 以獨立 Python 環境安裝 `ops/podcast/stt-requirements.txt`，設定 `STUDYDY_STT_PYTHON`、`STUDYDY_STT_MODEL_DIR`、`STUDYDY_PODCAST_PROVIDER_TOKEN`；模型由本機目錄載入，不在請求時下載。
@@ -77,14 +72,8 @@ Backend 與其轉檔子程序使用 `STUDYDY_BACKEND_UID`（預設20002），GID
 
 Artifact仍採私有目錄／不可變發布檔契約，不能靠群組開權限繞過。具體遷移範圍、檔案數、擁有者切換及回滾命令應依本次部署狀態檔執行，不把整個資料根目錄一起變更，也不改主機共用 `.venv`。
 
-## PostgreSQL 18.6 安全更新
+## 其他部署注意
 
-PostgreSQL 映像與隔離測試 fixture 固定同一個 18.6-bookworm digest；psycopg／psycopg-binary 3.3.5 的正式 wheel 內含 libpq 18.6，更新 server 不會替換這份 client library。
+Podcast 講稿提示位於 `backend/src/runtime/podcast_script_generation.py`（`source-script/v17`），不在 ASR provider。
 
-[18.6 release notes](https://www.postgresql.org/docs/release/18.6/) 說明 18.5 未發布；同一 18 系列不需 dump／restore，但有針對既有索引的人工處置條件：GIN 統計需檢查是否應 ANALYZE，btree_gist 的浮點 NaN／bit 與 ltree 超長 label 等特定索引可能需 REINDEX。競賽版 `backend/migrations` 只建立一般 B-tree／unique 索引，沒有 GIN、btree_gist、ltree 或 extension 宣告，因此未找到適用這些特定重建要求的 repository 索引。此結論不涵蓋產品 DB 中手動建立而未記入 migrations 的物件；本輪沒有查詢或操作產品 DB。
-
-繁中提示更新：新題組使用 `source-span-single-choice/v3`，筆記契約為 `material-notes/v17`，localization 與 Podcast 核對提示各升為 v2。Gemma 講稿提示位於 `backend/src/runtime/podcast_script_generation.py`（`source-script/v17`），不在 ASR provider。封存 v1／v2 題組仍依原 lock 生成及驗證，已存資料與 hash 不重寫，無 migration；開 Pod 後另做真模型驗收。
-
-筆記生成契約為 `material-notes/v17`：新稿依原教材章節，模型核對一次後刪除不符內容，完整筆記每批對未涵蓋概念補寫並核對一次；複習速覽每章挑 3～5 條核心，缺漏概念保存在 `unorganized_concepts`，畫面與匯出不顯示。舊發布稿、Evidence 與已保存 lock／hash 不改寫，契約變更重試只清除未發布暫存。v16 新增 `0032_note_source_sections.sql` 的 `material_notes.published_metadata`，需與理解 `sections`／`unorganized_concepts` 的前端一起部署；舊稿兩欄回空陣列。
-
-`0033_maintenance_budget_range.sql` 把 0021 的 DB 約束 `demo_reanalysis_budget` 改為每個維護 run 自訂上限（`limit` 1～2000，`reserved_calls` 不超過該 run 的 `limit`）；`create_revision(..., full_reanalysis=True)` 建立的工作仍是 300，已存在的 run 不變。經使用者授權的一次性維護重分析可設定較高上限，仍在外送前原子保留、不得超支；這類 run 可封存替換過來源的新 source set，發布時只核對新結構與該 run 自己的來源綁定，不要求與舊版相同。一般新增來源流程不變。
+`0033_maintenance_budget_range.sql` 讓每個一次性維護重分析 run 自訂模型請求上限（`limit` 1～2000；`create_revision(..., full_reanalysis=True)` 建立的工作預設 300），仍在外送前原子保留、不得超支；這類 run 可封存替換過來源的新 source set，發布時只核對新結構與該 run 自己的來源綁定。執行前須取得使用者對教材與額度的授權；一般新增來源流程不變。

@@ -14,6 +14,7 @@ Podcast 逐集生成講稿後配音，可勾選同時生成教學影片；語音
 
 以 Docker Compose 提供 React 前端、FastAPI、PostgreSQL 與隔離轉檔。教材擷取使用 PyMuPDF 原生文字與 Tesseract 圖片文字；分析與出題呼叫已部署的 Gemma HTTP／HTTPS 服務。文字層直接採用，純文字圖片頁以 chi_tra+eng 辨識；公式／表格頁標示需對照原圖。
 
+- [公開部署](docs/deployment.md)：InnoServe 公開站的 Compose、tunnel、provider 與回復設定。
 - [安裝與啟動](docs/getting-started.md)：主機需求、設定、服務管理與備份。預設入口 http://127.0.0.1:4176。
 - [使用指南](docs/usage.md)：教材、地圖、練習與進度恢復。
 - [測試](docs/testing.md)：不需模型的容器測試及隔離 API／瀏覽器回歸。
