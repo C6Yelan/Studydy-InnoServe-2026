@@ -68,7 +68,7 @@ class StoredAssessment:
     mastery_qualified: bool
 
 
-# 只擋重複失控；Luna 時期題幹最長約 80 字、選項約 50 字。解析是 Gemma 後新增欄位，
+# 只擋重複失控；先前模型時期題幹最長約 80 字、選項約 50 字。解析是 Gemma 後新增欄位，
 # 需完整包含正確答案，上限放寬。
 PROMPT_MAX_LENGTH = 1000
 OPTION_MAX_LENGTH = 500
