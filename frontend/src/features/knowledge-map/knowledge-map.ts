@@ -69,7 +69,8 @@ export function learningNavigationItems(view: MapView) {
     .map((step) => ({ concept: byId.get(step.concept_id)!, step }));
 }
 
-export function initialFocusConceptId(view: MapView): string {
+/** 有學習進度時以目前概念為中心；它沒有任何連線時，改從它在路徑上的位置往後找最近的連線概念，避免一打開只剩孤立卡片。 */
+export function initialFocusConceptId(view: MapView, currentConceptId?: string): string {
   const neighbours = new Map<string, Set<string>>();
   for (const relation of view.relations) {
     if (relation.source_concept_id === relation.target_concept_id) continue;
@@ -81,12 +82,16 @@ export function initialFocusConceptId(view: MapView): string {
       neighbours.get(id)!.add(other);
     }
   }
+  if (currentConceptId && neighbours.has(currentConceptId)) return currentConceptId;
+  const path = [...view.initial_learning_path].sort((a, b) => a.position - b.position);
+  const start = Math.max(0, path.findIndex((step) => step.concept_id === currentConceptId));
+  const ordered = [...path.slice(start), ...path.slice(0, start)];
   // Prefer the earliest concept that connects several ideas, without changing the path.
   return (
-    view.initial_learning_path.find((step) => (neighbours.get(step.concept_id)?.size ?? 0) > 1)
-      ?.concept_id ??
-    view.initial_learning_path.find((step) => neighbours.has(step.concept_id))?.concept_id ??
-    view.initial_learning_path[0]?.concept_id ??
+    ordered.find((step) => (neighbours.get(step.concept_id)?.size ?? 0) > 1)?.concept_id ??
+    ordered.find((step) => neighbours.has(step.concept_id))?.concept_id ??
+    currentConceptId ??
+    path[0]?.concept_id ??
     view.concepts[0]?.concept_id ??
     ""
   );

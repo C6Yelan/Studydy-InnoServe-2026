@@ -42,6 +42,8 @@ test("first visit starts with a connected concept without changing the learning 
   assert.equal(initialFocusConceptId(map), "b");
   assert.equal(map.initial_learning_path[0].concept_id, "cover");
   assert.equal(initialFocusConceptId({ ...map, relations: [] }), "cover");
+  assert.equal(initialFocusConceptId(map, "c"), "c");
+  assert.equal(initialFocusConceptId(map, "cover"), "b");
 });
 
 const navigation = {

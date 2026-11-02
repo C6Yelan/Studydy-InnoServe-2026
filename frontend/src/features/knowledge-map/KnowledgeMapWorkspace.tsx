@@ -972,7 +972,7 @@ export function KnowledgeMapWorkspace({
   view: KnowledgeOutlineView;
 }) {
   const difficulty = useConceptDifficulty(apiClient, mapRoute.materialId, view.knowledge_structure_revision);
-  const initialConceptId = progress?.current_concept_id ?? initialFocusConceptId(view);
+  const initialConceptId = initialFocusConceptId(view, progress?.current_concept_id ?? undefined);
   // 只記住目前瀏覽器紀錄的呈現位置；登入、作答與 learner progress 仍由 API 管理。
   const [restored] = useState(() => {
     const saved = window.history.state?.knowledgeMap;
@@ -1040,9 +1040,9 @@ export function KnowledgeMapWorkspace({
       progress?.current_concept_id &&
       view.concepts.some((concept) => concept.concept_id === progress.current_concept_id)
     ) {
-      setSelectedConceptId(progress.current_concept_id);
+      setSelectedConceptId(initialFocusConceptId(view, progress.current_concept_id));
     }
-  }, [progress?.study_session_id, progress?.current_concept_id, view.concepts]);
+  }, [progress?.study_session_id, progress?.current_concept_id, view]);
   const selectedRelation = view.relations.find((relation) => relation.relation_id === relationId);
   const query = searchQuery.trim().toLocaleLowerCase();
   const [searchState, setSearchState] = useState<{ query: string; ids: string[]; error: string | null }>({ query: "", ids: [], error: null });
